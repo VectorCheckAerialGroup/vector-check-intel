@@ -103,7 +103,7 @@ st.markdown(f"""
         <strong style="color: #8E949E; text-transform: uppercase;">METAR</strong><br>
         {metar}<br><br>
         <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
-        {taf.('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}
+        {taf ('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}
     </div>
     """, unsafe_allow_html=True)
 
