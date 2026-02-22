@@ -43,9 +43,7 @@ model_api_map = {
 # 3. HELPERS
 def apply_tactical_highlights(text):
     if not text: return ""
-    # Freezing Precipitation
     text = re.sub(r'\b(FZRA|FZDZ|PL|FZFG)\b', r'<span class="fz-warn">\1</span>', text)
-    # Visibility
     def vis_match(m):
         try:
             s = m.group(0).replace('SM', '').strip()
@@ -55,7 +53,6 @@ def apply_tactical_highlights(text):
         except: pass
         return m.group(0)
     text = re.sub(r'\b(?:\d+\s+)?(?:\d+/\d+|\d+)SM\b', vis_match, text)
-    # Ceiling
     def sky_match(m):
         try:
             h = int(m.group(2)) * 100
@@ -103,22 +100,12 @@ def fetch_mission_data(lat, lon, model_url):
 
 # 5. RENDER
 st.title("Atmospheric Risk Management")
-st.caption("Vector Check Aerial Group Inc. | Tactical Operations Dashboard")
+st.caption("Vector Check Aerial Group Inc.")
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
-st.markdown(f"""
-    <div style="background-color: #1B1E23; padding: 15px; border: 1px solid #2D3139; border-radius: 5px; color: #D1D5DB;">
-        <div class="obs-text">
-            <strong style="color: #8E949E; text-transform: uppercase;">METAR/SPECI</strong><br>
-            {metar_raw}<br><br>
-            <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
-            {taf_raw}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
+st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
 st.divider()
 
 if data and "hourly" in data:
@@ -130,34 +117,69 @@ if data and "hourly" in data:
     t, rh, w_spd, wx = h['temperature_2m'][idx], h['relative_humidity_2m'][idx], h['wind_speed_10m'][idx], h['weather_code'][idx]
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_display = "SFC" if t <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
+    c_base_ft = int((t - (t - ((100-rh)/5)))*400) if rh else 10000
 
     c = st.columns(8)
-    c[0].metric("Temp", f"{t}°C")
-    c[1].metric("RH", f"{rh}%")
-    c[2].metric("Wind Dir", f"{int(h['wind_direction_10m'][idx]):03d}°")
-    c[3].metric("Wind Spd", f"{int(w_spd)} kt")
-    c[4].metric("Precip Type", get_precip_type(wx))
-    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
-    c[6].metric("Freezing LVL", frz_display)
-    c[7].metric("Cloud Base", f"{int((t - (t - ((100-rh)/5)))*400)} ft")
+    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{int(h['wind_direction_10m'][idx]):03d}°")
+    c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
+    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_display)
+    c[7].metric("Cloud Base", f"{c_base_ft} ft")
 
     st.subheader("Tactical Hazard Stack")
     
-    # Backend Safety Logic (Synthetic Gust)
     raw_gust = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gust <= w_spd else raw_gust
-
     upper_v = h.get('wind_speed_120m', h.get('wind_speed_100m', [w_spd*1.5]*len(h['time'])))[idx]
     upper_h = 120 if h.get('wind_speed_120m') else 100
 
     stack = []
     for alt in [400, 300, 200, 100]:
+        # Logarithmic Wind Profile
         spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3/10) / math.log(upper_h/10))
         cur_gst = spd * (gst / max(w_spd, 1))
-        status = "NO-GO (GUST)" if cur_gst > 25 else ("CAUTION (WIND)" if spd > 20 else "NOMINAL")
-        stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
+        
+        # --- TURBULENCE LOGIC ---
+        shear = spd - w_spd
+        if wx in [95, 96, 99]: # Thunderstorm present
+            turb_type = "CVCTV"
+            turb_sev = "SEV" if cur_gst > 25 else "MDT"
+        elif shear > 10 and w_spd > 15: # High gradient over short vertical distance
+            turb_type = "LLWS"
+            turb_sev = "SEV" if shear > 15 else "MDT"
+        else: # Standard friction/boundary layer
+            turb_type = "MECH"
+            turb_sev = "SEV" if cur_gst > 25 else ("MDT" if cur_gst > 15 else "LGT")
+        
+        turb_final = "NONE" if cur_gst < 10 else f"{turb_sev} {turb_type}"
+
+        # --- ICING LOGIC ---
+        t_alt = t - (2.0 * (alt / 1000.0)) # Standard 2C/1000ft lapse rate
+        in_moisture = (rh > 85) or (alt >= c_base_ft) or (wx > 50)
+        
+        if not in_moisture or t_alt > 0 or t_alt < -20:
+            ice_final = "NONE"
+        else:
+            if wx in [56, 57, 66, 67]: # Active Freezing Rain/Drizzle
+                ice_type, ice_sev = "CLR", "SEV"
+            elif t_alt > -5:
+                ice_type, ice_sev = "CLR", "MDT" if rh > 90 else "LGT"
+            elif t_alt > -15:
+                ice_type, ice_sev = "MXD", "MDT" if rh > 90 else "LGT"
+            else:
+                ice_type, ice_sev = "RIME", "LGT"
+            ice_final = f"{ice_sev} {ice_type}"
+
+        stack.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Wind (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
     
-    st.table(pd.DataFrame(stack))
+    # Render table with 'Alt (AGL)' as the index to remove the numbered column
+    df_stack = pd.DataFrame(stack).set_index("Alt (AGL)")
+    st.table(df_stack)
 
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
