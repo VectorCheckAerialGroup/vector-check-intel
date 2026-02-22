@@ -6,48 +6,35 @@ import matplotlib.pyplot as plt
 from metpy.plots import SkewT
 from metpy.units import units
 import io
+import re
 from datetime import datetime
 
-# 1. PAGE CONFIG & UI LOCK
+# 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
 
-# CUSTOM CSS: REFINED DARK THEME
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;700&display=swap');
+    .stApp { background-color: #0E1117; font-family: 'Inter', sans-serif; }
     
-    .centered-table {
-        display: flex;
-        justify-content: center;
-        margin-bottom: 20px;
+    .weather-box {
+        background-color: #161B22;
+        border-radius: 8px;
+        padding: 18px;
+        border: 1px solid #30363D;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1rem;
+        line-height: 1.6;
+        margin-bottom: 12px;
+        color: #C9D1D9;
     }
     
-    table {
-        margin-left: auto;
-        margin-right: auto;
-        text-align: center !important;
-        width: 90%;
-        border-collapse: collapse;
-        background-color: transparent;
-    }
-    
-    th { 
-        text-align: center !important; 
-        color: #A0B0C5 !important;           
-        font-weight: bold !important;
-        padding: 10px !important;
-        border-bottom: 2px solid #3E444E !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    
-    td { 
-        text-align: center !important; 
-        padding: 8px !important;
-        color: #E0E0E0 !important;
-        border-bottom: 1px solid #2D3139 !important;
-    }
+    .ifr-highlight { color: #FF4B4B; font-weight: bold; background-color: rgba(255, 75, 75, 0.15); padding: 2px 6px; border-radius: 4px; border: 1px solid #FF4B4B; }
+    .mvfr-highlight { color: #FFD700; font-weight: bold; background-color: rgba(255, 215, 0, 0.15); padding: 2px 6px; border-radius: 4px; border: 1px solid #FFD700; }
+    .vfr-highlight { color: #78E08F; font-weight: bold; }
+
+    [data-testid="stMetricValue"] { font-size: 1.6rem !important; color: #FFFFFF !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; color: #8E949E !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -59,6 +46,31 @@ lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
 icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper()
 
+# 3. WEATHER TEXT PARSING
+def get_flight_cat_html(text, station_id):
+    if not text or "No" in text or "Sync" in text: return f"<div class='weather-box'>{text}</div>"
+    is_ifr = re.search(r'(BKN00[0-9]|OVC00[0-9]|VV00[0-9])|(\s[0-2]/?[0-9]?SM)', text)
+    is_mvfr = re.search(r'(BKN0[1-2][0-9]|OVC0[1-2][0-9])|(\s[3-5]SM)', text)
+    
+    if is_ifr:
+        return f"<div class='weather-box'><span class='ifr-highlight'>IFR</span> | {text}</div>"
+    elif is_mvfr:
+        return f"<div class='weather-box'><span class='mvfr-highlight'>MVFR</span> | {text}</div>"
+    else:
+        return f"<div class='weather-box'><span class='vfr-highlight'>[VFR]</span> | {text}</div>"
+
+# Fetch Aviation Text
+try:
+    m_raw = requests.get(f"https://aviationweather.gov/api/data/metar?ids={icao}", timeout=5).text.strip()
+    t_raw = requests.get(f"https://aviationweather.gov/api/data/taf?ids={icao}", timeout=5).text.strip()
+except:
+    m_raw = t_raw = "Data Sync Error"
+
+st.subheader(f"📡 Aviation Feed: {icao}")
+st.markdown(get_flight_cat_html(m_raw, icao), unsafe_allow_html=True)
+st.markdown(get_flight_cat_html(t_raw, icao), unsafe_allow_html=True)
+
+# 4. PRIMARY DATA LOOP
 @st.cache_data(ttl=600)
 def fetch_mission_data(latitude, longitude):
     url = "https://api.open-meteo.com/v1/forecast"
@@ -67,146 +79,92 @@ def fetch_mission_data(latitude, longitude):
         "latitude": latitude, "longitude": longitude,
         "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", 
                    "wind_direction_10m", "visibility", "weather_code", "wind_speed_80m", 
-                   "wind_speed_120m", "freezing_level_height", "cloud_cover", "is_day"] + 
+                   "wind_speed_120m", "freezing_level_height"] + 
                    [f"temperature_{p}hPa" for p in p_levels] + 
                    [f"dewpoint_{p}hPa" for p in p_levels],
         "forecast_days": 2, "timezone": "UTC"
     }
-    try:
-        res = requests.get(url, params=params, timeout=15)
-        res.raise_for_status()
-        return res.json()
-    except: return None
+    return requests.get(url, params=params).json()
 
 data = fetch_mission_data(lat, lon)
 
-if data and "hourly" in data:
-    time_list = data["hourly"]["time"]
-    formatted_times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in time_list]
-    st.sidebar.subheader("Timeline (UTC)")
-    selected_time_str = st.sidebar.select_slider("Select Forecast Hour:", options=formatted_times, value=formatted_times[0])
-    idx = formatted_times.index(selected_time_str)
-else:
-    idx = 0
-
-@st.cache_data(ttl=300)
-def get_aviation_weather(station):
-    metar_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
-    taf_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
-    try:
-        m_res = requests.get(metar_url, timeout=10).text.strip()
-        t_res = requests.get(taf_url, timeout=10).text.strip()
-        return m_res if m_res else "No METAR.", t_res if t_res else "No TAF."
-    except: return "Sync Error", "Sync Error"
-
-def get_precip_type(code):
-    mapping = {0: "None", 51: "Drizzle", 56: "Fz Drizzle", 61: "Lgt Rain", 66: "Fz Rain", 71: "Lgt Snow", 95: "TS"}
-    return mapping.get(code, "None")
-
-def h_to_p(h_ft): return 1013.25 * (1 - (h_ft / 145366.45))**(1 / 0.190284)
-
-# 4. MAIN CONTENT
-metar_raw, taf_raw = get_aviation_weather(icao)
-st.subheader(f"📡 Official Aviation Text: {icao}")
-st.success(metar_raw)
-st.info(taf_raw)
-st.divider()
+def get_precip_name(code, temp):
+    codes = {0: "Nil", 51: "Drizzle", 61: "Rain", 71: "Snow", 95: "TS"}
+    base_name = codes.get(code, "Nil")
+    if base_name == "Rain" and temp <= 0: return "Fz Rain"
+    return base_name
 
 if data and "hourly" in data:
     h = data["hourly"]
-    def safe_get(key): return h.get(key)[idx]
+    time_list = h["time"]
+    formatted_times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in time_list]
+    selected_time_str = st.sidebar.select_slider("Select Forecast Window:", options=formatted_times)
+    idx = formatted_times.index(selected_time_str)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    t_s = safe_get('temperature_2m'); rh_s = safe_get('relative_humidity_2m')
-    dewpoint_s = t_s - ((100 - rh_s) / 5)
-    cloud_base_ft = int((t_s - dewpoint_s) * 400)
+    st.divider()
+    # METRICS ROW
+    m1, m2, m3, m4, m5 = st.columns(5)
+    t_s = h['temperature_2m'][idx]
+    frz_lvl_m = h['freezing_level_height'][idx]
     
-    m1.metric("Temperature", f"{int(t_s)}°C")
-    m2.metric("Humidity", f"{int(rh_s)}%")
-    m3.metric("Wind", f"{int(safe_get('wind_direction_10m'))}° @ {int(round(safe_get('wind_speed_10m')))}k/h")
-    m4.metric("Precip / Vis", f"{get_precip_type(safe_get('weather_code'))} / {int(safe_get('visibility')/1000)}km")
-    m5.metric("Freezing Level", f"{int(safe_get('freezing_level_height') * 3.28084):,}ft")
-    m6.metric("Cloud Base/Amt", f"{cloud_base_ft if cloud_base_ft > 500 else 'SFC'}ft / {int(safe_get('cloud_cover'))}%")
+    m1.metric("Sfc Temp", f"{int(t_s)}°C")
+    m2.metric("Sfc Wind", f"{int(h['wind_direction_10m'][idx])}°@{int(h['wind_speed_10m'][idx])}k/h")
+    m3.metric("Precip Type", get_precip_name(h['weather_code'][idx], t_s))
+    m4.metric("Freezing Lvl", f"{int(frz_lvl_m * 3.28084):,}ft")
+    m5.metric("Vis Range", f"{int(h['visibility'][idx]/1000)}km")
 
-    st.subheader(f"📊 Low-Level Hazard Stack (Valid: {selected_time_str})")
-    w10, w80, w120 = safe_get("wind_speed_10m"), safe_get("wind_speed_80m"), safe_get("wind_speed_120m")
-    z_ft = [50, 100, 200, 300, 400]
+    # 5. HAZARD STACK WITH VERTICAL PRECIP LOGIC
+    st.subheader(f"📊 Low-Level Hazard Stack ({selected_time_str})")
+    z_ft = [400, 300, 200, 100, 50]
+    w10, w80, w120 = h["wind_speed_10m"][idx], h["wind_speed_80m"][idx], h["wind_speed_120m"][idx]
     w_interp = np.interp([z * 0.3048 for z in z_ft], [10, 80, 120], [w10, w80, w120])
-    is_day = safe_get('is_day')
     
     stack_data = []
     for i, alt in enumerate(z_ft):
-        spd = int(round(w_interp[i]))
-        prev_spd = int(round(w_interp[i-1])) if i > 0 else spd
-        shear = abs(spd - prev_spd)
+        # Vertical Precip Logic: If altitude > freezing level, it's likely frozen/freezing
+        alt_m = alt * 0.3048
+        is_below_freezing = alt_m >= frz_lvl_m
+        p_type = get_precip_name(h['weather_code'][idx], -1 if is_below_freezing else 5)
         
-        if shear > 15: turb = "Severe LLWS"
-        elif shear > 8: turb = "Mod LLWS"
-        elif spd > 35: turb = "Severe Mechanical"
-        elif spd > 22: turb = "Mod Mechanical"
-        elif is_day and safe_get('cloud_cover') < 30 and t_s > 20: turb = "Lgt Convective"
-        elif spd > 12: turb = "Lgt Mechanical"
-        else: turb = "Nil"
-        
-        ice = "Nil"
-        if t_s < 3 and (t_s - dewpoint_s) < 3.0:
-            if t_s < -15: ice = "Mod Rime"
-            elif t_s < -10: ice = "Mod Mixed"
-            elif t_s < -2: ice = "Mod Clear"
-            elif t_s <= 0: ice = "Lgt Clear"
-            else: ice = "Trace Mixed"
-
-        stack_data.append({"Alt (AGL)": f"{alt} ft", "km/h": spd, "Turbulence": turb, "Icing": ice})
+        stack_data.append({
+            "Altitude (AGL)": f"{alt} ft",
+            "Wind Speed": f"{int(w_interp[i])} k/h",
+            "Turbulence": "Moderate" if w_interp[i] > 22 else "Light" if w_interp[i] > 12 else "Nil",
+            "Icing / Precip": p_type if h['weather_code'][idx] != 0 else "Clear"
+        })
     
-    df_stack = pd.DataFrame(stack_data).iloc[::-1]
-    styler = df_stack.style.set_properties(**{'text-align': 'center'}).hide(axis='index')
-    
-    st.markdown('<div class="centered-table">', unsafe_allow_html=True)
-    st.write(styler.to_html(), unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(stack_data), hide_index=True, use_container_width=True)
 
-    # --- UPDATED SOUNDING WITH BRIGHTER BACKGROUND ---
+    # 6. VERTICAL PROFILE (SKEW-T)
     st.divider()
-    st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
+    st.subheader("🌡️ Vertical Synoptic Profile (Skew-T)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_vals = np.array([safe_get(f'temperature_{p}hPa') for p in p_levels])
-    td_vals = np.array([safe_get(f'dewpoint_{p}hPa') for p in p_levels])
+    t_vals = np.array([h.get(f'temperature_{p}hPa')[idx] for p in p_levels])
+    td_vals = np.array([h.get(f'dewpoint_{p}hPa')[idx] for p in p_levels])
     
-    fig = plt.figure(figsize=(10, 35)) 
+    fig = plt.figure(figsize=(10, 18))
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
-    
-    # BRIGHTER PLOT BACKGROUND FOR CONTRAST
-    skew.ax.set_facecolor('#252930')
+    skew.ax.set_facecolor('#1B1E23')
 
-    skew.ax.tick_params(colors='#E0E0E0', labelsize=12)
-    skew.ax.xaxis.label.set_color('#E0E0E0')
-    skew.ax.yaxis.label.set_color('#E0E0E0')
-    for spine in skew.ax.spines.values():
-        spine.set_edgecolor('#4B5563')
+    skew.ax.tick_params(colors='#D1D5DB', labelsize=10)
+    skew.plot_dry_adiabats(color='#E58E26', alpha=0.3, linewidth=1, linestyle='--')
+    skew.plot_moist_adiabats(color='#4A69BD', alpha=0.3, linewidth=1, linestyle='--')
+    
+    # 8px line width for "Vector Check" profile pop
+    skew.plot(p_levels, t_vals * units.degC, '#FF4B4B', linewidth=8, label='Temperature')
+    skew.plot(p_levels, td_vals * units.degC, '#00FF41', linewidth=8, label='Dewpoint')
+    
+    # Altitude markings
+    for alt_l in [1000, 3000, 5000, 10000, 15000]:
+        p_val = 1013.25 * (1 - (alt_l / 145366.45))**(1 / 0.190284)
+        skew.ax.text(-39, p_val, f"{alt_l:,}ft", color='#9CA3AF', fontsize=12, ha='right')
 
-    # Adiabats - Brighter alpha for readability
-    skew.plot_dry_adiabats(color='#FF8C00', alpha=0.28, linewidth=1.2)
-    skew.plot_moist_adiabats(color='#1E90FF', alpha=0.28, linewidth=1.2)
-    
-    # Data Lines
-    skew.plot(p_levels, t_vals * units.degC, '#FF3131', linewidth=6, label='Temp')
-    skew.plot(p_levels, td_vals * units.degC, '#39FF14', linewidth=6, label='Dewpt')
-    
-    for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
-        p_val = h_to_p(alt_label)
-        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#D1D5DB', fontsize=15, fontweight='bold', ha='right')
-        skew.ax.axhline(p_val, color='white', alpha=0.1, linestyle='-')
-            
-    skew.ax.axvline(0, color='#00FFFF', linestyle='--', alpha=0.5, linewidth=2)
-    
-    plt.ylim(1050, 400); plt.xlim(-40, 40)
-    
-    leg = plt.legend(loc='upper right', prop={'size': 13}, frameon=True)
+    leg = plt.legend(loc='upper right', prop={'size': 12})
     leg.get_frame().set_facecolor('#0E1117')
-    leg.get_frame().set_edgecolor('#3E444E')
-    for text in leg.get_texts():
-        text.set_color('#E0E0E0')
+    for text in leg.get_texts(): text.set_color('#FFFFFF')
     
-    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=140, facecolor=fig.get_facecolor())
+    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=140, facecolor='#0E1117')
     st.image(buf, use_container_width=True)
+else:
+    st.warning("Awaiting Mission Parameter input or Data Feed offline.")
