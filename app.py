@@ -168,7 +168,7 @@ def get_aviation_weather(station):
 
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
     
     if "gem" in model_url: 
@@ -268,10 +268,9 @@ if data and "hourly" in data:
     # --- TABLE 2: EXTENDED TRAJECTORY (1000-5000ft) ---
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     
-    # Build Profile for Interpolation (pulling from deep pressure layers to cover 5000ft)
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
     p_profile = []
-    for p in p_levels:
+    for p in p_levels_traj:
         ws, wd, gh = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
         if ws and wd and gh and ws[idx] is not None and wd[idx] is not None and gh[idx] is not None:
             p_profile.append({'h_ft': gh[idx] * 3.28084, 'spd': ws[idx], 'dir': wd[idx]})
@@ -323,12 +322,57 @@ if data and "hourly" in data:
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
 
     st.divider()
-    p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
-    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
+    
+    # --- SKEW-T LOG-P DIAGRAM (WINDY STYLE) ---
+    p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
+    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    ws_plot = [h.get(f'wind_speed_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    wd_plot = [h.get(f'wind_direction_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
+    
     if all(v is not None for v in t_plot):
-        fig = plt.figure(figsize=(6, 8)); fig.patch.set_facecolor('#0E1117')
-        skew = SkewT(fig, rotation=45); skew.ax.set_facecolor('#1B1E23')
-        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2)
-        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2)
+        st.markdown("<h3 style='color: white;'>Sounding Forecast</h3>", unsafe_allow_html=True)
+        
+        fig = plt.figure(figsize=(9, 9))
+        fig.patch.set_facecolor('#222222')
+        skew = SkewT(fig, rotation=45)
+        skew.ax.set_facecolor('#222222')
+        
+        # Wind Barbs Calculation
+        u_plot, v_plot, barb_p = [], [], []
+        for p_val, ws_val, wd_val in zip(p_levs_plot, ws_plot, wd_plot):
+            if ws_val is not None and wd_val is not None:
+                u_plot.append(-ws_val * np.sin(np.radians(wd_val)))
+                v_plot.append(-ws_val * np.cos(np.radians(wd_val)))
+                barb_p.append(p_val)
+        
+        # Plot T and Td
+        skew.plot(p_levs_plot, np.array(t_plot) * units.degC, '#e74c3c', linewidth=2.5) # Red T
+        skew.plot(p_levs_plot, np.array(td_plot) * units.degC, '#3498db', linewidth=2.5) # Blue Td
+        
+        # Plot Barbs
+        if u_plot:
+            skew.plot_barbs(barb_p, np.array(u_plot) * units.knots, np.array(v_plot) * units.knots, color='white', length=6)
+            
+        # Graph Styling & Limits
+        skew.ax.set_ylim(1000, 200)
+        skew.ax.set_xlim(-40, 40)
+        skew.ax.axvline(0, color='#B976AC', linestyle='--', linewidth=1.5, alpha=0.8) # 0C Isotherm
+        
+        skew.plot_dry_adiabats(t0=np.arange(233, 533, 10) * units.K, alpha=0.25, color='#e67e22', linestyles='dashed')
+        skew.plot_moist_adiabats(t0=np.arange(233, 323, 5) * units.K, alpha=0.25, color='#27ae60', linestyles='dashed')
+        skew.plot_mixing_lines(alpha=0.2, color='#8e44ad', linestyles='dotted')
+        
+        skew.ax.tick_params(axis='both', colors='white', labelsize=10)
+        for spine in skew.ax.spines.values():
+            spine.set_color('#555555')
+            
+        skew.ax.set_ylabel('hPa', color='white')
+        skew.ax.set_xlabel('°C', color='white')
+        
+        # Approximations for visual metadata
+        if t is not None and td is not None:
+            lcl_approx = 400 * (t - rh) if rh else 1000 # Rough LCL
+            plt.figtext(0.12, 0.05, f"lcl (est): {int(lcl_approx)}ft   elevation: {int(lat*10)}ft", color='#A0A4AB', fontsize=11)
+
         st.pyplot(fig)
