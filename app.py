@@ -225,6 +225,46 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
+    # --- TABLE 1: TACTICAL BOUNDARY LAYER (0-400ft) ---
+    st.subheader("Tactical Hazard Stack (0-400ft AGL)")
+    stack_tactical = []
+    for alt in [400, 300, 200, 100]:
+        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
+        cur_gst = spd * (gst / max(w_spd, 1))
+        
+        diff = (upper_dir - sfc_dir + 180) % 360 - 180
+        dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
+
+        max_w = max(spd, cur_gst)
+        shear_kt = spd - w_spd
+        shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
+        
+        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 15: turb_sev = "NONE"
+            elif max_w < 20: turb_sev = "LGT"
+            elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
+            elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
+            elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
+            else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+
+        ice_final = "NONE"
+        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+
+        stack_tactical.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": f"{int(dir_val):03d}°",
+            "Spd (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
+
     # --- TABLE 2: EXTENDED TRAJECTORY (1000-5000ft) ---
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     
@@ -281,46 +321,6 @@ if data and "hourly" in data:
             "Icing": ice_final
         })
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
-
-    # --- TABLE 1: TACTICAL BOUNDARY LAYER (0-400ft) ---
-    st.subheader("Tactical Hazard Stack (0-400ft AGL)")
-    stack_tactical = []
-    for alt in [400, 300, 200, 100]:
-        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
-        cur_gst = spd * (gst / max(w_spd, 1))
-        
-        diff = (upper_dir - sfc_dir + 180) % 360 - 180
-        dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
-
-        max_w = max(spd, cur_gst)
-        shear_kt = spd - w_spd
-        shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
-        
-        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-        elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
-        else:
-            turb_type = "MECH"
-            if max_w < 15: turb_sev = "NONE"
-            elif max_w < 20: turb_sev = "LGT"
-            elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
-            elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
-            elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
-            else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
-        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
-
-        ice_final = "NONE"
-        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-
-        stack_tactical.append({
-            "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{int(dir_val):03d}°",
-            "Spd (kt)": int(spd), 
-            "Gust (kt)": int(cur_gst), 
-            "Turbulence": turb_final,
-            "Icing": ice_final
-        })
-    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
 
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
