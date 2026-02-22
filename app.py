@@ -79,7 +79,7 @@ def get_precip_type(code):
     if code in [71, 73, 75, 77, 85, 86]: return "Snow"
     return "Mixed"
 
-# 4. ICING LOGIC
+# 4. ICING LOGIC (TABLE 2, 3, 4 INTEGRATED)
 def calculate_icing_profile(hourly_data, idx, wx_code):
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     profile = []
@@ -137,7 +137,7 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
                     break
     return icing_result
 
-# 5. DATA FETCHING (PACE LINKS)
+# 5. DATA FETCHING (PRIMARY/FAILOVER PACE LINKS)
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
     API_KEY = "c453505478304bbbae7761f99c8a84ba" 
@@ -149,7 +149,8 @@ def get_aviation_weather(station):
             m_data = m_res.json()
             metars = [apply_tactical_highlights(r.get('raw_text', '')) for r in m_data.get('data', [])]
             for i in range(len(metars)):
-                if "SPECI" in metars[i]: metars[i] = metars[i].replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
+                if "SPECI" in metars[i]:
+                    metars[i] = metars[i].replace("SPECI", '<span style="color: #E58E26; font-weight: bold;">SPECI</span>')
             taf_raw = t_res.json()['data'][0].get('raw_text', "NO ACTIVE TAF")
             taf_final = re.sub(r'\b(FM\d{6}|TEMPO|PROB\d{2}|BECMG)\b', r'<br><b>\1</b>', apply_tactical_highlights(taf_raw))
             return "<br>".join(metars) if metars else "NO DATA", taf_final
@@ -168,19 +169,11 @@ def get_aviation_weather(station):
 
 @st.cache_data(ttl=600)
 def fetch_mission_data(lat, lon, model_url):
-    # Expanded up to 200hPa for predictive visualization
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
-    
-    if "gem" in model_url: 
-        hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m", "wind_direction_80m", "wind_direction_120m"]
-    else: 
-        hourly += ["wind_speed_100m", "wind_direction_100m"]
-        
-    hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels] + \
-              [f"geopotential_height_{p}hPa" for p in p_levels] + \
-              [f"wind_speed_{p}hPa" for p in p_levels] + [f"wind_direction_{p}hPa" for p in p_levels]
-              
+    if "gem" in model_url: hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m"]
+    else: hourly += ["wind_speed_100m"]
+    hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels] + [f"geopotential_height_{p}hPa" for p in p_levels]
     params = {"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC"}
     res = requests.get(model_url, params=params)
     return res.json() if res.status_code == 200 else None
@@ -202,176 +195,83 @@ if data and "hourly" in data:
     idx = times.index(selected_time)
     
     t, rh, w_spd, wx = h['temperature_2m'][idx], h['relative_humidity_2m'][idx], h['wind_speed_10m'][idx], h['weather_code'][idx]
-    sfc_dir = int(h['wind_direction_10m'][idx])
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_display = "SFC" if t <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
     c_base_ft = int((t - (t - ((100-rh)/5)))*400) if rh else 10000
 
     c = st.columns(8)
-    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
+    c[0].metric("Temp", f"{t}°C"); c[1].metric("RH", f"{rh}%"); c[2].metric("Wind Dir", f"{int(h['wind_direction_10m'][idx]):03d}°")
     c[3].metric("Wind Spd", f"{int(w_spd)} kt"); c[4].metric("Precip Type", get_precip_type(wx))
     c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm"); c[6].metric("Freezing LVL", frz_display)
     c[7].metric("Cloud Base", f"{c_base_ft} ft")
 
-    # PREPARE CORE VARIABLES
+    st.subheader("Tactical Hazard Stack")
     raw_gust = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gust <= w_spd else raw_gust
-    
-    if h.get('wind_speed_120m') and h['wind_speed_120m'][idx] is not None:
-        upper_v, upper_dir, upper_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
-    else:
-        upper_v, upper_dir, upper_h = h.get('wind_speed_100m', [w_spd*1.5])[idx], h.get('wind_direction_100m', [sfc_dir])[idx], 100
-    
+    upper_v = h.get('wind_speed_120m', h.get('wind_speed_100m', [w_spd*1.5]*len(h['time'])))[idx]
+    upper_h = 120 if h.get('wind_speed_120m') else 100
+
     icing_cond = calculate_icing_profile(h, idx, wx)
+    
+    # Boundary Layer Stability Check (Surface vs ~950hPa)
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
-    # --- TABLE 1: TACTICAL BOUNDARY LAYER (0-400ft) ---
-    st.subheader("Tactical Hazard Stack (0-400ft AGL)")
-    stack_tactical = []
+    stack = []
     for alt in [400, 300, 200, 100]:
-        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
+        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3/10) / math.log(upper_h/10))
         cur_gst = spd * (gst / max(w_spd, 1))
         
-        diff = (upper_dir - sfc_dir + 180) % 360 - 180
-        dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
-
+        # --- TURBULENCE LOGIC ---
         max_w = max(spd, cur_gst)
         shear_kt = spd - w_spd
         shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
         
-        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-        elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        if wx in [95, 96, 99]:
+            turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 20:
+            turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
         else:
             turb_type = "MECH"
-            if max_w < 15: turb_sev = "NONE"
-            elif max_w < 20: turb_sev = "LGT"
-            elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
-            elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
-            elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
-            else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+            if max_w < 15:
+                turb_sev = "NONE"
+            elif max_w < 20:
+                turb_sev = "LGT"
+            elif max_w < 25:
+                turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
+            elif max_w < 35:
+                turb_sev = "LGT" if terrain_type == "Water" else "MOD"
+            elif max_w < 40:
+                if terrain_type == "Water": turb_sev = "MOD"
+                elif terrain_type == "Land": turb_sev = "MOD-SEV"
+                else: turb_sev = "SEV"
+            else:
+                turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+
         turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
 
+        # --- ICING LOGIC ---
         ice_final = "NONE"
         if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
         elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
 
-        stack_tactical.append({
+        stack.append({
             "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{int(dir_val):03d}°",
-            "Spd (kt)": int(spd), 
+            "Wind (kt)": int(spd), 
             "Gust (kt)": int(cur_gst), 
             "Turbulence": turb_final,
             "Icing": ice_final
         })
-    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
-
-    # --- TABLE 2: EXTENDED TRAJECTORY (1000-5000ft) ---
-    st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     
-    p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
-    p_profile = []
-    for p in p_levels_traj:
-        ws, wd, gh = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
-        if ws and wd and gh and ws[idx] is not None and wd[idx] is not None and gh[idx] is not None:
-            p_profile.append({'h_ft': gh[idx] * 3.28084, 'spd': ws[idx], 'dir': wd[idx]})
-    p_profile = sorted(p_profile, key=lambda x: x['h_ft'])
-
-    stack_ext = []
-    for alt in [5000, 4000, 3000, 2000, 1000]:
-        pts = [{'h_ft': upper_h * 3.28084, 'spd': upper_v, 'dir': upper_dir}] + p_profile
-        below, above = pts[0], pts[-1]
-        for i in range(len(pts)-1):
-            if pts[i]['h_ft'] <= alt <= pts[i+1]['h_ft']:
-                below, above = pts[i], pts[i+1]
-                break
-        
-        if below['h_ft'] == above['h_ft']:
-            spd, dir_val = below['spd'], below['dir']
-        else:
-            fraction = max(0, min(1, (alt - below['h_ft']) / (above['h_ft'] - below['h_ft'])))
-            spd = below['spd'] + fraction * (above['spd'] - below['spd'])
-            diff = (above['dir'] - below['dir'] + 180) % 360 - 180
-            dir_val = (below['dir'] + diff * fraction) % 360
-        
-        cur_gst = spd + (max(0, gst - w_spd) * math.exp(-alt / 1500))
-
-        max_w = max(spd, cur_gst)
-        shear_per_1000 = ((spd - upper_v) / alt) * 1000 if alt > 0 else 0
-        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-        elif is_stable and shear_per_1000 >= 15: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 30 else "MDT")
-        else:
-            turb_type = "MECH"
-            if max_w < 20: turb_sev = "NONE"
-            elif max_w < 30: turb_sev = "LGT"
-            elif max_w < 45: turb_sev = "MOD"
-            else: turb_sev = "SEV"
-        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
-
-        ice_final = "NONE"
-        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-
-        stack_ext.append({
-            "Alt (AGL)": f"{alt}ft", 
-            "Dir": f"{int(dir_val):03d}°",
-            "Spd (kt)": int(spd), 
-            "Gust (kt)": int(cur_gst), 
-            "Turbulence": turb_final,
-            "Icing": ice_final
-        })
-    st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
+    st.table(pd.DataFrame(stack).set_index("Alt (AGL)"))
 
     st.divider()
-    
-    # --- SKEW-T LOG-P DIAGRAM (PREDICTIVE VISUALIZATION) ---
-    p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200]
-    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    ws_plot = [h.get(f'wind_speed_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    wd_plot = [h.get(f'wind_direction_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs_plot]
-    
+    p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    t_plot = [h.get(f'temperature_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
+    td_plot = [h.get(f'dewpoint_{p}hPa', [None]*len(h['time']))[idx] for p in p_levs]
     if all(v is not None for v in t_plot):
-        fig = plt.figure(figsize=(9, 9))
-        fig.patch.set_facecolor('#222222')
-        skew = SkewT(fig, rotation=45)
-        skew.ax.set_facecolor('#222222')
-        
-        # Wind Barbs Calculation
-        u_plot, v_plot, barb_p = [], [], []
-        for p_val, ws_val, wd_val in zip(p_levs_plot, ws_plot, wd_plot):
-            if ws_val is not None and wd_val is not None:
-                u_plot.append(-ws_val * np.sin(np.radians(wd_val)))
-                v_plot.append(-ws_val * np.cos(np.radians(wd_val)))
-                barb_p.append(p_val)
-        
-        # Plot T and Td
-        skew.plot(p_levs_plot, np.array(t_plot) * units.degC, '#e74c3c', linewidth=2.5) # Red T
-        skew.plot(p_levs_plot, np.array(td_plot) * units.degC, '#3498db', linewidth=2.5) # Blue Td
-        
-        # Plot Barbs
-        if u_plot:
-            skew.plot_barbs(barb_p, np.array(u_plot) * units.knots, np.array(v_plot) * units.knots, color='white', length=6)
-            
-        # Graph Styling & Limits
-        skew.ax.set_ylim(1000, 200)
-        skew.ax.set_xlim(-40, 40)
-        skew.ax.axvline(0, color='#B976AC', linestyle='--', linewidth=1.5, alpha=0.8) # 0C Isotherm
-        
-        skew.plot_dry_adiabats(t0=np.arange(233, 533, 10) * units.K, alpha=0.25, color='#e67e22', linestyles='dashed')
-        skew.plot_moist_adiabats(t0=np.arange(233, 323, 5) * units.K, alpha=0.25, color='#27ae60', linestyles='dashed')
-        skew.plot_mixing_lines(alpha=0.2, color='#8e44ad', linestyles='dotted')
-        
-        skew.ax.tick_params(axis='both', colors='white', labelsize=10)
-        for spine in skew.ax.spines.values():
-            spine.set_color('#555555')
-            
-        skew.ax.set_ylabel('hPa', color='white')
-        skew.ax.set_xlabel('°C', color='white')
-        
-        # Approximations for visual metadata
-        if t is not None and td is not None:
-            lcl_approx = 400 * (t - rh) if rh else 1000 # Rough LCL
-            plt.figtext(0.12, 0.05, f"lcl (est): {int(lcl_approx)}ft   elevation: {int(lat*10)}ft", color='#A0A4AB', fontsize=11)
-
+        fig = plt.figure(figsize=(6, 8)); fig.patch.set_facecolor('#0E1117')
+        skew = SkewT(fig, rotation=45); skew.ax.set_facecolor('#1B1E23')
+        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2)
+        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2)
         st.pyplot(fig)
