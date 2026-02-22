@@ -27,7 +27,7 @@ st.markdown("""
 
 # 2. SIDEBAR & LOGO
 try:
-    logo = Image.open("VCAG Inc - Logo Final.jpg")
+    logo = VCAG Inc - Logo Final.png
     st.sidebar.image(logo, use_container_width=True)
 except FileNotFoundError:
     st.sidebar.warning("Logo file not found. Place 'VCAG Inc - Logo Final.jpg' in the script directory.")
