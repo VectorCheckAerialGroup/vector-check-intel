@@ -11,7 +11,7 @@ from datetime import datetime
 # 1. PAGE CONFIG & UI LOCK
 st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
 
-# CUSTOM CSS: TACTICAL DARK THEME FOR TABLE
+# CUSTOM CSS: REFINED DARK THEME
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
@@ -32,21 +32,23 @@ st.markdown("""
         background-color: transparent;
     }
     
-    /* TACTICAL HEADERS: Gold/Yellow Text on Dark Transparent */
+    /* REFINED HEADERS: Muted Slate-Blue Text */
     th { 
         text-align: center !important; 
-        color: #FFD700 !important;           
+        color: #A0B0C5 !important;           
         font-weight: bold !important;
         padding: 10px !important;
-        border-bottom: 2px solid #444 !important;
+        border-bottom: 2px solid #3E444E !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
     }
     
-    /* TACTICAL DATA: White Text */
+    /* REFINED DATA: Off-White Text */
     td { 
         text-align: center !important; 
         padding: 8px !important;
-        color: #FFFFFF !important;
-        border-bottom: 1px solid #333 !important;
+        color: #E0E0E0 !important;
+        border-bottom: 1px solid #2D3139 !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -175,27 +177,30 @@ if data and "hourly" in data:
     td_vals = np.array([safe_get(f'dewpoint_{p}hPa') for p in p_levels])
     
     fig = plt.figure(figsize=(10, 35)) 
-    # Facecolor set to dark grey for SkewT background
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
-    skew.ax.set_facecolor('#1B1E23')
+    skew.ax.set_facecolor('#14171C')
 
-    skew.plot_dry_adiabats(color='orange', alpha=0.3, linewidth=1, linestyle='--')
-    skew.plot_moist_adiabats(color='blue', alpha=0.3, linewidth=1, linestyle='--')
-    skew.ax.fill_betweenx(p_levels, t_vals, td_vals, where=((t_vals - td_vals) <= 2), color='yellow', alpha=0.2)
+    # Adiabats (Lower Alpha for less "spaghetti" effect)
+    skew.plot_dry_adiabats(color='#FFA500', alpha=0.15, linewidth=1, linestyle='--')
+    skew.plot_moist_adiabats(color='#4A90E2', alpha=0.15, linewidth=1, linestyle='--')
     
-    skew.plot(p_levels, t_vals * units.degC, 'r', linewidth=5, label='Temp')
-    skew.plot(p_levels, td_vals * units.degC, 'g', linewidth=5, label='Dewpt')
+    # Saturation Shading
+    skew.ax.fill_betweenx(p_levels, t_vals, td_vals, where=((t_vals - td_vals) <= 2), color='#E1E1E1', alpha=0.1)
+    
+    skew.plot(p_levels, t_vals * units.degC, '#E63946', linewidth=5, label='Temp')
+    skew.plot(p_levels, td_vals * units.degC, '#2A9D8F', linewidth=5, label='Dewpt')
     
     for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
         p_val = h_to_p(alt_label)
-        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='cyan', fontsize=16, fontweight='bold', ha='right')
-        skew.ax.axhline(p_val, color='white', alpha=0.1, linestyle='-')
+        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#8E949E', fontsize=14, fontweight='bold', ha='right')
+        skew.ax.axhline(p_val, color='#FFFFFF', alpha=0.05, linestyle='-')
             
-    skew.ax.axvline(0, color='cyan', linestyle='-', alpha=0.6, linewidth=3)
+    # Freezing Line
+    skew.ax.axvline(0, color='#A8DADC', linestyle='-', alpha=0.4, linewidth=2)
     
     plt.ylim(1050, 400); plt.xlim(-40, 40)
-    plt.legend(loc='upper right', prop={'size': 12})
+    plt.legend(loc='upper right', prop={'size': 12}, frameon=False)
     
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=130, facecolor=fig.get_facecolor())
     st.image(buf, use_container_width=True)
