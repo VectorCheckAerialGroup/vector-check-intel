@@ -7,6 +7,7 @@ from metpy.plots import SkewT
 from metpy.units import units
 import io
 import math
+import re
 from datetime import datetime
 
 # 1. PAGE CONFIG
@@ -24,7 +25,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("Atmospheric Risk Management")
-st.caption("")
+st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
 # 2. SIDEBAR
 st.sidebar.header("Mission Parameters")
@@ -53,40 +54,48 @@ def get_best_upper_wind(h_data, idx):
             return val_list[idx], height
     return None, None
 
-import re
+# 4. DATA FETCHING
+@st.cache_data(ttl=600)
+def fetch_mission_data(latitude, longitude, model_url):
+    hourly_params = [
+        "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m",
+        "wind_direction_10m", "visibility", "weather_code", "pressure_msl",
+        "wind_speed_80m", "wind_speed_120m", "wind_speed_100m", "freezing_level_height", "cloud_cover"
+    ]
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
+    hourly_params += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels]
 
-# 4. UPDATED DATA FETCHING (Fixed Link Error)
+    params = {
+        "latitude": latitude, "longitude": longitude,
+        "hourly": hourly_params,
+        "wind_speed_unit": "kn", "forecast_days": 2, "timezone": "UTC"
+    }
+    try:
+        res = requests.get(model_url, params=params, timeout=15)
+        res.raise_for_status()
+        return res.json()
+    except: return None
+
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
-    # NWS requires a custom User-Agent to avoid 403 errors
-    headers = {'User-Agent': 'VectorCheck_Research_App_v1.0'}
+    # Fixed headers for aviationweather.gov API V2
+    headers = {'User-Agent': 'VectorCheck_Risk_Management_v1.0'}
     try:
-        # Using the new /api/data endpoints
         m_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
         t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
-        
         m_res = requests.get(m_url, headers=headers, timeout=10)
         t_res = requests.get(t_url, headers=headers, timeout=10)
-        
-        # Return raw text
         return m_res.text.strip() or "No METAR", t_res.text.strip() or "No TAF"
-    except Exception as e:
-        return f"Link Error: {str(e)}", "Link Error"
+    except: return "Link Error", "Link Error"
 
-# 5. UPDATED MAIN RENDER (With Highlighting)
 def highlight_aviation_weather(text):
     if "Link Error" in text: return text
-    
+
     # 1. VISIBILITY: IFR < 3SM (Red), MVFR 3-5SM (Yellow)
     def vis_replacer(match):
         val_str = match.group(1)
         try:
-            if '/' in val_str:
-                num, den = val_str.split('/')
-                val = float(num) / float(den)
-            else:
-                val = float(val_str)
-            
+            val = float(eval(val_str)) if '/' in val_str else float(val_str)
             if val < 3: return f'<span style="color: #ff4b4b; font-weight: bold;">{match.group(0)}</span>'
             if val <= 5: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
         except: pass
@@ -101,15 +110,28 @@ def highlight_aviation_weather(text):
         except: pass
         return match.group(0)
 
+    # 3. WEATHER PHENOMENA: Freezing/Heavy (Red), Fog/Mist (Yellow)
+    def wx_replacer(match):
+        code = match.group(0)
+        if any(x in code for x in ['FZ', 'PL', 'IC', '+']):
+            return f'<span style="color: #ff4b4b; font-weight: bold;">{code}</span>'
+        if any(x in code for x in ['FG', 'BR']):
+            return f'<span style="color: #f6ec15; font-weight: bold;">{code}</span>'
+        return code
+
+    # Apply highlighting regex
     text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
     text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
+    text = re.sub(r'\b(?:\+|-|VC)?(?:FZ|PL|IC|FG|BR|RA|SN|DZ|GR|GS|UP)+\b', wx_replacer, text)
+    
     return text
 
+# 5. MAIN RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
 metar_h = highlight_aviation_weather(metar_raw)
-taf_h = highlight_aviation_weather(taf_raw).replace('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
+taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
 st.subheader(f"{model_choice} Analysis + {icao} Text")
 st.markdown(f"""
@@ -137,7 +159,6 @@ if data and "hourly" in data:
     m1.metric("WIND (10m)", f"{safe_val(w10)} kt")
     m2.metric("GUSTS", f"{safe_val(gst)} kt")
     m3.metric("FREEZING LVL", f"{safe_val(h['freezing_level_height'][idx], 3.28084)} ft")
-    # VISIBILITY IN KM: Multiply meters by 0.001
     m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001, precision=1)} km")
 
     # --- HAZARD STACK ---
