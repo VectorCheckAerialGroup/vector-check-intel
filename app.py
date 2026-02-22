@@ -165,7 +165,7 @@ if data and "hourly" in data:
     st.write(styler.to_html(), unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- UPDATED HIGH-VIS SOUNDING ---
+    # --- UPDATED SOUNDING WITH VISIBILITY FIXES ---
     st.divider()
     st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
@@ -175,30 +175,39 @@ if data and "hourly" in data:
     fig = plt.figure(figsize=(10, 35)) 
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
-    skew.ax.set_facecolor('#1B1E23') # Slightly lighter than main background for grid depth
+    skew.ax.set_facecolor('#1B1E23')
 
-    # Grid Lines - Soften to let data pop
-    skew.ax.grid(color='white', alpha=0.05)
+    # FIX: Force axis text and labels to Off-White
+    skew.ax.tick_params(colors='#E0E0E0', labelsize=12)
+    skew.ax.xaxis.label.set_color('#E0E0E0')
+    skew.ax.yaxis.label.set_color('#E0E0E0')
+    for spine in skew.ax.spines.values():
+        spine.set_edgecolor('#3E444E')
 
-    # Adiabats - Muted Ghost Lines
-    skew.plot_dry_adiabats(color='#FF8C00', alpha=0.12, linewidth=1)
-    skew.plot_moist_adiabats(color='#1E90FF', alpha=0.12, linewidth=1)
+    # FIX: Adiabat Visibility (increased alpha)
+    skew.plot_dry_adiabats(color='#FF8C00', alpha=0.22, linewidth=1.2)
+    skew.plot_moist_adiabats(color='#1E90FF', alpha=0.22, linewidth=1.2)
     
-    # High-Visibility Data Lines
-    skew.plot(p_levels, t_vals * units.degC, '#FF3131', linewidth=6, label='Temp', solid_capstyle='round')
-    skew.plot(p_levels, td_vals * units.degC, '#39FF14', linewidth=6, label='Dewpt', solid_capstyle='round')
+    # Primary Forecast Lines
+    skew.plot(p_levels, t_vals * units.degC, '#FF3131', linewidth=6, label='Temp')
+    skew.plot(p_levels, td_vals * units.degC, '#39FF14', linewidth=6, label='Dewpt')
     
-    # Altitude Labels - Professional Slate
+    # Altitude Labels
     for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
         p_val = h_to_p(alt_label)
         skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#D1D5DB', fontsize=15, fontweight='bold', ha='right')
-        skew.ax.axhline(p_val, color='white', alpha=0.05, linestyle='-')
+        skew.ax.axhline(p_val, color='white', alpha=0.08, linestyle='-')
             
-    # Freezing Line - Solid Ice Blue
     skew.ax.axvline(0, color='#00FFFF', linestyle='--', alpha=0.4, linewidth=2)
     
     plt.ylim(1050, 400); plt.xlim(-40, 40)
-    plt.legend(loc='upper right', prop={'size': 13}, frameon=True, facecolor='#0E1117', edgecolor='#3E444E')
+    
+    # FIX: Legend visibility
+    leg = plt.legend(loc='upper right', prop={'size': 13}, frameon=True)
+    leg.get_frame().set_facecolor('#0E1117')
+    leg.get_frame().set_edgecolor('#3E444E')
+    for text in leg.get_texts():
+        text.set_color('#E0E0E0') # Force legend text to White
     
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=140, facecolor=fig.get_facecolor())
     st.image(buf, use_container_width=True)
