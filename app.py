@@ -83,13 +83,56 @@ def get_aviation_weather(station):
         return m or "No METAR", t or "No TAF"
     except: return "Link Error", "Link Error"
 
-# 5. MAIN RENDER
+import re
+
+# 5a. PARSING UTILITY
+def highlight_aviation_weather(text):
+    """Highlights IFR (Red) and MVFR (Yellow) thresholds in METAR/TAF text."""
+    
+    # 1. VISIBILITY: IFR < 3SM (Red), MVFR 3-5SM (Yellow)
+    # This captures 1/4SM, 2SM, 4SM etc.
+    def vis_replacer(match):
+        val_str = match.group(1)
+        try:
+            # Handle fractions like 1/2
+            if '/' in val_str:
+                num, den = val_str.split('/')
+                val = float(num) / float(den)
+            else:
+                val = float(val_str)
+            
+            if val < 3: return f'<span style="color: #ff4b4b; font-weight: bold;">{match.group(0)}</span>'
+            if val <= 5: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
+        except: pass
+        return match.group(0)
+
+    # 2. CEILINGS: IFR < 1000ft (Red), MVFR 1000-3000ft (Yellow)
+    # Looks for BKN, OVC, or VV followed by 3 digits
+    def cloud_replacer(match):
+        try:
+            height = int(match.group(2)) * 100
+            if height < 1000: return f'<span style="color: #ff4b4b; font-weight: bold;">{match.group(0)}</span>'
+            if height <= 3000: return f'<span style="color: #f6ec15; font-weight: bold;">{match.group(0)}</span>'
+        except: pass
+        return match.group(0)
+
+    # Apply Visibility Highlights
+    text = re.sub(r'(\d+/\d+|\d+)SM', vis_replacer, text)
+    # Apply Ceiling Highlights (BKN, OVC, VV)
+    text = re.sub(r'(BKN|OVC|VV)(\d{3})', cloud_replacer, text)
+    
+    return text
+
+# 5b. MAIN RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
-metar, taf = get_aviation_weather(icao)
+metar_raw, taf_raw = get_aviation_weather(icao)
+
+# Process highlights
+metar_h = highlight_aviation_weather(metar_raw)
+taf_h = highlight_aviation_weather(taf_raw).replace('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
 
 st.subheader(f"{model_choice} Analysis + {icao} Text")
 
-# CUSTOM CSS FOR AVIATION TEXT (Matches Hazard Stack Table Font)
 st.markdown(f"""
     <div style="
         background-color: #1B1E23; 
@@ -102,9 +145,9 @@ st.markdown(f"""
         line-height: 1.6;
     ">
         <strong style="color: #8E949E; text-transform: uppercase;">METAR</strong><br>
-        {metar}<br><br>
+        {metar_h}<br><br>
         <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
-        {taf.replace('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}
+        {taf_h}
     </div>
     """, unsafe_allow_html=True)
 
