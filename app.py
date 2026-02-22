@@ -12,26 +12,15 @@ from datetime import datetime
 # 1. PAGE CONFIG
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
 
-# CUSTOM CSS FOR AVIATION TEXT (Tightened Spacing)
-st.markdown(f"""
-    <div style="
-        background-color: #1B1E23; 
-        padding: 15px; 
-        border: 1px solid #2D3139; 
-        border-radius: 5px; 
-        font-family: sans-serif; 
-        color: #D1D5DB; 
-        font-size: 0.9rem;
-    ">
-        <div style="margin-bottom: 8px;">
-            <strong style="color: #8E949E; text-transform: uppercase; font-size: 0.75rem;">METAR</strong><br>
-            <span>{metar}</span>
-        </div>
-        <div>
-            <strong style="color: #8E949E; text-transform: uppercase; font-size: 0.75rem;">TAF</strong><br>
-            <span>{taf.replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}</span>
-        </div>
-    </div>
+# CUSTOM CSS: STEALTH THEME
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] { font-size: 1.4rem !important; color: #E58E26 !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; color: #8E949E !important; }
+    table { margin-left: auto; margin-right: auto; text-align: center !important; width: 90%; border-collapse: collapse; background-color: #1B1E23; }
+    th { text-align: center !important; color: #8E949E !important; font-weight: bold !important; padding: 10px !important; border-bottom: 2px solid #3E444E !important; text-transform: uppercase; }
+    td { text-align: center !important; padding: 8px !important; color: #D1D5DB !important; border-bottom: 1px solid #2D3139 !important; }
+    </style>
     """, unsafe_allow_html=True)
 
 st.title("Atmospheric Risk Management")
@@ -99,26 +88,9 @@ data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar, taf = get_aviation_weather(icao)
 
 st.subheader(f"{model_choice} Analysis + {icao} Text")
-# CUSTOM CSS FOR AVIATION TEXT (Matches Hazard Stack Table Font)
-st.markdown(f"""
-    <div style="
-        background-color: #1B1E23; 
-        padding: 15px; 
-        border: 1px solid #2D3139; 
-        border-radius: 5px; 
-        font-family: sans-serif; 
-        color: #D1D5DB; 
-        font-size: 0.9rem;
-        line-height: 1.6;
-    ">
-        <strong style="color: #8E949E; text-transform: uppercase;">METAR</strong><br>
-        {metar}<br><br>
-        <strong style="color: #8E949E; text-transform: uppercase;">TAF</strong><br>
-        {taf.replace('TAF', '<br>TAF').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')}
-    </div>
-    """, unsafe_allow_html=True)
-
-st.divider()
+c1, c2 = st.columns(2)
+c1.code(metar, language="text")
+c2.code(taf, language="text")
 
 if data and "hourly" in data:
     h = data["hourly"]
@@ -135,41 +107,4 @@ if data and "hourly" in data:
     m2.metric("GUSTS", f"{safe_val(gst)} kt")
     m3.metric("FREEZING LVL", f"{safe_val(h['freezing_level_height'][idx], 3.28084)} ft")
     # VISIBILITY IN KM: Multiply meters by 0.001
-    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001, precision=1)} km")
-
-    # --- HAZARD STACK ---
-    st.subheader("Tactical Hazard Stack (Estimated AGL Winds)")
-    upper_v, upper_h = get_best_upper_wind(h, idx)
-    
-    if w10 is not None and upper_v is not None:
-        stack = []
-        gst_factor = gst / max(w10, 1)
-        for alt in [400, 300, 200, 100]:
-            alt_m = alt * 0.3048
-            spd = w10 + (upper_v - w10) * (math.log(alt_m/10) / math.log(upper_h/10))
-            cur_gst = spd * gst_factor
-            
-            status = "NOMINAL"
-            if cur_gst > 25: status = "NO-GO (GUST)"
-            elif spd > 20: status = "CAUTION (WIND)"
-            
-            stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Status": status})
-        st.table(pd.DataFrame(stack))
-    else:
-        st.warning(f"Note: {model_choice} upper-air data is unavailable at this specific coordinate.")
-
-    # --- SKEW-T ---
-    st.divider()
-    p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs]
-    td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs]
-
-    if None not in t_plot:
-        fig = plt.figure(figsize=(6, 8))
-        fig.patch.set_facecolor('#0E1117')
-        skew = SkewT(fig, rotation=45)
-        skew.ax.set_facecolor('#1B1E23')
-        skew.plot(p_levs, np.array(t_plot) * units.degC, 'r', linewidth=2, label="Temp")
-        skew.plot(p_levs, np.array(td_plot) * units.degC, 'g', linewidth=2, label="Dewpoint")
-        plt.title(f"Vertical Profile (UTC: {selected_time})", color='white')
-        st.pyplot(fig)
+    m4.metric("VISIBILITY", f"{safe_val(h['visibility'][idx], 0.001,
