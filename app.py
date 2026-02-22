@@ -27,7 +27,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. SIDEBAR & LOGO (RESTORED)
+# 2. SIDEBAR & LOGO
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
     st.sidebar.image(LOGO_URL, use_container_width=True)
@@ -41,6 +41,8 @@ lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
 icao = st.sidebar.text_input("Nearest ICAO", value="CYTR").upper().strip()
 
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
+terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
+
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
@@ -210,19 +212,57 @@ if data and "hourly" in data:
     upper_h = 120 if h.get('wind_speed_120m') else 100
 
     icing_cond = calculate_icing_profile(h, idx, wx)
+    
+    # Boundary Layer Stability Check (Surface vs ~950hPa)
+    t_950 = h.get('temperature_950hPa', [t])[idx]
+    is_stable = t_950 is not None and t_950 > (t - 2.0)
+
     stack = []
     for alt in [400, 300, 200, 100]:
         spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3/10) / math.log(upper_h/10))
         cur_gst = spd * (gst / max(w_spd, 1))
-        shear = spd - w_spd
-        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-        elif shear > 10 and w_spd > 15: turb_type, turb_sev = "LLWS", ("SEV" if shear > 15 else "MDT")
-        else: turb_type, turb_sev = "MECH", ("SEV" if cur_gst > 25 else ("MDT" if cur_gst > 15 else "LGT"))
-        turb_final = "NONE" if cur_gst < 10 else f"{turb_sev} {turb_type}"
+        
+        # --- TURBULENCE LOGIC ---
+        max_w = max(spd, cur_gst)
+        shear_kt = spd - w_spd
+        shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
+        
+        if wx in [95, 96, 99]:
+            turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 20:
+            turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 15:
+                turb_sev = "NONE"
+            elif max_w < 20:
+                turb_sev = "LGT"
+            elif max_w < 25:
+                turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
+            elif max_w < 35:
+                turb_sev = "LGT" if terrain_type == "Water" else "MOD"
+            elif max_w < 40:
+                if terrain_type == "Water": turb_sev = "MOD"
+                elif terrain_type == "Land": turb_sev = "MOD-SEV"
+                else: turb_sev = "SEV"
+            else:
+                turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+
+        # --- ICING LOGIC ---
         ice_final = "NONE"
         if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
         elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-        stack.append({"Alt (AGL)": f"{alt}ft", "Wind (kt)": int(spd), "Gust (kt)": int(cur_gst), "Turbulence": turb_final, "Icing": ice_final})
+
+        stack.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Wind (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    
     st.table(pd.DataFrame(stack).set_index("Alt (AGL)"))
 
     st.divider()
