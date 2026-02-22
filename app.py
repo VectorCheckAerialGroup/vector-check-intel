@@ -225,112 +225,102 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
-    col1, col2 = st.columns(2)
+    # --- TABLE 2: EXTENDED TRAJECTORY (1000-5000ft) ---
+    st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
+    
+    # Build Profile for Interpolation (pulling from deep pressure layers to cover 5000ft)
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    p_profile = []
+    for p in p_levels:
+        ws, wd, gh = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
+        if ws and wd and gh and ws[idx] is not None and wd[idx] is not None and gh[idx] is not None:
+            p_profile.append({'h_ft': gh[idx] * 3.28084, 'spd': ws[idx], 'dir': wd[idx]})
+    p_profile = sorted(p_profile, key=lambda x: x['h_ft'])
+
+    stack_ext = []
+    for alt in [5000, 4000, 3000, 2000, 1000]:
+        pts = [{'h_ft': upper_h * 3.28084, 'spd': upper_v, 'dir': upper_dir}] + p_profile
+        below, above = pts[0], pts[-1]
+        for i in range(len(pts)-1):
+            if pts[i]['h_ft'] <= alt <= pts[i+1]['h_ft']:
+                below, above = pts[i], pts[i+1]
+                break
+        
+        if below['h_ft'] == above['h_ft']:
+            spd, dir_val = below['spd'], below['dir']
+        else:
+            fraction = max(0, min(1, (alt - below['h_ft']) / (above['h_ft'] - below['h_ft'])))
+            spd = below['spd'] + fraction * (above['spd'] - below['spd'])
+            diff = (above['dir'] - below['dir'] + 180) % 360 - 180
+            dir_val = (below['dir'] + diff * fraction) % 360
+        
+        cur_gst = spd + (max(0, gst - w_spd) * math.exp(-alt / 1500))
+
+        max_w = max(spd, cur_gst)
+        shear_per_1000 = ((spd - upper_v) / alt) * 1000 if alt > 0 else 0
+        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 15: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 30 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 20: turb_sev = "NONE"
+            elif max_w < 30: turb_sev = "LGT"
+            elif max_w < 45: turb_sev = "MOD"
+            else: turb_sev = "SEV"
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+
+        ice_final = "NONE"
+        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": f"{int(dir_val):03d}°",
+            "Spd (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
 
     # --- TABLE 1: TACTICAL BOUNDARY LAYER (0-400ft) ---
-    with col1:
-        st.subheader("Tactical Hazard Stack (0-400ft AGL)")
-        stack_tactical = []
-        for alt in [400, 300, 200, 100]:
-            # Logarithmic math for boundary layer
-            spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
-            cur_gst = spd * (gst / max(w_spd, 1))
-            
-            # Interpolate direction between surface and 120m
-            diff = (upper_dir - sfc_dir + 180) % 360 - 180
-            dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
-
-            # Turbulence Logic
-            max_w = max(spd, cur_gst)
-            shear_kt = spd - w_spd
-            shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
-            
-            if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-            elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
-            else:
-                turb_type = "MECH"
-                if max_w < 15: turb_sev = "NONE"
-                elif max_w < 20: turb_sev = "LGT"
-                elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
-                elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
-                elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
-                else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
-            turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
-
-            # Icing Logic
-            ice_final = "NONE"
-            if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-            elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-
-            stack_tactical.append({
-                "Alt (AGL)": f"{alt}ft", 
-                "Dir": f"{int(dir_val):03d}°",
-                "Spd (kt)": int(spd), 
-                "Gust (kt)": int(cur_gst), 
-                "Turbulence": turb_final,
-                "Icing": ice_final
-            })
-        st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
-
-    # --- TABLE 2: EXTENDED TRAJECTORY (1000-3000ft) ---
-    with col2:
-        st.subheader("Extended Trajectory (1,000-3,000ft AGL)")
+    st.subheader("Tactical Hazard Stack (0-400ft AGL)")
+    stack_tactical = []
+    for alt in [400, 300, 200, 100]:
+        spd = w_spd + (upper_v - w_spd) * (math.log(alt*0.3048/10) / math.log(upper_h/10))
+        cur_gst = spd * (gst / max(w_spd, 1))
         
-        # Build Profile for Interpolation
-        p_levels = [1000, 950, 925, 900, 850, 800, 700]
-        p_profile = []
-        for p in p_levels:
-            ws, wd, gh = h.get(f'wind_speed_{p}hPa'), h.get(f'wind_direction_{p}hPa'), h.get(f'geopotential_height_{p}hPa')
-            if ws and wd and gh and ws[idx] is not None and wd[idx] is not None and gh[idx] is not None:
-                p_profile.append({'h_ft': gh[idx] * 3.28084, 'spd': ws[idx], 'dir': wd[idx]})
-        p_profile = sorted(p_profile, key=lambda x: x['h_ft'])
+        diff = (upper_dir - sfc_dir + 180) % 360 - 180
+        dir_val = (sfc_dir + diff * (min(alt*0.3048, upper_h) / upper_h)) % 360
 
-        stack_ext = []
-        for alt in [3000, 2000, 1000]:
-            pts = [{'h_ft': upper_h * 3.28084, 'spd': upper_v, 'dir': upper_dir}] + p_profile
-            below, above = pts[0], pts[-1]
-            for i in range(len(pts)-1):
-                if pts[i]['h_ft'] <= alt <= pts[i+1]['h_ft']:
-                    below, above = pts[i], pts[i+1]
-                    break
-            
-            if below['h_ft'] == above['h_ft']:
-                spd, dir_val = below['spd'], below['dir']
-            else:
-                fraction = max(0, min(1, (alt - below['h_ft']) / (above['h_ft'] - below['h_ft'])))
-                spd = below['spd'] + fraction * (above['spd'] - below['spd'])
-                diff = (above['dir'] - below['dir'] + 180) % 360 - 180
-                dir_val = (below['dir'] + diff * fraction) % 360
-            
-            # Gusts dampen out in the free atmosphere
-            cur_gst = spd + (max(0, gst - w_spd) * math.exp(-alt / 1500))
+        max_w = max(spd, cur_gst)
+        shear_kt = spd - w_spd
+        shear_per_1000 = (shear_kt / alt) * 1000 if alt > 0 else 0
+        
+        if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
+        elif is_stable and shear_per_1000 >= 20: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 40 else "MDT")
+        else:
+            turb_type = "MECH"
+            if max_w < 15: turb_sev = "NONE"
+            elif max_w < 20: turb_sev = "LGT"
+            elif max_w < 25: turb_sev = "MOD" if terrain_type == "Mountains" else "LGT"
+            elif max_w < 35: turb_sev = "LGT" if terrain_type == "Water" else "MOD"
+            elif max_w < 40: turb_sev = "MOD" if terrain_type == "Water" else ("MOD-SEV" if terrain_type == "Land" else "SEV")
+            else: turb_sev = "MOD-SEV" if terrain_type == "Water" else "SEV"
+        turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
 
-            # Turbulence Logic (Free Atmosphere Shear)
-            max_w = max(spd, cur_gst)
-            shear_per_1000 = ((spd - upper_v) / alt) * 1000 if alt > 0 else 0
-            if wx in [95, 96, 99]: turb_type, turb_sev = "CVCTV", ("SEV" if cur_gst > 25 else "MDT")
-            elif is_stable and shear_per_1000 >= 15: turb_type, turb_sev = "LLWS", ("SEV" if shear_per_1000 >= 30 else "MDT")
-            else:
-                turb_type = "MECH"
-                if max_w < 20: turb_sev = "NONE"
-                elif max_w < 30: turb_sev = "LGT"
-                elif max_w < 45: turb_sev = "MOD"
-                else: turb_sev = "SEV"
-            turb_final = "NONE" if turb_sev == "NONE" else f"{turb_sev} {turb_type}"
+        ice_final = "NONE"
+        if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
+        elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
 
-            ice_final = "NONE"
-            if icing_cond["base"] <= alt <= icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-            elif icing_cond["base"] == 0 and alt < icing_cond["top"]: ice_final = f"{icing_cond['sev']} {icing_cond['type']}"
-
-            stack_ext.append({
-                "Alt (AGL)": f"{alt}ft", 
-                "Dir": f"{int(dir_val):03d}°",
-                "Spd (kt)": int(spd), 
-                "Gust (kt)": int(cur_gst), 
-                "Turbulence": turb_final,
-                "Icing": ice_final
-            })
-        st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
+        stack_tactical.append({
+            "Alt (AGL)": f"{alt}ft", 
+            "Dir": f"{int(dir_val):03d}°",
+            "Spd (kt)": int(spd), 
+            "Gust (kt)": int(cur_gst), 
+            "Turbulence": turb_final,
+            "Icing": ice_final
+        })
+    st.table(pd.DataFrame(stack_tactical).set_index("Alt (AGL)"))
 
     st.divider()
     p_levs = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
