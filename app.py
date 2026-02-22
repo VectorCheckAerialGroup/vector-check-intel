@@ -32,7 +32,6 @@ st.markdown("""
         background-color: transparent;
     }
     
-    /* REFINED HEADERS: Muted Slate-Blue Text */
     th { 
         text-align: center !important; 
         color: #A0B0C5 !important;           
@@ -43,7 +42,6 @@ st.markdown("""
         letter-spacing: 1px;
     }
     
-    /* REFINED DATA: Off-White Text */
     td { 
         text-align: center !important; 
         padding: 8px !important;
@@ -118,7 +116,6 @@ if data and "hourly" in data:
     h = data["hourly"]
     def safe_get(key): return h.get(key)[idx]
 
-    # --- MID SECTION: METRICS ---
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     t_s = safe_get('temperature_2m'); rh_s = safe_get('relative_humidity_2m')
     dewpoint_s = t_s - ((100 - rh_s) / 5)
@@ -131,7 +128,6 @@ if data and "hourly" in data:
     m5.metric("Freezing Level", f"{int(safe_get('freezing_level_height') * 3.28084):,}ft")
     m6.metric("Cloud Base/Amt", f"{cloud_base_ft if cloud_base_ft > 500 else 'SFC'}ft / {int(safe_get('cloud_cover'))}%")
 
-    # --- CENTERED HAZARD STACK ---
     st.subheader(f"📊 Low-Level Hazard Stack (Valid: {selected_time_str})")
     w10, w80, w120 = safe_get("wind_speed_10m"), safe_get("wind_speed_80m"), safe_get("wind_speed_120m")
     z_ft = [50, 100, 200, 300, 400]
@@ -169,7 +165,7 @@ if data and "hourly" in data:
     st.write(styler.to_html(), unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- ADIABATIC SOUNDING PROFILE ---
+    # --- UPDATED HIGH-VIS SOUNDING ---
     st.divider()
     st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
@@ -179,28 +175,30 @@ if data and "hourly" in data:
     fig = plt.figure(figsize=(10, 35)) 
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
-    skew.ax.set_facecolor('#14171C')
+    skew.ax.set_facecolor('#1B1E23') # Slightly lighter than main background for grid depth
 
-    # Adiabats (Lower Alpha for less "spaghetti" effect)
-    skew.plot_dry_adiabats(color='#FFA500', alpha=0.15, linewidth=1, linestyle='--')
-    skew.plot_moist_adiabats(color='#4A90E2', alpha=0.15, linewidth=1, linestyle='--')
+    # Grid Lines - Soften to let data pop
+    skew.ax.grid(color='white', alpha=0.05)
+
+    # Adiabats - Muted Ghost Lines
+    skew.plot_dry_adiabats(color='#FF8C00', alpha=0.12, linewidth=1)
+    skew.plot_moist_adiabats(color='#1E90FF', alpha=0.12, linewidth=1)
     
-    # Saturation Shading
-    skew.ax.fill_betweenx(p_levels, t_vals, td_vals, where=((t_vals - td_vals) <= 2), color='#E1E1E1', alpha=0.1)
+    # High-Visibility Data Lines
+    skew.plot(p_levels, t_vals * units.degC, '#FF3131', linewidth=6, label='Temp', solid_capstyle='round')
+    skew.plot(p_levels, td_vals * units.degC, '#39FF14', linewidth=6, label='Dewpt', solid_capstyle='round')
     
-    skew.plot(p_levels, t_vals * units.degC, '#E63946', linewidth=5, label='Temp')
-    skew.plot(p_levels, td_vals * units.degC, '#2A9D8F', linewidth=5, label='Dewpt')
-    
+    # Altitude Labels - Professional Slate
     for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
         p_val = h_to_p(alt_label)
-        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#8E949E', fontsize=14, fontweight='bold', ha='right')
-        skew.ax.axhline(p_val, color='#FFFFFF', alpha=0.05, linestyle='-')
+        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#D1D5DB', fontsize=15, fontweight='bold', ha='right')
+        skew.ax.axhline(p_val, color='white', alpha=0.05, linestyle='-')
             
-    # Freezing Line
-    skew.ax.axvline(0, color='#A8DADC', linestyle='-', alpha=0.4, linewidth=2)
+    # Freezing Line - Solid Ice Blue
+    skew.ax.axvline(0, color='#00FFFF', linestyle='--', alpha=0.4, linewidth=2)
     
     plt.ylim(1050, 400); plt.xlim(-40, 40)
-    plt.legend(loc='upper right', prop={'size': 12}, frameon=False)
+    plt.legend(loc='upper right', prop={'size': 13}, frameon=True, facecolor='#0E1117', edgecolor='#3E444E')
     
-    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=130, facecolor=fig.get_facecolor())
+    buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=140, facecolor=fig.get_facecolor())
     st.image(buf, use_container_width=True)
