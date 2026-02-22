@@ -11,7 +11,7 @@ from datetime import datetime
 # 1. PAGE CONFIG & UI LOCK
 st.set_page_config(page_title="Vector Check: Mission Intel", layout="wide")
 
-# CUSTOM CSS: REFINED DARK THEME
+# CUSTOM CSS: STEALTH THEME
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
@@ -34,7 +34,7 @@ st.markdown("""
     
     th { 
         text-align: center !important; 
-        color: #A0B0C5 !important;           
+        color: #8E949E !important;           
         font-weight: bold !important;
         padding: 10px !important;
         border-bottom: 2px solid #3E444E !important;
@@ -45,7 +45,7 @@ st.markdown("""
     td { 
         text-align: center !important; 
         padding: 8px !important;
-        color: #E0E0E0 !important;
+        color: #D1D5DB !important;
         border-bottom: 1px solid #2D3139 !important;
     }
     </style>
@@ -165,7 +165,7 @@ if data and "hourly" in data:
     st.write(styler.to_html(), unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- UPDATED SOUNDING WITH BRIGHTER BACKGROUND ---
+    # --- STEALTH OPTIMIZED SOUNDING ---
     st.divider()
     st.subheader(f"🌡️ Deep Synoptic Ribbon (Convection & Adiabats)")
     p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
@@ -176,37 +176,41 @@ if data and "hourly" in data:
     fig.patch.set_facecolor('#0E1117') 
     skew = SkewT(fig, rotation=45)
     
-    # BRIGHTER PLOT BACKGROUND FOR CONTRAST
-    skew.ax.set_facecolor('#252930')
+    # CHARCOAL BACKGROUND
+    skew.ax.set_facecolor('#1B1E23')
 
-    skew.ax.tick_params(colors='#E0E0E0', labelsize=12)
-    skew.ax.xaxis.label.set_color('#E0E0E0')
-    skew.ax.yaxis.label.set_color('#E0E0E0')
+    # Axis and Tick Contrast
+    skew.ax.tick_params(colors='#9CA3AF', labelsize=12)
+    skew.ax.xaxis.label.set_color('#9CA3AF')
+    skew.ax.yaxis.label.set_color('#9CA3AF')
     for spine in skew.ax.spines.values():
-        spine.set_edgecolor('#4B5563')
+        spine.set_edgecolor('#374151')
 
-    # Adiabats - Brighter alpha for readability
-    skew.plot_dry_adiabats(color='#FF8C00', alpha=0.28, linewidth=1.2)
-    skew.plot_moist_adiabats(color='#1E90FF', alpha=0.28, linewidth=1.2)
+    # Adiabats (Visible but Sleek)
+    skew.plot_dry_adiabats(color='#E58E26', alpha=0.25, linewidth=1.1, linestyle=':')
+    skew.plot_moist_adiabats(color='#4A69BD', alpha=0.25, linewidth=1.1, linestyle=':')
     
-    # Data Lines
-    skew.plot(p_levels, t_vals * units.degC, '#FF3131', linewidth=6, label='Temp')
-    skew.plot(p_levels, td_vals * units.degC, '#39FF14', linewidth=6, label='Dewpt')
+    # Profile Lines (High-Contrast Glow)
+    skew.plot(p_levels, t_vals * units.degC, '#EB2F06', linewidth=7, label='Temp', solid_capstyle='round')
+    skew.plot(p_levels, td_vals * units.degC, '#78E08F', linewidth=7, label='Dewpt', solid_capstyle='round')
     
+    # Height Indicators
     for alt_label in [1000, 3000, 5000, 10000, 15000, 20000]:
         p_val = h_to_p(alt_label)
-        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#D1D5DB', fontsize=15, fontweight='bold', ha='right')
-        skew.ax.axhline(p_val, color='white', alpha=0.1, linestyle='-')
+        skew.ax.text(-38.5, p_val, f"{alt_label:,} ft", color='#9CA3AF', fontsize=14, fontweight='600', ha='right')
+        skew.ax.axhline(p_val, color='white', alpha=0.06)
             
-    skew.ax.axvline(0, color='#00FFFF', linestyle='--', alpha=0.5, linewidth=2)
+    # Freezing Reference
+    skew.ax.axvline(0, color='#82CCDD', linestyle='--', alpha=0.5, linewidth=2)
     
     plt.ylim(1050, 400); plt.xlim(-40, 40)
     
+    # Tactical Legend
     leg = plt.legend(loc='upper right', prop={'size': 13}, frameon=True)
     leg.get_frame().set_facecolor('#0E1117')
-    leg.get_frame().set_edgecolor('#3E444E')
+    leg.get_frame().set_edgecolor('#374151')
     for text in leg.get_texts():
-        text.set_color('#E0E0E0')
+        text.set_color('#D1D5DB')
     
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', dpi=140, facecolor=fig.get_facecolor())
     st.image(buf, use_container_width=True)
