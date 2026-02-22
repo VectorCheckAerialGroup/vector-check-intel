@@ -26,11 +26,16 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # 2. SIDEBAR & LOGO
-try:
-LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"    st.sidebar.image(logo, use_container_width=True)
-except FileNotFoundError:
-    st.sidebar.warning("Logo file not found. Place 'VCAG Inc - Logo Final.jpg' in the script directory.")
+LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 
+try:
+    # Everything below 'try' must be indented by 4 spaces
+    st.sidebar.image(LOGO_URL, use_container_width=True)
+except Exception:
+    # If the URL fails, it falls back to text branding
+    st.sidebar.title("Vector Check")
+    st.sidebar.caption("Aerial Group Inc.")
+    
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f")
