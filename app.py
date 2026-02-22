@@ -8,7 +8,7 @@ from metpy.units import units
 import io
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from PIL import Image
 
 # 1. PAGE CONFIG
@@ -25,7 +25,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. SIDEBAR & LOGO (Fixed Indentation)
+# 2. SIDEBAR & LOGO
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 
 try:
@@ -71,9 +71,9 @@ def estimate_tactical_visibility(temp, rh, weather_code):
         elif weather_code in [45, 48]: vis_est = min(vis_est, 0.25)
     return min(10.0, vis_est)
 
-# 4. DATA FETCHING (Improved METAR/TAF Logic)
+# 4. DATA FETCHING (Time-Aware Caching)
 @st.cache_data(ttl=600)
-def fetch_mission_data(latitude, longitude, model_url):
+def fetch_mission_data(latitude, longitude, model_url, time_key):
     hourly_params = [
         "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m",
         "wind_direction_10m", "visibility", "weather_code", "pressure_msl",
@@ -90,19 +90,17 @@ def fetch_mission_data(latitude, longitude, model_url):
 
 @st.cache_data(ttl=300)
 def get_aviation_weather(station):
-    # Minimal change: Browser-like headers to prevent API blocking
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         m_url = f"https://aviationweather.gov/api/data/metar?ids={station}"
         t_url = f"https://aviationweather.gov/api/data/taf?ids={station}"
         m_res = requests.get(m_url, headers=headers, timeout=10)
         t_res = requests.get(t_url, headers=headers, timeout=10)
-        # Check if response is empty or 404
         metar = m_res.text.strip() if m_res.status_code == 200 else f"Error {m_res.status_code}"
         taf = t_res.text.strip() if t_res.status_code == 200 else f"Error {t_res.status_code}"
         return metar or "No METAR", taf or "No TAF"
-    except Exception as e:
-        return f"Conn Error", f"Conn Error"
+    except Exception:
+        return "Conn Error", "Conn Error"
 
 def highlight_aviation_weather(text):
     if "Error" in text: return f"<span style='color: #ff4b4b;'>{text} - Check Station ID</span>"
@@ -135,7 +133,10 @@ def highlight_aviation_weather(text):
 st.title("Atmospheric Risk Management")
 st.caption("Vector Check Aerial Group Inc. | Specialized Drone Operations & Weather Consulting")
 
-data = fetch_mission_data(lat, lon, model_api_map[model_choice])
+# Generate time-based key for hourly caching
+current_hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+data = fetch_mission_data(lat, lon, model_api_map[model_choice], current_hour_key)
+
 metar_raw, taf_raw = get_aviation_weather(icao)
 metar_h = highlight_aviation_weather(metar_raw)
 taf_h = highlight_aviation_weather(taf_raw).replace('TAF ', 'TAF<br>').replace('FM', '<br>FM').replace('TEMPO', '<br>TEMPO').replace('PROB', '<br>PROB')
@@ -154,7 +155,15 @@ st.divider()
 if data and "hourly" in data:
     h = data["hourly"]
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
-    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times)
+    
+    # Logic to find index of CURRENT UTC hour
+    now_str = datetime.now(timezone.utc).strftime("%d %b %H:00 Z")
+    try:
+        current_idx = times.index(now_str)
+    except:
+        current_idx = 0
+
+    selected_time = st.sidebar.select_slider("Forecast Hour:", options=times, value=times[current_idx])
     idx = times.index(selected_time)
     
     def get_precip_only(code):
