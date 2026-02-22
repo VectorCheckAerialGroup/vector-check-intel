@@ -88,7 +88,6 @@ data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar, taf = get_aviation_weather(icao)
 
 st.subheader(f"{model_choice} Analysis + {icao} Text")
-
 # CUSTOM CSS FOR AVIATION TEXT (Matches Hazard Stack Table Font)
 st.markdown(f"""
     <div style="
