@@ -16,7 +16,7 @@ def evaluate_gnss_risk(kp):
     return {"kp": kp, "risk": "UNKNOWN", "impact": "Data processing error."}
 
 def get_kp_index(target_utc):
-    """Fetches the NOAA Planetary K-index forecast with advanced diagnostic outputs."""
+    """Fetches the NOAA Planetary K-index forecast with advanced string-exception handling."""
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
     
     headers = {
@@ -25,34 +25,31 @@ def get_kp_index(target_utc):
     
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status() # Forces an explicit exception if NOAA blocks us (e.g., 403 or 404)
+        response.raise_for_status() 
         data = response.json()
-        
-        forecasts = data[1:] # Skip the header row
         
         closest_kp = None
         min_diff = float('inf')
         
-        for row in forecasts:
+        # We loop through the entire payload natively instead of trying to slice headers
+        for row in data:
             if not row: continue
             
+            # 1. Protect the timestamp parser
             try:
-                # NOAA time is "YYYY-MM-DD HH:MM:SS" in UTC
                 row_dt = datetime.strptime(str(row[0]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            except Exception:
-                continue # Skip any row that doesn't have a valid timestamp
+            except ValueError:
+                continue # If it says 'time_tag' or another header string, skip the row
                 
             predicted_kp = None
             
-            # Robust extraction: Handle standard format [time, observed, estimated, predicted]
-            if len(row) >= 4:
-                if row[3]: predicted_kp = float(row[3])
-                elif row[2]: predicted_kp = float(row[2])
-                elif row[1]: predicted_kp = float(row[1])
-            # Handle alternate formats
-            elif len(row) >= 2:
-                try: predicted_kp = float(row[1])
-                except Exception: pass
+            # 2. Protect the float converter
+            try:
+                if len(row) >= 4 and row[3]: predicted_kp = float(row[3])
+                elif len(row) >= 3 and row[2]: predicted_kp = float(row[2])
+                elif len(row) >= 2 and row[1]: predicted_kp = float(row[1])
+            except ValueError:
+                continue # If it encounters 'observed' or 'estimated', skip the data point
                 
             if predicted_kp is not None:
                 diff = abs((target_utc - row_dt).total_seconds())
