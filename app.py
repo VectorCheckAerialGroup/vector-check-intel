@@ -136,26 +136,6 @@ if data and "hourly" in data:
     c[6].metric("Freezing LVL", frz_disp)
     c[7].metric("Cloud Base", f"{c_base} ft")
 
-    # --- ASTRONOMICAL DATA SECTION ---
-    dt_utc = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
-    astro = get_astronomical_data(lat, lon, dt_utc)
-    
-    st.subheader("Light & Astronomical Profile")
-    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
-    ac1.metric("Dawn (Civil)", astro['dawn'])
-    ac2.metric("Sunrise", astro['sunrise'])
-    ac3.metric("Sunset", astro['sunset'])
-    ac4.metric("Dusk (Civil)", astro['dusk'])
-    ac5.metric("Sun Pos", f"Az: {astro['sun_az']}° | Alt: {astro['sun_alt']}°")
-
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("Moonrise", astro['moonrise'])
-    mc2.metric("Moonset", astro['moonset'])
-    mc3.metric("Illumination", f"{astro['moon_ill']}%")
-    mc4.metric("Moon Pos", f"Az: {astro['moon_az']}° | Alt: {astro['moon_alt']}°")
-    mc5.metric("Solar State", "DAY" if astro['sun_alt'] > 0 else "NIGHT")
-    st.divider()
-
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     
@@ -200,7 +180,27 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ADVANCED CSV EXPORT ENGINE ---
+    # --- ASTRONOMICAL DATA SECTION (Moved Above Convective Profile) ---
+    dt_utc = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
+    astro = get_astronomical_data(lat, lon, dt_utc)
+    
+    st.divider()
+    st.subheader(f"Light & Astronomical Profile ({astro['tz']})")
+    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
+    ac1.metric("Dawn (Civil)", astro['dawn'])
+    ac2.metric("Sunrise", astro['sunrise'])
+    ac3.metric("Sunset", astro['sunset'])
+    ac4.metric("Dusk (Civil)", astro['dusk'])
+    ac5.metric("Sun Pos", f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°")
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Moonrise", astro['moonrise'])
+    mc2.metric("Moonset", astro['moonset'])
+    mc3.metric("Illumination", f"{astro['moon_ill']}%")
+    mc4.metric("Moon Pos", f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°")
+    mc5.empty() # Maintains the clean 5-column structure visually
+    
+    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
     df_export = pd.concat([df_tactical, df_ext])
     
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
@@ -210,8 +210,9 @@ if data and "hourly" in data:
         "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n"
-        f"Sun: Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
-        f"Moon: Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n\n"
+        f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
+        f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
+        f"Position: Sun {astro['sun_dir']} ({astro['sun_alt']}°) | Moon {astro['moon_dir']} ({astro['moon_alt']}°)\n\n"
         f"METAR/SPECI:\n{clean_metar}\n\n"
         f"TAF:\n{clean_taf}\n\n"
         "--- HAZARD STACK (AGL) ---\n"
