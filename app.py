@@ -3,8 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from metpy.plots import SkewT
-from metpy.units import units
 import math
 import re
 from datetime import datetime, timezone
@@ -85,13 +83,12 @@ def apply_tactical_highlights(text):
         raw = m.group(1)
         try:
             val_m = int(raw)
-            if val_m == 9999: return raw # P6SM equivalent
-            val_sm = val_m / 1609.34     # Convert to SM
+            if val_m == 9999: return raw 
+            val_sm = val_m / 1609.34 
             if val_sm < 3: return f'<span class="ifr-text">{raw}</span>'
             if 3 <= val_sm <= 5: return f'<span class="mvfr-text">{raw}</span>'
         except: pass
         return raw
-    # Only match exactly 4 digits standing alone
     text = re.sub(r'(?<!\S)(\d{4})(?!\S)', vis_match_m, text)
 
     # 4. Ceiling/Sky (BKN, OVC, VV with optional CB/TCU)
@@ -122,7 +119,7 @@ def calculate_icing_profile(hourly_data, idx, wx_code):
         t_val = hourly_data.get(f"temperature_{p}hPa")[idx]
         td_val = hourly_data.get(f"dewpoint_{p}hPa")[idx]
         h_m = hourly_data.get(f"geopotential_height_{p}hPa")[idx]
-        if t_val is not None and td_val is not None:
+        if t_val is not None and td_val is not None and h_m is not None:
             profile.append({"p": p, "t": t_val, "td": td_val, "h_ft": h_m * 3.28084})
     
     cloud_layers = []
@@ -261,17 +258,59 @@ if data and "hourly" in data:
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_e):03d}°", "Spd (kt)": int(s_e), "Turbulence": turb, "Icing": ice})
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
 
+    # --- WINDY-STYLE VERTICAL PROFILE ---
     st.divider()
+    st.subheader("Vertical Atmospheric Profile")
     
-    # SKEW-T
     p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    t_plot, td_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs_plot], [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs_plot]
-    if all(v is not None for v in t_plot):
-        fig = plt.figure(figsize=(9, 9)); fig.patch.set_facecolor('#222222')
-        skew = SkewT(fig, rotation=45); skew.ax.set_facecolor('#222222')
-        skew.plot(p_levs_plot, np.array(t_plot) * units.degC, '#e74c3c', linewidth=2.5)
-        skew.plot(p_levs_plot, np.array(td_plot) * units.degC, '#3498db', linewidth=2.5)
-        skew.ax.set_ylim(1000, 400); skew.ax.set_xlim(-40, 40); skew.ax.axvline(0, color='#B976AC', linestyle='--')
-        skew.plot_dry_adiabats(alpha=0.2, color='#e67e22'); skew.plot_moist_adiabats(alpha=0.2, color='#27ae60')
-        skew.ax.tick_params(colors='white'); plt.figtext(0.12, 0.05, f"elev: {int(data.get('elevation', 0)*3.28)}ft", color='#A0A4AB')
+    t_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs_plot]
+    td_plot = [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs_plot]
+    ws_plot = [h.get(f'wind_speed_{p}hPa')[idx] for p in p_levs_plot]
+    wd_plot = [h.get(f'wind_direction_{p}hPa')[idx] for p in p_levs_plot]
+    h_plot = [h.get(f'geopotential_height_{p}hPa')[idx] * 3.28084 if h.get(f'geopotential_height_{p}hPa')[idx] is not None else None for p in p_levs_plot]
+
+    if all(v is not None for v in t_plot) and all(v is not None for v in h_plot):
+        fig, ax = plt.subplots(figsize=(10, 8))
+        fig.patch.set_facecolor('#1B1E23')
+        ax.set_facecolor('#1B1E23')
+
+        # Plot Temp and Dewpoint
+        ax.plot(t_plot, h_plot, color='#e74c3c', linewidth=3, label='Temp (°C)')
+        ax.plot(td_plot, h_plot, color='#3498db', linewidth=3, label='Dewpoint (°C)')
+
+        # Fill Cloud Layers (Spread <= 3C)
+        ax.fill_betweenx(h_plot, t_plot, td_plot, where=(np.array(t_plot) - np.array(td_plot) <= 3.0), color='#8E949E', alpha=0.3, label='Saturation / Cloud Deck')
+
+        # 0C Isotherm
+        ax.axvline(0, color='#B976AC', linestyle='--', linewidth=2, alpha=0.8, label='0°C Isotherm')
+
+        # Formatting
+        ax.set_ylabel('Altitude (ft MSL)', color='#A0A4AB', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Temperature (°C)', color='#A0A4AB', fontsize=12, fontweight='bold')
+        ax.tick_params(axis='both', colors='#D1D5DB', labelsize=10)
+        ax.grid(color='#2D3139', linestyle='-', linewidth=1)
+        for spine in ax.spines.values():
+            spine.set_color('#3E444E')
+            
+        # Set limits to fit wind barbs
+        min_x = min(td_plot) - 5
+        max_x = max(t_plot) + 15
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(min(h_plot), max(h_plot))
+
+        # Wind Barbs
+        u_p, v_p = [], []
+        for ws_v, wd_v in zip(ws_plot, wd_plot):
+            if ws_v is not None and wd_v is not None:
+                u_p.append(-ws_v * np.sin(np.radians(wd_v)))
+                v_p.append(-ws_v * np.cos(np.radians(wd_v)))
+            else:
+                u_p.append(0); v_p.append(0)
+                
+        barb_x = [max_x - 5] * len(h_plot)
+        ax.barbs(barb_x, h_plot, u_p, v_p, color='#D1D5DB', length=6)
+        
+        ax.legend(loc='upper left', facecolor='#1B1E23', edgecolor='#3E444E', labelcolor='#D1D5DB')
+        plt.figtext(0.14, 0.88, f"Surface Elev: {int(data.get('elevation', 0)*3.28)} ft", color='#A0A4AB', fontsize=10, backgroundcolor='#1B1E23')
+
         st.pyplot(fig)
