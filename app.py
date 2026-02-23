@@ -12,6 +12,7 @@ from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_t
 from modules.visualizations import plot_convective_profile
 from modules.telemetry import log_action
 from modules.astronomy import get_astronomical_data
+from modules.space_weather import get_kp_index
 
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -163,6 +164,48 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t_temp])[idx]
     is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
 
+    # --- ASTRONOMICAL & SPACE WEATHER SECTION ---
+    dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
+    astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
+    space_data = get_kp_index(dt_utc_exact)
+    
+    sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
+    moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
+    
+    st.divider()
+    st.subheader(f"Light Profile & Space Weather ({astro['tz']})")
+    
+    # Row 1: Light Data
+    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
+    ac1.metric("Dawn (Civil)", astro['dawn'])
+    ac2.metric("Sunrise", astro['sunrise'])
+    ac3.metric("Sunset", astro['sunset'])
+    ac4.metric("Dusk (Civil)", astro['dusk'])
+    ac5.metric("Sun Pos", sun_pos_display)
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Moonrise", astro['moonrise'])
+    mc2.metric("Moonset", astro['moonset'])
+    mc3.metric("Illumination", f"{astro['moon_ill']}%")
+    mc4.metric("Moon Pos", moon_pos_display)
+    mc5.empty()
+
+    # Row 2: Space Weather Data
+    st.markdown("<br>", unsafe_allow_html=True)
+    sc1, sc2, sc3 = st.columns([1, 1, 3])
+    sc1.metric("Planetary Kp Index", space_data['kp'])
+    
+    # Color-code the GNSS Risk natively using markdown formatting if it hits 5 or above
+    if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"]:
+        sc2.markdown(f'<div data-testid="stMetricValue" style="font-size: 1.2rem !important; color: #ff4b4b !important;">{space_data["risk"]}</div>', unsafe_allow_html=True)
+        sc2.caption("GNSS/C2 RISK")
+    else:
+        sc2.metric("GNSS/C2 Risk", space_data['risk'])
+        
+    sc3.info(f"**Operational Impact:** {space_data['impact']}")
+
+    st.divider()
+
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
     for alt in [400, 300, 200, 100]:
@@ -195,29 +238,6 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ASTRONOMICAL DATA SECTION ---
-    dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
-    astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
-    
-    sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
-    moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
-    
-    st.divider()
-    st.subheader(f"Light & Astronomical Profile ({astro['tz']})")
-    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
-    ac1.metric("Dawn (Civil)", astro['dawn'])
-    ac2.metric("Sunrise", astro['sunrise'])
-    ac3.metric("Sunset", astro['sunset'])
-    ac4.metric("Dusk (Civil)", astro['dusk'])
-    ac5.metric("Sun Pos", sun_pos_display)
-
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("Moonrise", astro['moonrise'])
-    mc2.metric("Moonset", astro['moonset'])
-    mc3.metric("Illumination", f"{astro['moon_ill']}%")
-    mc4.metric("Moon Pos", moon_pos_display)
-    mc5.empty()
-    
     # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
     df_export = pd.concat([df_tactical, df_ext])
     
@@ -230,6 +250,7 @@ if data and "hourly" in data:
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
         f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
+        f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}\n"
         f"Position: Sun {sun_pos_display} | Moon {moon_pos_display}\n\n"
         f"METAR/SPECI:\n{clean_metar}\n\n"
         f"TAF:\n{clean_taf}\n\n"
