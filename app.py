@@ -55,19 +55,46 @@ model_api_map = {
 # 3. HIGHLIGHTING HELPERS (METAR/TAF)
 def apply_tactical_highlights(text):
     if not text: return ""
-    # 1. Freezing Precipitation
-    text = re.sub(r'\b(FZRA|FZDZ|PL|FZFG|FZ)\b', r'<span class="fz-warn">\1</span>', text)
-    # 2. Visibility
-    def vis_match(m):
+    
+    # 1. Severe Weather / Freezing Precip
+    def precip_match(m):
+        return f'<span class="fz-warn">{m.group(0)}</span>'
+    text = re.sub(r'(?<!\S)[-+]?[A-Z]*(?:FZ|PL|TS|GR|SQ)[A-Z]*(?!\S)', precip_match, text)
+    
+    # 2. Visibility (Statute Miles - handles P6SM, 1 1/2SM, M1/4SM)
+    def vis_match_sm(m):
+        raw = m.group(0)
         try:
-            s = m.group(0).replace('SM', '').strip()
-            val = float(eval(s)) if '/' in s else float(s)
-            if val < 3: return f'<span class="ifr-text">{m.group(0)}</span>'
-            if 3 <= val <= 5: return f'<span class="mvfr-text">{m.group(0)}</span>'
+            clean = raw.upper().replace('SM', '').replace('P', '').replace('M', '').strip()
+            parts = clean.split()
+            val = 0.0
+            for p in parts:
+                if '/' in p:
+                    num, den = p.split('/')
+                    val += float(num) / float(den)
+                else:
+                    val += float(p)
+            if val < 3: return f'<span class="ifr-text">{raw}</span>'
+            if 3 <= val <= 5: return f'<span class="mvfr-text">{raw}</span>'
         except: pass
-        return m.group(0)
-    text = re.sub(r'\b(?:\d+\s+)?(?:\d+/\d+|\d+)SM\b', vis_match, text)
-    # 3. Ceiling/Sky
+        return raw
+    text = re.sub(r'(?<!\S)[PM]?(?:\d+\s+)?(?:\d+/\d+|\d+)SM(?!\S)', vis_match_sm, text)
+
+    # 3. Visibility (ICAO Meters - handles 0800, 1200, 9999)
+    def vis_match_m(m):
+        raw = m.group(1)
+        try:
+            val_m = int(raw)
+            if val_m == 9999: return raw # P6SM equivalent
+            val_sm = val_m / 1609.34     # Convert to SM
+            if val_sm < 3: return f'<span class="ifr-text">{raw}</span>'
+            if 3 <= val_sm <= 5: return f'<span class="mvfr-text">{raw}</span>'
+        except: pass
+        return raw
+    # Only match exactly 4 digits standing alone
+    text = re.sub(r'(?<!\S)(\d{4})(?!\S)', vis_match_m, text)
+
+    # 4. Ceiling/Sky (BKN, OVC, VV with optional CB/TCU)
     def sky_match(m):
         try:
             h = int(m.group(2)) * 100
@@ -75,7 +102,8 @@ def apply_tactical_highlights(text):
             if 1000 <= h <= 3000: return f'<span class="mvfr-text">{m.group(0)}</span>'
         except: pass
         return m.group(0)
-    text = re.sub(r'\b(BKN|OVC|VV)(\d{3})\b', sky_match, text)
+    text = re.sub(r'(?<!\S)(BKN|OVC|VV)(\d{3})(?:CB|TCU)?(?!\S)', sky_match, text)
+    
     return text
 
 def get_precip_type(code):
@@ -182,7 +210,7 @@ if data and "hourly" in data:
 
     # WIND/TURB CALCS
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
-    gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gust
+    gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     if "gem" in model_api_map[model_choice]: u_v, u_dir, u_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
     else: u_v, u_dir, u_h = h['wind_speed_100m'][idx], h['wind_direction_100m'][idx], 100
     
@@ -233,6 +261,8 @@ if data and "hourly" in data:
         stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": f"{int(d_e):03d}°", "Spd (kt)": int(s_e), "Turbulence": turb, "Icing": ice})
     st.table(pd.DataFrame(stack_ext).set_index("Alt (AGL)"))
 
+    st.divider()
+    
     # SKEW-T
     p_levs_plot = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
     t_plot, td_plot = [h.get(f'temperature_{p}hPa')[idx] for p in p_levs_plot], [h.get(f'dewpoint_{p}hPa')[idx] for p in p_levs_plot]
