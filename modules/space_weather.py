@@ -16,52 +16,56 @@ def evaluate_gnss_risk(kp):
     return {"kp": kp, "risk": "UNKNOWN", "impact": "Data processing error."}
 
 def get_kp_index(target_utc):
-    """Fetches the NOAA Planetary K-index forecast and matches it to the target time."""
+    """Fetches the NOAA Planetary K-index forecast with advanced diagnostic outputs."""
     url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
     
-    # NOAA blocks default Python requests. We must identify as a legitimate application.
     headers = {
         "User-Agent": "VectorCheckAerialGroup/1.0 (ops.vectorcheck.ca)"
     }
     
     try:
-        # Increased timeout to 5 seconds to account for Streamlit Cloud latency
         response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status() # Forces an explicit exception if NOAA blocks us (e.g., 403 or 404)
+        data = response.json()
         
-        if response.status_code == 200:
-            data = response.json()
-            # NOAA data format: [["time_tag", "observed", "estimated", "predicted"], ...]
-            forecasts = data[1:] # Skip the header row
+        forecasts = data[1:] # Skip the header row
+        
+        closest_kp = None
+        min_diff = float('inf')
+        
+        for row in forecasts:
+            if not row: continue
             
-            closest_kp = None
-            min_diff = float('inf')
-            
-            for row in forecasts:
-                time_tag = row[0]
-                
-                # Robust extraction: Safely check array length before pulling data
-                predicted_kp = 0.0
-                if len(row) > 3 and row[3]:
-                    predicted_kp = float(row[3])
-                elif len(row) > 2 and row[2]:
-                    predicted_kp = float(row[2])
-                elif len(row) > 1 and row[1]:
-                    predicted_kp = float(row[1])
-                
+            try:
                 # NOAA time is "YYYY-MM-DD HH:MM:SS" in UTC
-                row_dt = datetime.strptime(time_tag, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                diff = abs((target_utc - row_dt).total_seconds())
+                row_dt = datetime.strptime(str(row[0]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except Exception:
+                continue # Skip any row that doesn't have a valid timestamp
                 
-                # Find the Kp index closest to the user's selected slider time
+            predicted_kp = None
+            
+            # Robust extraction: Handle standard format [time, observed, estimated, predicted]
+            if len(row) >= 4:
+                if row[3]: predicted_kp = float(row[3])
+                elif row[2]: predicted_kp = float(row[2])
+                elif row[1]: predicted_kp = float(row[1])
+            # Handle alternate formats
+            elif len(row) >= 2:
+                try: predicted_kp = float(row[1])
+                except Exception: pass
+                
+            if predicted_kp is not None:
+                diff = abs((target_utc - row_dt).total_seconds())
                 if diff < min_diff:
                     min_diff = diff
                     closest_kp = predicted_kp
                     
-            if closest_kp is not None:
-                return evaluate_gnss_risk(closest_kp)
-                
-    except Exception:
-        # If the API times out or the JSON changes structure, it falls to the silent return below
-        pass
-    
-    return {"kp": "N/A", "risk": "UNKNOWN", "impact": "NOAA Space Weather API Unreachable or Blocked."}
+        if closest_kp is not None:
+            return evaluate_gnss_risk(closest_kp)
+        else:
+            return {"kp": "ERR", "risk": "PARSE_FAIL", "impact": "Connected to NOAA, but data format unrecognized."}
+            
+    except requests.exceptions.HTTPError as err:
+        return {"kp": "ERR", "risk": "HTTP_ERR", "impact": f"NOAA Firewall/Server Block: {err}"}
+    except Exception as e:
+        return {"kp": "ERR", "risk": "SYS_ERR", "impact": f"System Exception: {str(e)}"}
