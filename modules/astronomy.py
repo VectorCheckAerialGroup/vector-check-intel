@@ -1,8 +1,6 @@
 import ephem
 import math
 from datetime import datetime, timezone
-from timezonefinder import TimezoneFinder
-import pytz
 
 def get_cardinal_direction(azimuth_deg):
     """Converts a 360-degree azimuth into an 8-point cardinal direction."""
@@ -10,35 +8,37 @@ def get_cardinal_direction(azimuth_deg):
     idx = int(round(azimuth_deg / 45.0)) % 8
     return directions[idx]
 
-def get_astronomical_data(lat, lon, time_utc):
-    """Calculates high-precision astronomical data and converts to local target time."""
-    # Identify target local timezone based on coordinates
-    tf = TimezoneFinder()
-    tz_str = tf.timezone_at(lng=lon, lat=lat)
-    local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
-
-    obs = ephem.Observer()
-    obs.lat = str(lat)
-    obs.lon = str(lon)
-    obs.date = time_utc
-
-    sun = ephem.Sun()
-    moon = ephem.Moon()
+def get_astronomical_data(lat, lon, time_utc, local_tz, tz_abbr):
+    """Calculates high-precision astronomical data using discrete observer states."""
     
-    # Calculate exact positions for the specific forecast hour
-    sun.compute(obs)
-    moon.compute(obs)
+    # 1. THE CURRENT STATE (Wired to your slider)
+    obs_current = ephem.Observer()
+    obs_current.lat = str(lat)
+    obs_current.lon = str(lon)
+    obs_current.date = time_utc
+
+    sun_current = ephem.Sun(obs_current)
+    moon_current = ephem.Moon(obs_current)
     
-    # Calculate daily events by setting observer to midnight UTC of the target date
+    sun_az_deg = math.degrees(sun_current.az)
+    sun_alt_deg = int(math.degrees(sun_current.alt))
+    moon_az_deg = math.degrees(moon_current.az)
+    moon_alt_deg = int(math.degrees(moon_current.alt))
+    moon_ill = int(moon_current.phase)
+
+    # 2. THE DAILY EVENT STATE (Locked to midnight for forward-sweeping)
     midnight = datetime(time_utc.year, time_utc.month, time_utc.day, tzinfo=timezone.utc)
     obs_daily = ephem.Observer()
     obs_daily.lat = str(lat)
     obs_daily.lon = str(lon)
     obs_daily.date = midnight
 
+    # Create separate bodies so we do not mutate the current slider positions
+    sun_daily = ephem.Sun()
+    moon_daily = ephem.Moon()
+
     def get_event(func, body):
         try:
-            # Calculate the event in UTC, then immediately convert to the target's local timezone
             dt_utc = func(body).datetime().replace(tzinfo=timezone.utc)
             dt_local = dt_utc.astimezone(local_tz)
             return dt_local.strftime("%H:%M")
@@ -49,30 +49,24 @@ def get_astronomical_data(lat, lon, time_utc):
         except Exception:
             return "N/A"
 
-    obs_daily.horizon = '-0:34' # Standard atmospheric refraction for sunrise/sunset
-    sunrise = get_event(obs_daily.next_rising, sun)
-    sunset = get_event(obs_daily.next_setting, sun)
+    obs_daily.horizon = '-0:34' 
+    sunrise = get_event(obs_daily.next_rising, sun_daily)
+    sunset = get_event(obs_daily.next_setting, sun_daily)
     
-    obs_daily.horizon = '0' # Moonrise/moonset
-    moonrise = get_event(obs_daily.next_rising, moon)
-    moonset = get_event(obs_daily.next_setting, moon)
+    obs_daily.horizon = '0' 
+    moonrise = get_event(obs_daily.next_rising, moon_daily)
+    moonset = get_event(obs_daily.next_setting, moon_daily)
 
-    obs_daily.horizon = '-6' # Civil Twilight boundary
-    dawn = get_event(obs_daily.next_rising, sun)
-    dusk = get_event(obs_daily.next_setting, sun)
-
-    sun_az_deg = math.degrees(sun.az)
-    moon_az_deg = math.degrees(moon.az)
-
-    # Grab the human-readable timezone abbreviation (e.g., EST, EDT, PST)
-    tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
+    obs_daily.horizon = '-6' 
+    dawn = get_event(obs_daily.next_rising, sun_daily)
+    dusk = get_event(obs_daily.next_setting, sun_daily)
 
     return {
         "sun_dir": get_cardinal_direction(sun_az_deg),
-        "sun_alt": int(math.degrees(sun.alt)),
+        "sun_alt": sun_alt_deg,
         "moon_dir": get_cardinal_direction(moon_az_deg),
-        "moon_alt": int(math.degrees(moon.alt)),
-        "moon_ill": int(moon.phase), # Percentage illuminated
+        "moon_alt": moon_alt_deg,
+        "moon_ill": moon_ill,
         "sunrise": sunrise,
         "sunset": sunset,
         "dawn": dawn,
