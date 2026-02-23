@@ -20,16 +20,43 @@ def get_aviation_weather(station):
         return "LINK FAILURE", "LINK FAILURE"
 
 @st.cache_data(ttl=600)
-def fetch_mission_data(lat, lon, model_url):
-    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600, 500, 400]
-    hourly = ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_direction_10m", "weather_code", "freezing_level_height"]
+def fetch_mission_data(lat, lon, base_url):
+    """Fetches high-resolution weather model data via Commercial API if available."""
     
-    if "gem" in model_url: 
-        hourly += ["wind_gusts_10m", "wind_speed_80m", "wind_speed_120m", "wind_direction_80m", "wind_direction_120m"]
-    else: 
-        hourly += ["wind_speed_100m", "wind_direction_100m"]
+    # 1. Intercept and swap to commercial endpoint if a key exists in the vault
+    api_key = None
+    try:
+        if "openmeteo" in st.secrets and "api_key" in st.secrets["openmeteo"]:
+            api_key = st.secrets["openmeteo"]["api_key"]
+            if "api.open-meteo.com" in base_url:
+                base_url = base_url.replace("api.open-meteo.com", "customer-api.open-meteo.com")
+    except Exception:
+        pass # Silently fallback to the free tier if no key is configured
         
-    hourly += [f"temperature_{p}hPa" for p in p_levels] + [f"dewpoint_{p}hPa" for p in p_levels] + [f"geopotential_height_{p}hPa" for p in p_levels] + [f"wind_speed_{p}hPa" for p in p_levels] + [f"wind_direction_{p}hPa" for p in p_levels]
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code,freezing_level_height",
+        "timezone": "UTC"
+    }
     
-    res = requests.get(model_url, params={"latitude": lat, "longitude": lon, "hourly": hourly, "wind_speed_unit": "kn", "forecast_hours": 48, "timezone": "UTC", "elevation": "nan"})
-    return res.json() if res.status_code == 200 else None
+    # 2. Append the required vertical atmospheric profile layers
+    if "gem" in base_url: # HRDPS Model
+        params["hourly"] += ",wind_speed_120m,wind_direction_120m,temperature_950hPa,geopotential_height_1000hPa,geopotential_height_950hPa,geopotential_height_925hPa,geopotential_height_900hPa,geopotential_height_850hPa,geopotential_height_800hPa,geopotential_height_700hPa,geopotential_height_600hPa,wind_speed_1000hPa,wind_direction_1000hPa,wind_speed_950hPa,wind_direction_950hPa,wind_speed_925hPa,wind_direction_925hPa,wind_speed_900hPa,wind_direction_900hPa,wind_speed_850hPa,wind_direction_850hPa,wind_speed_800hPa,wind_direction_800hPa,wind_speed_700hPa,wind_direction_700hPa,wind_speed_600hPa,wind_direction_600hPa"
+    else: # ECMWF Model
+        params["hourly"] += ",wind_speed_100m,wind_direction_100m,temperature_950hPa,geopotential_height_1000hPa,geopotential_height_950hPa,geopotential_height_925hPa,geopotential_height_900hPa,geopotential_height_850hPa,geopotential_height_800hPa,geopotential_height_700hPa,geopotential_height_600hPa,wind_speed_1000hPa,wind_direction_1000hPa,wind_speed_950hPa,wind_direction_950hPa,wind_speed_925hPa,wind_direction_925hPa,wind_speed_900hPa,wind_direction_900hPa,wind_speed_850hPa,wind_direction_850hPa,wind_speed_800hPa,wind_direction_800hPa,wind_speed_700hPa,wind_direction_700hPa,wind_speed_600hPa,wind_direction_600hPa"
+        
+    # 3. Inject the Commercial API Key into the request
+    if api_key:
+        params["apikey"] = api_key
+        
+    try:
+        response = requests.get(base_url, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as err:
+        st.error(f"🚨 DATALINK SEVERED: HTTP Error {err.response.status_code}")
+        return None
+    except Exception as e:
+        st.error(f"🚨 DATALINK SEVERED: Connection Timeout or System Error.")
+        return None
