@@ -76,7 +76,7 @@ except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
 
-# 3. SIDEBAR PARAMETERS (Wired to Session State Keys)
+# 3. SIDEBAR PARAMETERS
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
@@ -180,9 +180,12 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ASTRONOMICAL DATA SECTION (Moved Above Convective Profile) ---
+    # --- ASTRONOMICAL DATA SECTION ---
     dt_utc = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
     astro = get_astronomical_data(lat, lon, dt_utc)
+    
+    sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
+    moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
     
     st.divider()
     st.subheader(f"Light & Astronomical Profile ({astro['tz']})")
@@ -191,14 +194,14 @@ if data and "hourly" in data:
     ac2.metric("Sunrise", astro['sunrise'])
     ac3.metric("Sunset", astro['sunset'])
     ac4.metric("Dusk (Civil)", astro['dusk'])
-    ac5.metric("Sun Pos", f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°")
+    ac5.metric("Sun Pos", sun_pos_display)
 
     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
     mc1.metric("Moonrise", astro['moonrise'])
     mc2.metric("Moonset", astro['moonset'])
     mc3.metric("Illumination", f"{astro['moon_ill']}%")
-    mc4.metric("Moon Pos", f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°")
-    mc5.empty() # Maintains the clean 5-column structure visually
+    mc4.metric("Moon Pos", moon_pos_display)
+    mc5.empty()
     
     # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
     df_export = pd.concat([df_tactical, df_ext])
@@ -212,7 +215,7 @@ if data and "hourly" in data:
         f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n"
         f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
         f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
-        f"Position: Sun {astro['sun_dir']} ({astro['sun_alt']}°) | Moon {astro['moon_dir']} ({astro['moon_alt']}°)\n\n"
+        f"Position: Sun {sun_pos_display} | Moon {moon_pos_display}\n\n"
         f"METAR/SPECI:\n{clean_metar}\n\n"
         f"TAF:\n{clean_taf}\n\n"
         "--- HAZARD STACK (AGL) ---\n"
