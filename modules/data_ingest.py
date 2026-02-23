@@ -33,6 +33,7 @@ def fetch_mission_data(lat, lon, base_url):
     except Exception:
         pass # Silently fallback to the free tier if no key is configured
         
+    # 2. Base surface parameters
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -40,13 +41,18 @@ def fetch_mission_data(lat, lon, base_url):
         "timezone": "UTC"
     }
     
-    # 2. Append the required vertical atmospheric profile layers
-    if "gem" in base_url: # HRDPS Model
-        params["hourly"] += ",wind_speed_120m,wind_direction_120m,temperature_950hPa,geopotential_height_1000hPa,geopotential_height_950hPa,geopotential_height_925hPa,geopotential_height_900hPa,geopotential_height_850hPa,geopotential_height_800hPa,geopotential_height_700hPa,geopotential_height_600hPa,wind_speed_1000hPa,wind_direction_1000hPa,wind_speed_950hPa,wind_direction_950hPa,wind_speed_925hPa,wind_direction_925hPa,wind_speed_900hPa,wind_direction_900hPa,wind_speed_850hPa,wind_direction_850hPa,wind_speed_800hPa,wind_direction_800hPa,wind_speed_700hPa,wind_direction_700hPa,wind_speed_600hPa,wind_direction_600hPa"
-    else: # ECMWF Model
-        params["hourly"] += ",wind_speed_100m,wind_direction_100m,temperature_950hPa,geopotential_height_1000hPa,geopotential_height_950hPa,geopotential_height_925hPa,geopotential_height_900hPa,geopotential_height_850hPa,geopotential_height_800hPa,geopotential_height_700hPa,geopotential_height_600hPa,wind_speed_1000hPa,wind_direction_1000hPa,wind_speed_950hPa,wind_direction_950hPa,wind_speed_925hPa,wind_direction_925hPa,wind_speed_900hPa,wind_direction_900hPa,wind_speed_850hPa,wind_direction_850hPa,wind_speed_800hPa,wind_direction_800hPa,wind_speed_700hPa,wind_direction_700hPa,wind_speed_600hPa,wind_direction_600hPa"
+    # 3. Dynamically compile the vertical atmospheric profile layers
+    p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    for p in p_levels:
+        params["hourly"] += f",temperature_{p}hPa,relative_humidity_{p}hPa,geopotential_height_{p}hPa,wind_speed_{p}hPa,wind_direction_{p}hPa"
         
-    # 3. Inject the Commercial API Key into the request
+    # 4. Append the specific boundary layer winds based on the chosen model
+    if "gem" in base_url: # HRDPS Model
+        params["hourly"] += ",wind_speed_120m,wind_direction_120m"
+    else: # ECMWF Model
+        params["hourly"] += ",wind_speed_100m,wind_direction_100m"
+        
+    # 5. Inject the Commercial API Key into the request
     if api_key:
         params["apikey"] = api_key
         
