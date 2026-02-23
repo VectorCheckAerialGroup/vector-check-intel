@@ -25,7 +25,55 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. SIDEBAR PARAMETERS
+# 2. AUTHENTICATION GATEWAY
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        user = st.session_state["username"]
+        pwd = st.session_state["password"]
+        
+        # Check if user exists in secrets and password matches
+        if user in st.secrets["passwords"] and pwd == st.secrets["passwords"][user]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Do not store password in session state
+            del st.session_state["username"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show inputs for username + password.
+        st.title("Vector Check Aerial Group Inc.")
+        st.caption("Atmospheric Risk Management System - Restricted Access")
+        st.text_input("Operator ID", key="username")
+        st.text_input("Passcode", type="password", key="password")
+        st.button("Authenticate", on_click=password_entered)
+        return False
+        
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show input + error.
+        st.title("Vector Check Aerial Group Inc.")
+        st.caption("Atmospheric Risk Management System - Restricted Access")
+        st.text_input("Operator ID", key="username")
+        st.text_input("Passcode", type="password", key="password")
+        st.button("Authenticate", on_click=password_entered)
+        st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
+        return False
+        
+    else:
+        # Password correct.
+        return True
+
+# STOP EXECUTION IF NOT AUTHENTICATED
+if not check_password():
+    st.stop()
+
+# ---------------------------------------------------------
+# MAIN DASHBOARD EXECUTION (ONLY RUNS IF AUTHENTICATED)
+# ---------------------------------------------------------
+
+# 3. SIDEBAR PARAMETERS
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
     st.sidebar.image(LOGO_URL, use_container_width=True)
@@ -50,16 +98,16 @@ model_api_map = {
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
 }
 
-# 3. FETCH DATA & HEADER RENDER
+# 4. FETCH DATA & HEADER RENDER
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
 metar_raw, taf_raw = get_aviation_weather(icao)
 
 st.title("Atmospheric Risk Management")
-st.caption("Vector Check Aerial Group Inc.")
+st.caption("Vector Check Aerial Group Inc. - SYSTEM ACTIVE")
 st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
 st.divider()
 
-# 4. PROCESS FORECAST DATA
+# 5. PROCESS FORECAST DATA
 if data and "hourly" in data:
     h = data["hourly"]
     times = [datetime.fromisoformat(t).strftime("%d %b %H:%M Z") for t in h["time"]]
@@ -98,7 +146,7 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t])[idx]
     is_stable = t_950 is not None and t_950 > (t - 2.0)
 
-    # 5. TACTICAL TABLES
+    # 6. TACTICAL TABLES
     st.subheader("Tactical Hazard Stack (0-400ft AGL)")
     stack_tactical = []
     for alt in [400, 300, 200, 100]:
@@ -134,7 +182,6 @@ if data and "hourly" in data:
     # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
     
-    # Strip HTML tags and format line breaks for plain text compatibility
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
     clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
     
@@ -156,7 +203,7 @@ if data and "hourly" in data:
         mime="text/csv",
     )
 
-    # 6. CONVECTIVE PROFILE
+    # 7. CONVECTIVE PROFILE
     st.divider()
     st.subheader("Vertical Atmospheric Profile (Convective Ops)")
     sfc_h = data.get('elevation', 0) * 3.28084
@@ -167,7 +214,7 @@ if data and "hourly" in data:
     else:
         st.warning("Insufficient atmospheric layers available to render vertical profile.")
 
-# 7. LIABILITY ARMOR (DISCLAIMER)
+# 8. LIABILITY ARMOR (DISCLAIMER)
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #8E949E; font-size: 0.85rem; padding: 20px;">
