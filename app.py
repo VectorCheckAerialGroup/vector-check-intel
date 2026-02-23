@@ -9,6 +9,7 @@ from modules.data_ingest import get_aviation_weather, fetch_mission_data
 from modules.hazard_logic import get_precip_type, calculate_icing_profile, get_turb_ice
 from modules.visualizations import plot_convective_profile
 from modules.telemetry import log_action
+from modules.astronomy import get_astronomical_data
 
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -84,7 +85,6 @@ icao = st.sidebar.text_input("Nearest ICAO", value="CYTR", key="icao_input").upp
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
 
-# --- TELEMETRY CALLBACK: MANUAL REFRESH ---
 def log_refresh_callback():
     st.cache_data.clear()
     log_action(
@@ -136,6 +136,26 @@ if data and "hourly" in data:
     c[6].metric("Freezing LVL", frz_disp)
     c[7].metric("Cloud Base", f"{c_base} ft")
 
+    # --- ASTRONOMICAL DATA SECTION ---
+    dt_utc = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
+    astro = get_astronomical_data(lat, lon, dt_utc)
+    
+    st.subheader("Light & Astronomical Profile")
+    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
+    ac1.metric("Dawn (Civil)", astro['dawn'])
+    ac2.metric("Sunrise", astro['sunrise'])
+    ac3.metric("Sunset", astro['sunset'])
+    ac4.metric("Dusk (Civil)", astro['dusk'])
+    ac5.metric("Sun Pos", f"Az: {astro['sun_az']}° | Alt: {astro['sun_alt']}°")
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Moonrise", astro['moonrise'])
+    mc2.metric("Moonset", astro['moonset'])
+    mc3.metric("Illumination", f"{astro['moon_ill']}%")
+    mc4.metric("Moon Pos", f"Az: {astro['moon_az']}° | Alt: {astro['moon_alt']}°")
+    mc5.metric("Solar State", "DAY" if astro['sun_alt'] > 0 else "NIGHT")
+    st.divider()
+
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
     
@@ -180,7 +200,7 @@ if data and "hourly" in data:
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
 
-    # --- ADVANCED CSV EXPORT ENGINE WITH TELEMETRY CALLBACK ---
+    # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
     
     clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
@@ -189,7 +209,9 @@ if data and "hourly" in data:
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
-        f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n\n"
+        f"Forecast Model: {model_choice} | Valid Time: {selected_time}\n"
+        f"Sun: Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
+        f"Moon: Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n\n"
         f"METAR/SPECI:\n{clean_metar}\n\n"
         f"TAF:\n{clean_taf}\n\n"
         "--- HAZARD STACK (AGL) ---\n"
