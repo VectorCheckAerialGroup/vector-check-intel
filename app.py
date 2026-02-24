@@ -132,10 +132,23 @@ if data and "hourly" in data:
     selected_time_str = st.sidebar.select_slider("Forecast Hour:", options=times_display, value=times_display[0])
     idx = times_display.index(selected_time_str)
     
-    # Extract Data for the Target Hour
+    # --- VECTOR CHECK QC: WIND UNIT STANDARDIZATION ---
+    # Dynamically detect the API's reported wind unit and force conversion to KT
+    raw_wind_unit = data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
+    
+    if "km" in raw_wind_unit:
+        kt_conv = 0.539957
+    elif "m/s" in raw_wind_unit:
+        kt_conv = 1.94384
+    elif "mph" in raw_wind_unit:
+        kt_conv = 0.868976
+    else:
+        kt_conv = 1.0  # Assumes it is already in knots
+
+    # Extract and Convert Surface Data
     t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
-    w_spd = h['wind_speed_10m'][idx]
+    w_spd = h['wind_speed_10m'][idx] * kt_conv  # QC Fix applied
     wx = h['weather_code'][idx]
     td = t_temp - ((100 - rh) / 5) if (t_temp is not None and rh is not None) else t_temp
     sfc_dir = int(h['wind_direction_10m'][idx])
@@ -143,13 +156,20 @@ if data and "hourly" in data:
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
     c_base = int((t_temp - td)*400) if (t_temp is not None and td is not None) else 10000
 
-    raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
-    gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
+    # Gust QC and Conversion
+    raw_gst_base = h.get('wind_gusts_10m', [h['wind_speed_10m'][idx]])[idx]
+    raw_gst_kt = raw_gst_base * kt_conv
+    gst = (w_spd * 1.25) if raw_gst_kt <= w_spd else raw_gst_kt
     
+    # Upper-Level Wind QC and Conversion
     if "gem" in model_api_map[model_choice]:
-        u_v, u_dir, u_h = h['wind_speed_120m'][idx], h['wind_direction_120m'][idx], 120
+        u_v = h['wind_speed_120m'][idx] * kt_conv
+        u_dir = h['wind_direction_120m'][idx]
+        u_h = 120
     else:
-        u_v, u_dir, u_h = h['wind_speed_100m'][idx], h['wind_direction_100m'][idx], 100
+        u_v = h['wind_speed_100m'][idx] * kt_conv
+        u_dir = h['wind_direction_100m'][idx]
+        u_h = 100
         
     icing_cond = calculate_icing_profile(h, idx, wx)
     t_950 = h.get('temperature_950hPa', [t_temp])[idx]
@@ -192,7 +212,14 @@ if data and "hourly" in data:
 
     st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
     p_levels_traj = [1000, 950, 925, 900, 850, 800, 700, 600]
-    p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 's': h.get(f'wind_speed_{p}hPa')[idx], 'd': h.get(f'wind_direction_{p}hPa')[idx]} for p in p_levels_traj if h.get(f'wind_speed_{p}hPa')[idx] is not None], key=lambda x: x['h'])
+    
+    # QC Fix applied to the pressure level list comprehension
+    p_profile = sorted([{'h': h.get(f'geopotential_height_{p}hPa')[idx]*3.28, 
+                         's': h.get(f'wind_speed_{p}hPa')[idx] * kt_conv, 
+                         'd': h.get(f'wind_direction_{p}hPa')[idx]} 
+                        for p in p_levels_traj if h.get(f'wind_speed_{p}hPa')[idx] is not None], 
+                       key=lambda x: x['h'])
+                       
     stack_ext = []
     for alt in [5000, 4000, 3000, 2000, 1000]:
         pts = [{'h': u_h*3.28, 's': u_v, 'd': u_dir}] + p_profile
@@ -212,7 +239,6 @@ if data and "hourly" in data:
 
     st.divider()
 
-    # --- ASTRONOMICAL SECTION (MOVED DOWN) ---
     st.subheader(f"Light Profile ({astro['tz']})")
     ac1, ac2, ac3, ac4, ac5 = st.columns(5)
     ac1.metric("Dawn (Civil)", astro['dawn'])
@@ -228,7 +254,6 @@ if data and "hourly" in data:
     mc4.metric("Moon Pos", moon_pos_display)
     mc5.empty()
 
-    # --- SPACE WEATHER SECTION (MOVED DOWN) ---
     st.divider()
     st.subheader("Space Weather (GNSS & C2 Link)")
     
