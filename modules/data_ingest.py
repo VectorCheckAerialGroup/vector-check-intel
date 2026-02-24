@@ -1,10 +1,13 @@
+# modules/data_ingest.py
 import requests
 import streamlit as st
+from modules.hazard_logic import apply_tactical_highlights
 
-@st.cache_data(ttl=900)  # Caches for 15 minutes to prevent API throttling
+@st.cache_data(ttl=900)
 def get_aviation_weather(icao):
     """
-    Fetches raw METAR and TAF strings directly from the Aviation Weather Center.
+    Fetches raw METAR and TAF strings directly from the Aviation Weather Center
+    and applies tactical HTML formatting.
     """
     if not icao or icao == "UNKNOWN":
         return "N/A", "N/A"
@@ -24,7 +27,11 @@ def get_aviation_weather(icao):
         if not taf_raw: 
             taf_raw = "NIL"
 
-        return metar_raw, taf_raw
+        # Apply HTML formatting before passing to the UI
+        formatted_metar = apply_tactical_highlights(metar_raw)
+        formatted_taf = apply_tactical_highlights(taf_raw)
+
+        return formatted_metar, formatted_taf
         
     except Exception as e:
         return f"API ERROR: {e}", f"API ERROR: {e}"
@@ -48,7 +55,6 @@ def fetch_mission_data(lat, lon, model_api_url):
             "timezone": "UTC"
         }
         
-        # Append all pressure levels required for the Extended Trajectory and Sounding
         p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
         for p in p_levels:
             params["hourly"].extend([
