@@ -146,26 +146,27 @@ if data and "hourly" in data:
     def update_time(offset):
         try:
             curr = times_display.index(st.session_state.forecast_time_val)
-            st.session_state.forecast_time_val = times_display[min(len(times_display)-1, curr + offset)]
+            # Ensure the index doesn't drop below 0 or exceed the array bounds
+            new_idx = max(0, min(len(times_display) - 1, curr + offset))
+            st.session_state.forecast_time_val = times_display[new_idx]
         except ValueError:
             st.session_state.forecast_time_val = times_display[0]
 
-    def reset_time():
-        st.session_state.forecast_time_val = times_display[0]
-
     selected_time_str = st.sidebar.select_slider(
-        "Forecast Hour:", 
+        "Forecast Time:", 
         options=times_display, 
         key="forecast_time_val"
     )
     idx = times_display.index(selected_time_str)
 
-    # Inject Quick Jump Buttons
-    btn_col1, btn_col2, btn_col3, btn_col4 = st.sidebar.columns(4)
-    btn_col1.button("Now", on_click=reset_time)
-    btn_col2.button("+3h", on_click=update_time, args=(3,))
-    btn_col3.button("+6h", on_click=update_time, args=(6,))
-    btn_col4.button("+12h", on_click=update_time, args=(12,))
+    # Dynamic Forecast Navigator
+    nav_col1, nav_col2, nav_col3 = st.sidebar.columns([1, 2, 1])
+    nav_col1.button("◄", on_click=update_time, args=(-1,), use_container_width=True)
+    nav_col2.markdown(
+        f"<div style='text-align: center; font-size: 1.1rem; font-weight: bold; color: #E58E26; margin-top: 5px;'>+ {idx} HR</div>", 
+        unsafe_allow_html=True
+    )
+    nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True)
 
     st.sidebar.divider()
     
@@ -352,7 +353,18 @@ if data and "hourly" in data:
     taf_disp = apply_tactical_highlights(clean_taf).replace('\n', '<br>')
     
     st.subheader(f"Actuals ({icao})")
-    st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_disp}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_disp}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'''
+    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
+        <div class="obs-text">
+            <strong style="color: #8E949E;">METAR/SPECI</strong><br>
+            {metar_disp}<br><br>
+            <strong style="color: #8E949E;">TAF</strong><br>
+            <div style="line-height: 1.2; font-family: monospace; font-size: 0.95rem; margin-top: 5px;">
+                {taf_disp}
+            </div>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
     
     st.divider()
 
