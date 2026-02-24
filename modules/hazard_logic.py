@@ -61,7 +61,8 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
     # Assign Turbulence Type
     turb_type = ""
     if turb_sev != "Nil":
-        if wx in [95, 96, 97, 98, 99] or not is_stable:
+        # Restrict CVCTV purely to convective precipitation codes (Showers & TS)
+        if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]:
             turb_type = "CVCTV"  # Convective
         elif shear > gust_delta and shear >= mdt_g:
             turb_type = "LLWS"   # Low-Level Wind Shear
