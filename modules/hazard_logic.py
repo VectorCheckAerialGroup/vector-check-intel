@@ -1,11 +1,10 @@
-# modules/hazard_logic.py
 import re
 
 def apply_tactical_highlights(text):
     """
     Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
-    Isolates temporal periods to ensure only the lowest flight category is highlighted.
-    Colors strict to Vector Check Standard: LIFR (Orange), IFR (Red), MVFR (Yellow).
+    Streamlined to Vector Check strict Go/No-Go thresholds: 
+    Highlights ONLY IFR conditions (<1000ft / <3SM) and Freezing phenomena.
     """
     if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
         return text
@@ -17,40 +16,20 @@ def apply_tactical_highlights(text):
     
     for period in periods:
         if not period.strip(): continue
-        
-        # 1. Evaluate the absolute lowest flight category for this specific period
-        # LIFR: Ceilings < 500ft OR Vis < 1SM
-        is_lifr = bool(re.search(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', period)) or \
-                  bool(re.search(r'\b(0SM|M?1/[248]SM|3/4SM)\b', period))
-                  
-        # IFR: Ceilings 500ft to < 1000ft OR Vis 1SM to < 3SM
-        is_ifr = bool(re.search(r'\b(OVC00[5-9]|BKN00[5-9]|VV00[5-9])\b', period)) or \
-                 bool(re.search(r'\b([1-2]SM|[1-2]\s?[1-3]/[248]SM)\b', period))
-                 
-        # MVFR: Ceilings 1000ft to 3000ft OR Vis 3SM to 5SM
-        is_mvfr = bool(re.search(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', period)) or \
-                  bool(re.search(r'\b([3-5]SM)\b', period))
 
-        # 2. Apply Hazard Highlighting (Always triggers regardless of category)
-        # (?!ST) negative lookahead explicitly prevents "FCST" from triggering the Funnel Cloud alarm
-        period = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span style="background-color: #FF4B4B; color: white; padding: 2px; border-radius: 3px; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #FF4B4B; font-weight: bold; border-bottom: 2px solid #FF4B4B;">\1</span>', period)
+        # 1. AIRFRAME THREAT: Freezing Precipitation & Fog
+        # Targets any group containing FZ (e.g., -FZRA, FZDZ, FZFG)
+        period = re.sub(r'\b([+-]?FZ[A-Z]*)\b', r'<span style="background-color: #FF4B4B; color: white; padding: 2px; border-radius: 3px; font-weight: bold;">\1</span>', period)
 
-        # 3. Apply Strict Lowest-Category Highlighting (Vector Check Standard Colors)
-        if is_lifr:
-            # LIFR = Orange (#FF9800)
-            period = re.sub(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', r'<span style="color: #FF9800; font-weight: bold;">\1</span>', period)
-            period = re.sub(r'\b(0SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #FF9800; font-weight: bold;">\1</span>', period)
-        elif is_ifr:
-            # IFR = Red (#FF4B4B)
-            period = re.sub(r'\b(OVC00[5-9]|BKN00[5-9]|VV00[5-9])\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
-            period = re.sub(r'\b([1-2]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
-        elif is_mvfr:
-            # MVFR = Yellow (#FBBF24)
-            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
-            period = re.sub(r'\b([3-5]SM)\b', r'<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
+        # 2. IFR CEILINGS: < 1000 ft
+        # Targets OVC, BKN, or VV from 000 up to 009 (900 ft)
+        period = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV00[0-9])\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
 
-        # 4. Structural Spacing (Line breaks for temporal markers)
+        # 3. IFR VISIBILITY: < 3 SM
+        # Targets 0SM, 1SM, 2SM, and all aviation fractions (1/4SM, 1/2SM, 1 1/2SM, etc.)
+        period = re.sub(r'\b(0SM|[1-2]SM|[1-2]\s?[1-3]/[248]SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
+
+        # 4. STRUCTURAL SPACING (Line breaks for temporal markers)
         period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
         period = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
         period = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
