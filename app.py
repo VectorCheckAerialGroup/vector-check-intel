@@ -85,6 +85,17 @@ lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
 icao = st.sidebar.text_input("Nearest ICAO", value="CYTR", key="icao_input").upper().strip()
 
+# New: Transport Canada Airframe Classification
+airframe_class = st.sidebar.selectbox(
+    "Airframe Class (Transport Canada):", 
+    options=[
+        "Small (250g - 25kg)", 
+        "Micro (< 250g)", 
+        "Heavy (> 25kg)", 
+        "Rotary (Helicopter/VTOL)"
+    ]
+)
+
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 terrain_type = st.sidebar.selectbox("Terrain Roughness:", options=["Land", "Water", "Mountains"])
 
@@ -193,12 +204,11 @@ if data and "hourly" in data:
     
     for alt in [400, 300, 200, 100]:
         s_c = w_spd + (u_v - w_spd) * (math.log(alt*0.3048/10) / math.log(u_h/10))
-        
-        # APPLY LINEAR DELTA INSTEAD OF RATIO MULTIPLIER
         g_c = s_c + gust_delta
-        
         d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
-        turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond)
+        
+        # Pass the selected airframe class to scale the hazard appropriately
+        turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class)
         
         stack_tactical.append({
             "Alt (AGL)": f"{alt}ft", 
@@ -231,7 +241,11 @@ if data and "hourly" in data:
         frac = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
         s_e = blw['s'] + frac * (abv['s'] - blw['s'])
         d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
-        turb, ice = get_turb_ice(alt, s_e, w_spd, s_e, wx, is_stable, icing_cond)
+        
+        # The extended trajectory inherits the linear gust delta for consistent scaling
+        g_e = s_e + gust_delta
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class)
+        
         stack_ext.append({
             "Alt (AGL)": f"{alt}ft", 
             "Dir": f"{int(d_e):03d}°", 
@@ -292,7 +306,7 @@ if data and "hourly" in data:
         "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
-        f"Wind Unit Standard: {raw_wind_unit}\n" 
+        f"Airframe Class: {airframe_class} | Wind Unit Standard: {raw_wind_unit}\n" 
         f"Sun ({astro['tz']}): Rise {astro['sunrise']} | Set {astro['sunset']} | Civil Dawn {astro['dawn']} | Civil Dusk {astro['dusk']}\n"
         f"Moon ({astro['tz']}): Rise {astro['moonrise']} | Set {astro['moonset']} | Illum {astro['moon_ill']}%\n"
         f"Space Weather: Kp Index {space_data['kp']} | GNSS Risk: {space_data['risk']}\n"
@@ -310,7 +324,7 @@ if data and "hourly" in data:
             st.session_state.get("lat_input", 44.1628), 
             st.session_state.get("lon_input", -77.3832), 
             st.session_state.get("icao_input", "CYTR"), 
-            f"DOWNLOAD_CSV_{model_choice}"
+            f"DOWNLOAD_CSV_{model_choice}_{airframe_class[:5]}"
         )
     
     st.download_button(
