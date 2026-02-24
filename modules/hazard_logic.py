@@ -27,10 +27,7 @@ def calculate_icing_profile(h, idx, wx_code):
     temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
     
-    # Identify visible moisture (High RH or active precip codes)
     visible_moisture = rh >= 85 or (wx_code >= 50 and wx_code <= 99)
-    
-    # Identify freezing precip codes specifically
     freezing_precip = wx_code in [48, 56, 57, 66, 67]
     
     if freezing_precip:
@@ -45,31 +42,40 @@ def calculate_icing_profile(h, idx, wx_code):
     else:
         return "NIL"
 
-def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond):
+def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class):
     """
     Efficacy-Audited Turbulence & Icing Engine.
-    Calculates mechanical turbulence based on the linear gust spread and base wind speed,
-    weighted heavily for low-altitude (0-400ft) uncrewed flight dynamics.
+    Dynamically scales hazard severity based on Transport Canada airframe classifications.
     """
-    # 1. CALCULATE GUST SPREAD (The mechanical bump)
     gust_spread = max(0, g_c - s_c)
-    
-    # 2. EVALUATE TURBULENCE RISK
     turb_risk = "NIL"
     
-    # Severe criteria: Massive gust spread or extremely high sustained winds
-    if gust_spread >= 15 or s_c >= 30 or g_c >= 35 or wx in [95, 96, 99]:
+    # Define scaling thresholds based on airframe mass/inertia
+    if "Micro" in airframe_class:
+        sev_spread, sev_sus, sev_gst = 10, 15, 20
+        mod_spread, mod_sus = 5, 10
+    elif "Small" in airframe_class:
+        sev_spread, sev_sus, sev_gst = 15, 25, 30
+        mod_spread, mod_sus = 10, 15
+    elif "Heavy" in airframe_class:
+        sev_spread, sev_sus, sev_gst = 20, 35, 40
+        mod_spread, mod_sus = 15, 25
+    else: # Rotary (Helicopter/Large VTOL)
+        sev_spread, sev_sus, sev_gst = 25, 45, 50
+        mod_spread, mod_sus = 15, 30
+
+    # 1. EVALUATE TURBULENCE RISK AGAINST AIRFRAME LIMITS
+    if gust_spread >= sev_spread or s_c >= sev_sus or g_c >= sev_gst or wx in [95, 96, 99]:
         turb_risk = "SEVERE"
-    # Moderate criteria: Noticeable bumpiness, standard boundary layer mixing
-    elif gust_spread >= 10 or s_c >= 20 or (not is_stable and alt <= 400 and s_c >= 15):
+    elif gust_spread >= mod_spread or s_c >= mod_sus or (not is_stable and alt <= 400 and s_c >= mod_sus - 5):
         turb_risk = "MODERATE"
-    # Light criteria: Mild mechanical friction
-    elif gust_spread >= 5 or s_c >= 10 or not is_stable:
+    elif gust_spread >= (mod_spread / 2) or s_c >= (mod_sus / 2) or not is_stable:
         turb_risk = "LIGHT"
 
-    # 3. EVALUATE ICING RISK ALOFT
-    # If surface icing is predicted, it generally propagates up through the boundary layer 
-    # unless a thermal inversion is actively tracked (which requires higher-level sounding math).
-    ice_risk = icing_cond if icing_cond != "NIL" else "NIL"
+    # 2. EVALUATE ICING RISK
+    # Rotary wings are exceptionally susceptible to icing degradation on rotor blades.
+    ice_risk = icing_cond
+    if "Rotary" in airframe_class and ice_risk in ["TRACE (Ice Crystals)", "LIGHT (Rime)"]:
+        ice_risk = "MODERATE (Rotor Degradation)"
 
     return turb_risk, ice_risk
