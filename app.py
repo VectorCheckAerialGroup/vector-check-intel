@@ -178,19 +178,30 @@ if data and "hourly" in data:
     w_spd = h['wind_speed_10m'][idx] 
     wx = h['weather_code'][idx]
     
-    # August-Roche-Magnus precise dewpoint calculation
+    # August-Roche-Magnus precise dewpoint calculation & Cloud Base Rounding
     if t_temp is not None and rh is not None and rh > 0:
         a = 17.625
         b = 243.04
         alpha = math.log(rh / 100.0) + ((a * t_temp) / (b + t_temp))
         td = (b * alpha) / (a - alpha)
-        c_base = int((t_temp - td) * 400)
-        c_base = max(0, c_base) # Prevent negative bases in super-saturated inversions
+        
+        # Calculate raw base and ROUND TO NEAREST HUNDRED
+        raw_base = max(0, (t_temp - td) * 400)
+        c_base = int(round(raw_base, -2)) 
     else:
         td = t_temp
         c_base = 10000
 
-    sfc_dir = int(h['wind_direction_10m'][idx])
+    # Extract wind direction and ROUND TO NEAREST TEN degrees
+    raw_dir = float(h['wind_direction_10m'][idx])
+    sfc_dir = int(round(raw_dir, -1))
+    
+    # Standardize North (360) vs Calm (000)
+    if sfc_dir == 0 and w_spd > 0:
+        sfc_dir = 360
+    elif sfc_dir == 360 and w_spd == 0:
+        sfc_dir = 0
+
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
 
@@ -331,17 +342,22 @@ if data and "hourly" in data:
 
     st.divider()
 
-    # --- METAR / TAF MOVED HERE ---
+    # --- METAR / TAF RENDERING ENGINE ---
+    # 1. Strip away any old, hardcoded HTML from the ingestion module
+    clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
+    clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
+    
+    # 2. Apply the strict Red-Only tactical highlights
+    metar_disp = apply_tactical_highlights(clean_metar)
+    taf_disp = apply_tactical_highlights(clean_taf).replace('\n', '<br>')
+    
     st.subheader(f"Actuals ({icao})")
-    st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_disp}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_disp}</div></div>', unsafe_allow_html=True)
     
     st.divider()
 
     # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
-    
-    clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
-    clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
     
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
