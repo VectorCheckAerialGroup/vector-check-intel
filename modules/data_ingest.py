@@ -1,5 +1,6 @@
 # modules/data_ingest.py
 import requests
+import time
 import streamlit as st
 from modules.hazard_logic import apply_tactical_highlights
 
@@ -7,25 +8,35 @@ from modules.hazard_logic import apply_tactical_highlights
 def get_aviation_weather(icao):
     """
     Fetches raw METAR and TAF strings directly from the Aviation Weather Center
-    and applies tactical HTML formatting.
+    using an active retry/backoff loop to prevent timeout crashes.
     """
     if not icao or icao == "UNKNOWN":
         return "N/A", "N/A"
         
+    def fetch_with_retry(url, retries=3, timeout=10):
+        """Helper function to hit the API multiple times before failing."""
+        for attempt in range(retries):
+            try:
+                response = requests.get(url, timeout=timeout)
+                if response.status_code == 200:
+                    text = response.text.strip()
+                    return text if text else "NIL"
+                return "UNAVAILABLE"
+            except requests.exceptions.RequestException:
+                if attempt < retries - 1:
+                    time.sleep(2)  # Backoff for 2 seconds before striking again
+                else:
+                    return f"API ERROR: Connection Timed Out after {retries} attempts."
+        return "UNAVAILABLE"
+
     try:
         # Fetch METAR
         metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw"
-        metar_resp = requests.get(metar_url, timeout=5)
-        metar_raw = metar_resp.text.strip() if metar_resp.status_code == 200 else "UNAVAILABLE"
-        if not metar_raw: 
-            metar_raw = "NIL"
+        metar_raw = fetch_with_retry(metar_url)
 
         # Fetch TAF
         taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
-        taf_resp = requests.get(taf_url, timeout=5)
-        taf_raw = taf_resp.text.strip() if taf_resp.status_code == 200 else "UNAVAILABLE"
-        if not taf_raw: 
-            taf_raw = "NIL"
+        taf_raw = fetch_with_retry(taf_url)
 
         # Apply HTML formatting before passing to the UI
         formatted_metar = apply_tactical_highlights(metar_raw)
@@ -40,6 +51,7 @@ def get_aviation_weather(icao):
 def fetch_mission_data(lat, lon, model_api_url):
     """
     Fetches the high-resolution atmospheric column from Open-Meteo.
+    Timeout increased to 15 seconds to handle massive spatial payloads.
     """
     try:
         params = {
@@ -65,7 +77,8 @@ def fetch_mission_data(lat, lon, model_api_url):
                 f"wind_direction_{p}hPa"
             ])
 
-        response = requests.get(model_api_url, params=params, timeout=10)
+        # Increased timeout to 15 seconds for heavy data pulls
+        response = requests.get(model_api_url, params=params, timeout=15)
         
         if response.status_code == 200:
             return response.json()
