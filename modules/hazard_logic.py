@@ -33,68 +33,72 @@ def calculate_icing_profile(h, idx, wx):
 
 def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
     """
-    Calculates altitude-specific turbulence and icing using manned aviation doctrine
-    scaled to Transport Canada RPA airframe classes where physically appropriate.
+    Calculates altitude-specific turbulence and icing using explicit meteorological doctrine.
+    Strictly segregates boundary layer (MECH/LLWS) from upper-level (SHEAR).
     """
-    # 1. AIRFRAME SCALING FOR MECHANICAL TURBULENCE ONLY
-    # Mechanical turbulence scales with mass. 
-    if "Micro" in airframe_class:
-        scale = 0.4
-    elif "Small" in airframe_class:
-        scale = 0.6
-    else: 
-        scale = 1.0 # Heavy / Rotary uses exact manned chart values
-
-    # 2. EVALUATE MECHANICAL TURBULENCE (Absolute Wind/Gust over Land)
+    # 1. BASE VARIABLES
+    shear_total = abs(wind_alt - wind_sfc)
+    shear_rate_1000 = (shear_total / alt) * 1000 if alt > 0 else 0
     mech_wind = max(wind_alt, gust_alt)
-    mech_lvl = 0
-    if mech_wind >= (40 * scale):
-        mech_lvl = 3 # SEV
-    elif mech_wind >= (25 * scale):
-        mech_lvl = 2 # MOD
-    elif mech_wind >= (15 * scale):
-        mech_lvl = 1 # LGT
+    
+    # Airframe scaling applies ONLY to Mechanical wind resistance
+    scale = 0.4 if "Micro" in airframe_class else (0.6 if "Small" in airframe_class else 1.0)
 
-    # 3. EVALUATE VERTICAL SHEAR (Atmospheric Gradient)
-    shear_lvl = 0
-    if alt > 0:
-        # Calculate bulk shear rate per 1000 feet from surface to target altitude
-        shear_per_1000 = (abs(wind_alt - wind_sfc) / alt) * 1000
-        
-        # Shear severity strictly follows meteorological doctrine without airframe scaling.
-        # >10kt/1000' is Severe CAT/Shear. 
-        if shear_per_1000 >= 10:
-            shear_lvl = 3 # SEV
-        elif shear_per_1000 >= 6:
-            shear_lvl = 2 # MOD
-        elif shear_per_1000 >= 3:
-            shear_lvl = 1 # LGT
-
-    # 4. EVALUATE CONVECTIVE TURBULENCE (Based on WMO Precipitation)
+    # 2. EVALUATE CONVECTIVE TURBULENCE (Global Altitude)
     conv_lvl = 0
     if wx in [80, 81, 82, 85, 86, 95, 96, 97, 98, 99]: 
         conv_lvl = 3 if wx >= 95 else 2 # SEV for TS, MOD for Showers
 
-    # 5. DETERMINE DOMINANT THREAT
-    max_threat = max(mech_lvl, shear_lvl, conv_lvl)
-    
-    turb_str = "Nil"
-    if max_threat > 0:
-        # Determine Severity String
-        sev_str = "SEV" if max_threat == 3 else ("MDT" if max_threat == 2 else "LGT")
-        
-        # Determine Mechanism String (Priority: Convective -> Shear -> Mech)
-        if max_threat == conv_lvl:
-            type_str = "CVCTV"
-        elif max_threat == shear_lvl:
-            # Differentiate between boundary layer LLWS and upper-level shear
-            type_str = "LLWS" if alt <= 2000 else "SHEAR"
-        else:
-            type_str = "MECH"
-            
-        turb_str = f"{sev_str} {type_str}"
+    # 3. EVALUATE ALTITUDE-DEPENDENT THREATS
+    threats = []
+    if conv_lvl > 0:
+        threats.append((conv_lvl, "CVCTV"))
 
-    # 6. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
+    if alt <= 3000:
+        # --- BOUNDARY LAYER LOGIC (<= 3000 ft) ---
+        
+        # A. LLWS Doctrine Thresholds
+        # Note: PIREP logic (+/- 20kts < 1500ft) is acknowledged but requires future API integration
+        is_llws = False
+        if (shear_rate_1000 >= 20) or \
+           (alt <= 500 and shear_total >= 25) or \
+           (alt <= 1000 and shear_total >= 40) or \
+           (alt <= 1500 and shear_total >= 50):
+            is_llws = True
+            
+        # B. MECH Doctrine Thresholds (Scaled)
+        mech_lvl = 0
+        if mech_wind >= (40 * scale): mech_lvl = 3
+        elif mech_wind >= (25 * scale): mech_lvl = 2
+        elif mech_wind >= (15 * scale): mech_lvl = 1
+
+        # C. Mutual Exclusivity Application
+        if is_llws:
+            threats.append((3, "LLWS")) # Doctrine thresholds dictate Severe LLWS
+        elif mech_lvl > 0:
+            threats.append((mech_lvl, "MECH"))
+            
+    else:
+        # --- UPPER LEVEL LOGIC (> 3000 ft) ---
+        shear_lvl = 0
+        if shear_rate_1000 >= 10: shear_lvl = 3
+        elif shear_rate_1000 >= 6: shear_lvl = 2
+        elif shear_rate_1000 >= 3: shear_lvl = 1
+        
+        if shear_lvl > 0:
+            threats.append((shear_lvl, "SHEAR"))
+
+    # 4. RESOLVE DOMINANT TURBULENCE
+    turb_str = "Nil"
+    if threats:
+        # Sort by highest severity first
+        threats.sort(key=lambda x: x[0], reverse=True)
+        top_sev, top_type = threats[0]
+        
+        sev_str = "SEV" if top_sev == 3 else ("MDT" if top_sev == 2 else "LGT")
+        turb_str = f"{sev_str} {top_type}"
+
+    # 5. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
     t_alt = t_temp - (alt / 1000.0) * 2.0
     ice_sev = "Nil"
     ice_type = ""
@@ -102,16 +106,15 @@ def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, a
     if icing_cond or wx in [48, 56, 57, 66, 67, 71, 73, 75, 77, 85, 86]:
         # Icing generally occurs between 0C and -20C
         if 0 >= t_alt >= -20:
-            
             # Severity Logic
-            if wx in [56, 57, 66, 67]: # Freezing Rain/Drizzle is automatically Severe
+            if wx in [56, 57, 66, 67]: 
                 ice_sev = "SEV"
             elif wx in [73, 75, 86] or (icing_cond and t_alt >= -10):
                 ice_sev = "MDT"
             else:
                 ice_sev = "LGT"
 
-            # Type Logic based on droplet freezing speed
+            # Type Logic
             if t_alt >= -5:
                 ice_type = "CLR"
             elif t_alt >= -15:
