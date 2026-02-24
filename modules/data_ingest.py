@@ -1,4 +1,3 @@
-# modules/data_ingest.py
 import requests
 import time
 import streamlit as st
@@ -51,6 +50,7 @@ def get_aviation_weather(icao):
 def fetch_mission_data(lat, lon, model_api_url):
     """
     Fetches the high-resolution atmospheric column from Open-Meteo.
+    Dynamically switches to commercial endpoints if an API key is present in secrets.
     Timeout increased to 15 seconds to handle massive spatial payloads.
     """
     try:
@@ -76,6 +76,18 @@ def fetch_mission_data(lat, lon, model_api_url):
                 f"wind_speed_{p}hPa",
                 f"wind_direction_{p}hPa"
             ])
+
+        # --- COMMERCIAL API UPGRADE LOGIC ---
+        # Try to pull the key. If the section doesn't exist, fail gracefully.
+        try:
+            api_key = st.secrets["open_meteo"]["api_key"]
+            if api_key:
+                params["apikey"] = api_key
+                # Swap the base URL to the commercial server
+                model_api_url = model_api_url.replace("api.open-meteo.com", "customer-api.open-meteo.com")
+        except (KeyError, FileNotFoundError):
+            # No key found. Proceed with standard free endpoint.
+            pass
 
         # Increased timeout to 15 seconds for heavy data pulls
         response = requests.get(model_api_url, params=params, timeout=15)
