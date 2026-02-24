@@ -4,33 +4,51 @@ import re
 def apply_tactical_highlights(text):
     """
     Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
-    Applies line breaks for temporal shifts and highlights critical hazards.
+    Isolates temporal periods to ensure only the lowest flight category is highlighted.
     """
     if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
         return text
         
-    # 1. Structural Spacing (TAF Temporal Markers)
-    text = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #60A5FA; font-weight: bold;">\1</span>', text)
-    text = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FBBF24; font-weight: bold;">\1</span>', text)
-    text = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #A78BFA; font-weight: bold;">\1</span>', text)
-    text = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', text)
+    # Split text by temporal markers into independent forecast periods.
+    # Positive lookahead (?=...) ensures the marker (e.g., FM120000) stays attached to its text block.
+    periods = re.split(r'(?=\bFM\d{6}\b|\bTEMPO\b|\bBECMG\b|\bPROB\d{2}\b)', text)
     
-    # 2. Critical Hazard Highlighting (Freezing, Thunderstorms, Funnel Clouds)
-    # The (?!ST) negative lookahead explicitly prevents "FCST" from triggering the Funnel Cloud (FC) alarm.
-    text = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', text)
+    formatted_periods = []
     
-    # 3. Low-Level Wind Shear Warning
-    text = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #ff4b4b; font-weight: bold; border-bottom: 2px solid #ff4b4b;">\1</span>', text)
-    
-    # 4. IFR Visual Flags (Red: Ceilings < 1000ft or Vis < 3SM)
-    text = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', r'<span class="ifr-text">\1</span>', text)
-    text = re.sub(r'\b(M?1/[428]SM|M?[0-2]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span class="ifr-text">\1</span>', text)
+    for period in periods:
+        if not period.strip(): continue
+        
+        # 1. Evaluate the absolute lowest flight category for this specific period
+        is_ifr = bool(re.search(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', period)) or \
+                 bool(re.search(r'\b([M]?[0-2]SM|M?1/[428]SM|[1-2]\s?[1-3]/[248]SM)\b', period))
+                 
+        is_mvfr = bool(re.search(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', period)) or \
+                  bool(re.search(r'\b([3-5]SM)\b', period))
 
-    # 5. MVFR Visual Flags (Yellow: Ceilings 1000-3000ft or Vis 3-5SM)
-    text = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span class="mvfr-text">\1</span>', text)
-    text = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', text)
+        # 2. Apply Hazard Highlighting (Always triggers regardless of category)
+        # (?!ST) negative lookahead explicitly prevents "FCST" from triggering the Funnel Cloud alarm
+        period = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', period)
+        period = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #ff4b4b; font-weight: bold; border-bottom: 2px solid #ff4b4b;">\1</span>', period)
 
-    return text
+        # 3. Apply Strict Lowest-Category Highlighting
+        if is_ifr:
+            # If period is IFR, ONLY color the IFR triggers red. Ignore any higher MVFR layers.
+            period = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', r'<span class="ifr-text">\1</span>', period)
+            period = re.sub(r'\b([M]?[0-2]SM|M?1/[428]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span class="ifr-text">\1</span>', period)
+        elif is_mvfr:
+            # If period is MVFR (and not IFR), ONLY color the MVFR triggers yellow.
+            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span class="mvfr-text">\1</span>', period)
+            period = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', period)
+
+        # 4. Structural Spacing (Line breaks for temporal markers)
+        period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #A78BFA; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
+
+        formatted_periods.append(period)
+        
+    return "".join(formatted_periods)
 
 def get_precip_type(wx_code):
     """
