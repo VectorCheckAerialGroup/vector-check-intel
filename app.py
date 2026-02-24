@@ -132,6 +132,7 @@ if data and "hourly" in data:
     selected_time_str = st.sidebar.select_slider("Forecast Hour:", options=times_display, value=times_display[0])
     idx = times_display.index(selected_time_str)
     
+    # Extract Data for the Target Hour
     t_temp = h['temperature_2m'][idx]
     rh = h['relative_humidity_2m'][idx]
     w_spd = h['wind_speed_10m'][idx]
@@ -141,16 +142,6 @@ if data and "hourly" in data:
     frz_raw = h.get('freezing_level_height', [None]*len(h['time']))[idx]
     frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
     c_base = int((t_temp - td)*400) if (t_temp is not None and td is not None) else 10000
-
-    c = st.columns(8)
-    c[0].metric("Temp", f"{t_temp}°C")
-    c[1].metric("RH", f"{rh}%")
-    c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
-    c[3].metric("Wind Spd", f"{int(w_spd)} kt")
-    c[4].metric("Precip Type", get_precip_type(wx))
-    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
-    c[6].metric("Freezing LVL", frz_disp)
-    c[7].metric("Cloud Base", f"{c_base} ft")
 
     raw_gst = h.get('wind_gusts_10m', [w_spd]*len(h['time']))[idx]
     gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
@@ -164,52 +155,26 @@ if data and "hourly" in data:
     t_950 = h.get('temperature_950hPa', [t_temp])[idx]
     is_stable = t_950 is not None and t_950 > (t_temp - 2.0)
 
-    # --- ASTRONOMICAL SECTION ---
+    # Pre-calculate astronomical and space weather for later use
     dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
     astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
+    space_data = get_kp_index(dt_utc_exact)
     
     sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL (Below Horizon)"
     moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL (Below Horizon)"
-    
-    st.divider()
-    st.subheader(f"Light Profile ({astro['tz']})")
-    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
-    ac1.metric("Dawn (Civil)", astro['dawn'])
-    ac2.metric("Sunrise", astro['sunrise'])
-    ac3.metric("Sunset", astro['sunset'])
-    ac4.metric("Dusk (Civil)", astro['dusk'])
-    ac5.metric("Sun Pos", sun_pos_display)
 
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("Moonrise", astro['moonrise'])
-    mc2.metric("Moonset", astro['moonset'])
-    mc3.metric("Illumination", f"{astro['moon_ill']}%")
-    mc4.metric("Moon Pos", moon_pos_display)
-    mc5.empty()
-
-    # --- SPACE WEATHER SECTION (NEW METAR-STYLE BLOCK) ---
-    space_data = get_kp_index(dt_utc_exact)
-    st.divider()
-    st.subheader("Space Weather (GNSS & C2 Link)")
+    # --- UI RENDERING STARTS HERE ---
     
-    # Conditional formatting for the risk text
-    risk_color = "#ff4b4b" if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"] else "#D1D5DB"
-    
-    space_wx_html = f"""
-    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
-        <div class="obs-text">
-            <strong style="color: #8E949E;">PLANETARY KP INDEX:</strong> 
-            <span style="color: #E58E26; font-size: 1.1rem; font-weight: bold;">{space_data['kp']}</span> 
-            &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 
-            <strong style="color: #8E949E;">GNSS RISK:</strong> 
-            <span style="color: {risk_color}; font-weight: bold; font-size: 1.1rem;">{space_data['risk']}</span>
-            <br><br>
-            <strong style="color: #8E949E;">OPERATIONAL IMPACT:</strong><br>
-            {space_data['impact']}
-        </div>
-    </div>
-    """
-    st.markdown(space_wx_html, unsafe_allow_html=True)
+    st.subheader("Forecasted Surface Data")
+    c = st.columns(8)
+    c[0].metric("Temp", f"{t_temp}°C")
+    c[1].metric("RH", f"{rh}%")
+    c[2].metric("Wind Dir", f"{sfc_dir:03d}°")
+    c[3].metric("Wind Spd", f"{int(w_spd)} kt")
+    c[4].metric("Precip Type", get_precip_type(wx))
+    c[5].metric("Vis (Est)", f"{int((100-rh)/5 * 1.13)} sm")
+    c[6].metric("Freezing LVL", frz_disp)
+    c[7].metric("Cloud Base", f"{c_base} ft")
 
     st.divider()
 
@@ -244,6 +209,47 @@ if data and "hourly" in data:
     
     df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
     st.table(df_ext)
+
+    st.divider()
+
+    # --- ASTRONOMICAL SECTION (MOVED DOWN) ---
+    st.subheader(f"Light Profile ({astro['tz']})")
+    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
+    ac1.metric("Dawn (Civil)", astro['dawn'])
+    ac2.metric("Sunrise", astro['sunrise'])
+    ac3.metric("Sunset", astro['sunset'])
+    ac4.metric("Dusk (Civil)", astro['dusk'])
+    ac5.metric("Sun Pos", sun_pos_display)
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Moonrise", astro['moonrise'])
+    mc2.metric("Moonset", astro['moonset'])
+    mc3.metric("Illumination", f"{astro['moon_ill']}%")
+    mc4.metric("Moon Pos", moon_pos_display)
+    mc5.empty()
+
+    # --- SPACE WEATHER SECTION (MOVED DOWN) ---
+    st.divider()
+    st.subheader("Space Weather (GNSS & C2 Link)")
+    
+    risk_color = "#ff4b4b" if space_data['risk'] in ["HIGH (G1)", "SEVERE (G2+)"] else "#D1D5DB"
+    space_wx_html = f"""
+    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
+        <div class="obs-text">
+            <strong style="color: #8E949E;">PLANETARY KP INDEX:</strong> 
+            <span style="color: #E58E26; font-size: 1.1rem; font-weight: bold;">{space_data['kp']}</span> 
+            &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; 
+            <strong style="color: #8E949E;">GNSS RISK:</strong> 
+            <span style="color: {risk_color}; font-weight: bold; font-size: 1.1rem;">{space_data['risk']}</span>
+            <br><br>
+            <strong style="color: #8E949E;">OPERATIONAL IMPACT:</strong><br>
+            {space_data['impact']}
+        </div>
+    </div>
+    """
+    st.markdown(space_wx_html, unsafe_allow_html=True)
+
+    st.divider()
 
     # --- ADVANCED CSV EXPORT ENGINE ---
     df_export = pd.concat([df_tactical, df_ext])
