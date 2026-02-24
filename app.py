@@ -132,38 +132,54 @@ tz_abbr = datetime.now(local_tz).tzname() if tz_str else "UTC"
 if data and "hourly" in data:
     h = data["hourly"]
     
-    # Generate Dual-Time Display for the Slider
+    # Generate Dual-Time Display
     times_display = []
     for t in h["time"]:
         dt_u = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
         dt_l = dt_u.astimezone(local_tz)
         times_display.append(f"{dt_u.strftime('%d %b %H:%M')} Z | {dt_l.strftime('%H:%M')} {tz_abbr}")
         
-    # SLIDER STATE MANAGEMENT & QUICK NAVIGATION BUTTONS
-    if "forecast_time_val" not in st.session_state or st.session_state.forecast_time_val not in times_display:
-        st.session_state.forecast_time_val = times_display[0]
+    # --- TIME NAVIGATION LOGIC (NEAREST HOUR + 48HR CAP) ---
+    now_utc = datetime.now(timezone.utc)
+    
+    # Calculate time differences to find the index closest to the current live hour
+    time_diffs = [abs((datetime.fromisoformat(t).replace(tzinfo=timezone.utc) - now_utc).total_seconds()) for t in h["time"]]
+    nearest_idx = time_diffs.index(min(time_diffs))
+    
+    # Cap the UI options at exactly +48 hours from the nearest index
+    max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
+    valid_times_display = times_display[nearest_idx : max_idx + 1]
+    
+    # Initialize the session state to the nearest hour
+    if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
+        st.session_state.forecast_slider = valid_times_display[0]
 
     def update_time(offset):
+        current_val = st.session_state.forecast_slider
         try:
-            curr = times_display.index(st.session_state.forecast_time_val)
-            # Ensure the index doesn't drop below 0 or exceed the array bounds
-            new_idx = max(0, min(len(times_display) - 1, curr + offset))
-            st.session_state.forecast_time_val = times_display[new_idx]
+            current_idx_in_valid = valid_times_display.index(current_val)
+            new_idx_in_valid = max(0, min(len(valid_times_display) - 1, current_idx_in_valid + offset))
+            st.session_state.forecast_slider = valid_times_display[new_idx_in_valid]
         except ValueError:
-            st.session_state.forecast_time_val = times_display[0]
+            st.session_state.forecast_slider = valid_times_display[0]
 
     selected_time_str = st.sidebar.select_slider(
         "Forecast Time:", 
-        options=times_display, 
-        key="forecast_time_val"
+        options=valid_times_display, 
+        key="forecast_slider"
     )
+    
+    # The absolute index in the API array for pulling data
     idx = times_display.index(selected_time_str)
+    
+    # The relative hour for UI display (+0 HR to +48 HR)
+    relative_hr = valid_times_display.index(selected_time_str)
 
     # Dynamic Forecast Navigator
     nav_col1, nav_col2, nav_col3 = st.sidebar.columns([1, 2, 1])
     nav_col1.button("◄", on_click=update_time, args=(-1,), use_container_width=True)
     nav_col2.markdown(
-        f"<div style='text-align: center; font-size: 1.1rem; font-weight: bold; color: #E58E26; margin-top: 5px;'>+ {idx} HR</div>", 
+        f"<div style='text-align: center; font-size: 1.1rem; font-weight: bold; color: #E58E26; margin-top: 5px;'>+ {relative_hr} HR</div>", 
         unsafe_allow_html=True
     )
     nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True)
@@ -344,22 +360,32 @@ if data and "hourly" in data:
     st.divider()
 
     # --- METAR / TAF RENDERING ENGINE ---
-    # 1. Strip away any old, hardcoded HTML from the ingestion module
-    clean_metar = re.sub('<[^<]+>', '', metar_raw.replace('<br>', ' '))
-    clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
+    # 1. Strip away any old HTML tags
+    clean_metar = re.sub('<[^<]+>', '', metar_raw)
+    clean_taf = re.sub('<[^<]+>', '', taf_raw)
     
-    # 2. Apply the strict Red-Only tactical highlights
+    # 2. Force single spacing by destroying multi-newlines
+    clean_taf = re.sub(r'\n\s*\n', '\n', clean_taf).strip()
+    
+    # 3. Apply the tactical highlights
     metar_disp = apply_tactical_highlights(clean_metar)
-    taf_disp = apply_tactical_highlights(clean_taf).replace('\n', '<br>')
+    taf_disp = apply_tactical_highlights(clean_taf)
+    
+    # 4. Final conversion to tight breaks
+    taf_disp = taf_disp.replace('\n', '<br>')
     
     st.subheader(f"Actuals ({icao})")
+    
+    # Render with absolute strict line-height 1.0 (single space)
     st.markdown(f'''
     <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
         <div class="obs-text">
             <strong style="color: #8E949E;">METAR/SPECI</strong><br>
-            {metar_disp}<br><br>
+            <div style="line-height: 1.0; margin-bottom: 15px; margin-top: 5px;">
+                {metar_disp}
+            </div>
             <strong style="color: #8E949E;">TAF</strong><br>
-            <div style="line-height: 1.2; font-size: 0.95rem; margin-top: 5px;">
+            <div style="line-height: 1.0; font-size: 0.95rem; margin-top: 5px;">
                 {taf_disp}
             </div>
         </div>
