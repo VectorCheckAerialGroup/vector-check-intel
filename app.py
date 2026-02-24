@@ -321,7 +321,7 @@ if data and "hourly" in data:
     st.divider()
 
     # --- METAR / TAF MOVED HERE ---
-    st.subheader(f"Official Aviation Briefing ({icao})")
+    st.subheader(f"Actuals ({icao})")
     st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
     
     st.divider()
@@ -333,7 +333,7 @@ if data and "hourly" in data:
     clean_taf = re.sub('<[^<]+>', '', taf_raw.replace('<br>', '\n'))
     
     csv_header = (
-        "VECTOR CHECK AERIAL GROUP INC. - MISSION HAZARD MATRIX\n"
+        "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
         f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Airframe Class: {airframe_class}\n"
@@ -359,7 +359,7 @@ if data and "hourly" in data:
         )
     
     st.download_button(
-        label="📥 Download Pre-Flight Hazard Matrix (CSV)",
+        label="Download Actuals and Forecast data (CSV)",
         data=csv_data,
         file_name=f"VCAG_Hazard_Matrix_{icao}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
