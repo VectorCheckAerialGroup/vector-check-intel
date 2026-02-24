@@ -1,117 +1,112 @@
 import re
 
-def apply_tactical_highlights(text):
-    """
-    Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
-    Streamlined to Vector Check strict Go/No-Go thresholds: 
-    Highlights ONLY IFR conditions (<1000ft / <3SM) and Freezing phenomena.
-    """
-    if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
-        return text
-        
-    # Split text by temporal markers into independent forecast periods.
-    periods = re.split(r'(?=\bFM\d{6}\b|\bTEMPO\b|\bBECMG\b|\bPROB\d{2}\b)', text)
-    
-    formatted_periods = []
-    
-    for period in periods:
-        if not period.strip(): continue
-
-        # 1. AIRFRAME THREAT: Freezing Precipitation & Fog
-        # Targets any group containing FZ (e.g., -FZRA, FZDZ, FZFG)
-        period = re.sub(r'\b([+-]?FZ[A-Z]*)\b', r'<span style="background-color: #FF4B4B; color: white; padding: 2px; border-radius: 3px; font-weight: bold;">\1</span>', period)
-
-        # 2. IFR CEILINGS: < 1000 ft
-        # Targets OVC, BKN, or VV from 000 up to 009 (900 ft)
-        period = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV00[0-9])\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
-
-        # 3. IFR VISIBILITY: < 3 SM
-        # Targets 0SM, 1SM, 2SM, and all aviation fractions (1/4SM, 1/2SM, 1 1/2SM, etc.)
-        period = re.sub(r'\b(0SM|[1-2]SM|[1-2]\s?[1-3]/[248]SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
-
-        # 4. STRUCTURAL SPACING (Line breaks for temporal markers)
-        period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
-
-        formatted_periods.append(period)
-        
-    return "".join(formatted_periods)
-
 def get_precip_type(wx_code):
-    """
-    Translates WMO weather codes into standard aviation precip types.
-    Strict compliance: Returns 'NIL' for non-precipitation states.
-    """
-    wx_mapping = {
-        0: "NIL", 1: "NIL", 2: "NIL", 3: "NIL",
-        45: "NIL (Fog)", 48: "Freezing Fog",
+    """Translates WMO weather codes into standard aviation weather types."""
+    wx_map = {
+        0: "Clear", 1: "Mainly Clear", 2: "Partly Cloudy", 3: "Overcast",
+        45: "Fog", 48: "Freezing Fog",
         51: "Light Drizzle", 53: "Moderate Drizzle", 55: "Dense Drizzle",
-        56: "Light FZ Drizzle", 57: "Dense FZ Drizzle",
+        56: "Light Freezing Drizzle", 57: "Dense Freezing Drizzle",
         61: "Light Rain", 63: "Moderate Rain", 65: "Heavy Rain",
-        66: "Light FZ Rain", 67: "Heavy FZ Rain",
+        66: "Light Freezing Rain", 67: "Heavy Freezing Rain",
         71: "Light Snow", 73: "Moderate Snow", 75: "Heavy Snow",
         77: "Snow Grains",
         80: "Light Rain Showers", 81: "Moderate Rain Showers", 82: "Violent Rain Showers",
         85: "Light Snow Showers", 86: "Heavy Snow Showers",
-        95: "Thunderstorms", 96: "TSRA w/ Hail", 99: "Heavy TSRA w/ Hail"
+        95: "Thunderstorm", 96: "Thunderstorm w/ Hail", 99: "Heavy Thunderstorm w/ Hail"
     }
-    return wx_mapping.get(wx_code, "NIL")
+    return wx_map.get(wx_code, "Unknown")
 
-def calculate_icing_profile(h, idx, wx_code):
-    """
-    Evaluates atmospheric conditions for icing potential based on Temp, RH, and Precip.
-    Requires visible moisture (RH > 85% or active precip) and sub-freezing temps.
-    """
-    temp = h['temperature_2m'][idx]
+def calculate_icing_profile(h, idx, wx):
+    """Determines general icing conditions based on RH, Temp, and active precipitation."""
     rh = h['relative_humidity_2m'][idx]
+    temp = h['temperature_2m'][idx]
     
-    visible_moisture = rh >= 85 or (wx_code >= 50 and wx_code <= 99)
-    freezing_precip = wx_code in [48, 56, 57, 66, 67]
-    
-    if freezing_precip:
-        return "SEVERE (FZRA/FZDZ)"
-    elif visible_moisture and -20 <= temp <= 0:
-        if -10 <= temp <= 0:
-            return "MODERATE (Clear/Mixed)"
-        else:
-            return "LIGHT (Rime)"
-    elif temp < -20:
-        return "TRACE (Ice Crystals)"
-    else:
-        return "NIL"
+    # Visible moisture + freezing temps
+    if rh >= 85 and -20 <= temp <= 0:
+        return True
+    # Specific freezing/winter precipitation WMO codes
+    if wx in [48, 56, 57, 66, 67, 71, 73, 75, 77, 85, 86]:
+        return True
+        
+    return False
 
-def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class):
+def get_turb_ice(alt, wind_alt, wind_sfc, gust_alt, wx, is_stable, icing_cond, airframe_class, t_temp):
     """
-    Efficacy-Audited Turbulence & Icing Engine.
-    Scales hazard severity based purely on Transport Canada airframe weight classifications.
+    Calculates altitude-specific turbulence and icing, formatted to standard aviation 
+    reporting terminology (LGT/MDT/SEV | MECH/LLWS/CVCTV | CLR/RIME/MXD).
     """
-    gust_spread = max(0, g_c - s_c)
-    turb_risk = "NIL"
-    
+    gust_delta = max(0, gust_alt - wind_alt)
+    shear = abs(wind_alt - wind_sfc)
+
+    # 1. DYNAMIC TURBULENCE THRESHOLDS BASED ON AIRFRAME MASS
     if "Micro" in airframe_class:
-        sev_spread, sev_sus, sev_gst = 10, 15, 20
-        mod_spread, mod_sus = 5, 10
+        sev_g, mdt_g, lgt_g = 12, 8, 4
     elif "Small" in airframe_class:
-        sev_spread, sev_sus, sev_gst = 15, 25, 30
-        mod_spread, mod_sus = 10, 15
+        sev_g, mdt_g, lgt_g = 15, 10, 5
     elif "Heavy" in airframe_class:
-        sev_spread, sev_sus, sev_gst = 20, 35, 40
-        mod_spread, mod_sus = 15, 25
-    else: # Rotary (Helicopter)
-        sev_spread, sev_sus, sev_gst = 25, 45, 50
-        mod_spread, mod_sus = 15, 30
+        sev_g, mdt_g, lgt_g = 20, 12, 6
+    else: # Rotary / Manned equivalence
+        sev_g, mdt_g, lgt_g = 25, 15, 8
 
-    if gust_spread >= sev_spread or s_c >= sev_sus or g_c >= sev_gst or wx in [95, 96, 99]:
-        turb_risk = "SEVERE"
-    elif gust_spread >= mod_spread or s_c >= mod_sus or (not is_stable and alt <= 400 and s_c >= mod_sus - 5):
-        turb_risk = "MODERATE"
-    elif gust_spread >= (mod_spread / 2) or s_c >= (mod_sus / 2) or not is_stable:
-        turb_risk = "LIGHT"
+    # Assign Turbulence Severity
+    turb_sev = "Nil"
+    if gust_delta >= sev_g or shear >= sev_g:
+        turb_sev = "SEV"
+    elif gust_delta >= mdt_g or shear >= mdt_g:
+        turb_sev = "MDT"
+    elif gust_delta >= lgt_g or shear >= lgt_g:
+        turb_sev = "LGT"
 
-    ice_risk = icing_cond
-    if "Rotary" in airframe_class and ice_risk in ["TRACE (Ice Crystals)", "LIGHT (Rime)"]:
-        ice_risk = "MODERATE (Rotor Degradation)"
+    # Assign Turbulence Type
+    turb_type = ""
+    if turb_sev != "Nil":
+        if wx in [95, 96, 97, 98, 99] or not is_stable:
+            turb_type = "CVCTV"  # Convective
+        elif shear > gust_delta and shear >= mdt_g:
+            turb_type = "LLWS"   # Low-Level Wind Shear
+        else:
+            turb_type = "MECH"   # Mechanical
 
-    return turb_risk, ice_risk
+    turb_str = f"{turb_sev} {turb_type}" if turb_sev != "Nil" else "Nil"
+
+    # 2. ICING PROFILES (Standard lapse rate 2°C per 1,000 ft)
+    t_alt = t_temp - (alt / 1000.0) * 2.0
+    ice_sev = "Nil"
+    ice_type = ""
+
+    if icing_cond or wx in [48, 56, 57, 66, 67, 71, 73, 75, 77, 85, 86]:
+        # Icing generally occurs between 0C and -20C
+        if 0 >= t_alt >= -20:
+            
+            # Severity Logic
+            if wx in [56, 57, 66, 67]: # Freezing Rain/Drizzle is automatically Severe
+                ice_sev = "SEV"
+            elif wx in [73, 75, 86] or (icing_cond and t_alt >= -10):
+                ice_sev = "MDT"
+            else:
+                ice_sev = "LGT"
+
+            # Type Logic based on droplet freezing speed
+            if t_alt >= -5:
+                ice_type = "CLR"
+            elif t_alt >= -15:
+                ice_type = "MXD"
+            else:
+                ice_type = "RIME"
+
+    ice_str = f"{ice_sev} {ice_type}" if ice_sev != "Nil" else "Nil"
+
+    return turb_str, ice_str
+
+def apply_tactical_highlights(raw_text):
+    """Injects warning colors into raw METAR/TAF strings for rapid parsing."""
+    if not raw_text or "UNAVAILABLE" in raw_text:
+        return raw_text
+    
+    # Red highlights for tactical hazards
+    hazards = ["FZRA", "FZDZ", "TSRA", "TS", "GR", "FC", r"\+FC", "LLWS", "SEV", "ICE"]
+    for hazard in hazards:
+        raw_text = re.sub(rf"\b({hazard})\b", r'<span class="ifr-text">\1</span>', raw_text)
+        
+    return raw_text
