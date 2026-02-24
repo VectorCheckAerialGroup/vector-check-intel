@@ -272,7 +272,8 @@ if data and "hourly" in data:
         g_c = s_c + gust_delta
         d_c = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
         
-        turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class)
+        # Piped t_temp inside get_turb_ice
+        turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, t_temp)
         
         stack_tactical.append({
             "Alt (AGL)": f"{alt}ft", 
@@ -307,7 +308,8 @@ if data and "hourly" in data:
         d_e = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         
         g_e = s_e + gust_delta
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class)
+        # Piped t_temp inside get_turb_ice
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
         
         stack_ext.append({
             "Alt (AGL)": f"{alt}ft", 
