@@ -5,12 +5,12 @@ def apply_tactical_highlights(text):
     """
     Parses raw METAR/TAF strings and injects HTML styling for rapid tactical briefings.
     Isolates temporal periods to ensure only the lowest flight category is highlighted.
+    Colors strict to EFB Standard: LIFR (Magenta), IFR (Red), MVFR (Blue).
     """
     if not text or text in ["N/A", "NIL", "UNAVAILABLE"]:
         return text
         
     # Split text by temporal markers into independent forecast periods.
-    # Positive lookahead (?=...) ensures the marker (e.g., FM120000) stays attached to its text block.
     periods = re.split(r'(?=\bFM\d{6}\b|\bTEMPO\b|\bBECMG\b|\bPROB\d{2}\b)', text)
     
     formatted_periods = []
@@ -19,31 +19,41 @@ def apply_tactical_highlights(text):
         if not period.strip(): continue
         
         # 1. Evaluate the absolute lowest flight category for this specific period
-        is_ifr = bool(re.search(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', period)) or \
-                 bool(re.search(r'\b([M]?[0-2]SM|M?1/[428]SM|[1-2]\s?[1-3]/[248]SM)\b', period))
+        # LIFR: Ceilings < 500ft OR Vis < 1SM
+        is_lifr = bool(re.search(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', period)) or \
+                  bool(re.search(r'\b(0SM|M?1/[248]SM|3/4SM)\b', period))
+                  
+        # IFR: Ceilings 500ft to < 1000ft OR Vis 1SM to < 3SM
+        is_ifr = bool(re.search(r'\b(OVC00[5-9]|BKN00[5-9]|VV00[5-9])\b', period)) or \
+                 bool(re.search(r'\b([1-2]SM|[1-2]\s?[1-3]/[248]SM)\b', period))
                  
+        # MVFR: Ceilings 1000ft to 3000ft OR Vis 3SM to 5SM
         is_mvfr = bool(re.search(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', period)) or \
                   bool(re.search(r'\b([3-5]SM)\b', period))
 
         # 2. Apply Hazard Highlighting (Always triggers regardless of category)
         # (?!ST) negative lookahead explicitly prevents "FCST" from triggering the Funnel Cloud alarm
-        period = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', period)
-        period = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #ff4b4b; font-weight: bold; border-bottom: 2px solid #ff4b4b;">\1</span>', period)
+        period = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span style="background-color: #FF4B4B; color: white; padding: 2px; border-radius: 3px; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #FF4B4B; font-weight: bold; border-bottom: 2px solid #FF4B4B;">\1</span>', period)
 
-        # 3. Apply Strict Lowest-Category Highlighting
-        if is_ifr:
-            # If period is IFR, ONLY color the IFR triggers red. Ignore any higher MVFR layers.
-            period = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', r'<span class="ifr-text">\1</span>', period)
-            period = re.sub(r'\b([M]?[0-2]SM|M?1/[428]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span class="ifr-text">\1</span>', period)
+        # 3. Apply Strict Lowest-Category Highlighting (EFB Standard Colors)
+        if is_lifr:
+            # LIFR = Magenta (#E879F9)
+            period = re.sub(r'\b(OVC00[0-4]|BKN00[0-4]|VV00[0-4])\b', r'<span style="color: #E879F9; font-weight: bold;">\1</span>', period)
+            period = re.sub(r'\b(0SM|M?1/[248]SM|3/4SM)\b', r'<span style="color: #E879F9; font-weight: bold;">\1</span>', period)
+        elif is_ifr:
+            # IFR = Red (#FF4B4B)
+            period = re.sub(r'\b(OVC00[5-9]|BKN00[5-9]|VV00[5-9])\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
+            period = re.sub(r'\b([1-2]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span style="color: #FF4B4B; font-weight: bold;">\1</span>', period)
         elif is_mvfr:
-            # If period is MVFR (and not IFR), ONLY color the MVFR triggers yellow.
-            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span class="mvfr-text">\1</span>', period)
-            period = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', period)
+            # MVFR = Blue (#60A5FA)
+            period = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
+            period = re.sub(r'\b([3-5]SM)\b', r'<span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
 
         # 4. Structural Spacing (Line breaks for temporal markers)
-        period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #60A5FA; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #FBBF24; font-weight: bold;">\1</span>', period)
-        period = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #A78BFA; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(FM\d{6})\b', r'<br><span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(TEMPO)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
+        period = re.sub(r'\b(BECMG)\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
         period = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', period)
 
         formatted_periods.append(period)
