@@ -16,13 +16,19 @@ def apply_tactical_highlights(text):
     text = re.sub(r'\b(PROB\d{2})\b', r'<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #9CA3AF; font-weight: bold;">\1</span>', text)
     
     # 2. Critical Hazard Highlighting (Freezing, Thunderstorms, Funnel Clouds)
-    text = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', text)
+    # The (?!ST) negative lookahead explicitly prevents "FCST" from triggering the Funnel Cloud (FC) alarm.
+    text = re.sub(r'\b([+-]?(?:FZ|TS|GR|FC(?!ST)|PL)[A-Z]*)\b', r'<span class="fz-warn">\1</span>', text)
     
     # 3. Low-Level Wind Shear Warning
     text = re.sub(r'\b(WS\d{3}/\d{5}KT)\b', r'<span style="color: #ff4b4b; font-weight: bold; border-bottom: 2px solid #ff4b4b;">\1</span>', text)
     
-    # 4. Low Ceilings / IFR Visual Flags (BKN/OVC under 1000ft or Vertical Visibility)
-    text = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV00[0-9])\b', r'<span class="ifr-text">\1</span>', text)
+    # 4. IFR Visual Flags (Red: Ceilings < 1000ft or Vis < 3SM)
+    text = re.sub(r'\b(OVC00[0-9]|BKN00[0-9]|VV\d{3})\b', r'<span class="ifr-text">\1</span>', text)
+    text = re.sub(r'\b(M?1/[428]SM|M?[0-2]SM|[1-2]\s?[1-3]/[248]SM)\b', r'<span class="ifr-text">\1</span>', text)
+
+    # 5. MVFR Visual Flags (Yellow: Ceilings 1000-3000ft or Vis 3-5SM)
+    text = re.sub(r'\b(OVC0[1-2][0-9]|OVC030|BKN0[1-2][0-9]|BKN030)\b', r'<span class="mvfr-text">\1</span>', text)
+    text = re.sub(r'\b([3-5]SM)\b', r'<span class="mvfr-text">\1</span>', text)
 
     return text
 
