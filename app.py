@@ -320,10 +320,23 @@ if data and "hourly" in data:
 
     st.divider()
 
-    # --- METAR / TAF MOVED HERE ---
-    st.subheader(f"Official Aviation Briefing ({icao})")
-    st.markdown(f'<div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;"><div class="obs-text"><strong style="color: #8E949E;">METAR/SPECI</strong><br>{metar_raw}<br><br><strong style="color: #8E949E;">TAF</strong><br>{taf_raw}</div></div>', unsafe_allow_html=True)
-    
+    # --- app.py snippet ---
+st.subheader(f"Official Aviation Briefing ({icao})")
+# We use st.markdown here so the <span> tags from hazard_logic.py actually turn into colors
+st.markdown(
+    f"""
+    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px; border: 1px solid #3E444E;">
+        <div style="font-family: 'Source Code Pro', monospace; line-height: 1.6;">
+            <strong style="color: #8E949E; font-size: 0.8rem;">METAR/SPECI</strong><br>
+            <div style="color: #D1D5DB;">{metar_raw}</div>
+            <br>
+            <strong style="color: #8E949E; font-size: 0.8rem;">TAF</strong><br>
+            <div style="color: #D1D5DB;">{taf_raw}</div>
+        </div>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
     st.divider()
 
     # --- ADVANCED CSV EXPORT ENGINE ---
