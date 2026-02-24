@@ -42,29 +42,42 @@ def calculate_icing_profile(h, idx, wx_code):
     else:
         return "NIL"
 
-def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class):
+def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, airframe_type):
     """
     Efficacy-Audited Turbulence & Icing Engine.
-    Dynamically scales hazard severity based on Transport Canada airframe classifications.
+    Dynamically scales hazard severity based on Transport Canada airframe classifications
+    AND aerodynamic profiles (Multi-rotor vs. Fixed-Wing VTOL).
     """
     gust_spread = max(0, g_c - s_c)
     turb_risk = "NIL"
     
-    # Define scaling thresholds based on airframe mass/inertia
+    # Define scaling thresholds based on airframe mass, inertia, and sail area
     if "Micro" in airframe_class:
         sev_spread, sev_sus, sev_gst = 10, 15, 20
         mod_spread, mod_sus = 5, 10
+        
     elif "Small" in airframe_class:
-        sev_spread, sev_sus, sev_gst = 15, 25, 30
-        mod_spread, mod_sus = 10, 15
+        if airframe_type == "Fixed-Wing / VTOL":
+            # Fixed-wings have high sail area; highly susceptible to crosswinds and sheer
+            sev_spread, sev_sus, sev_gst = 12, 20, 25
+            mod_spread, mod_sus = 8, 12
+        else: # Multi-Rotor
+            sev_spread, sev_sus, sev_gst = 15, 25, 30
+            mod_spread, mod_sus = 10, 15
+            
     elif "Heavy" in airframe_class:
-        sev_spread, sev_sus, sev_gst = 20, 35, 40
-        mod_spread, mod_sus = 15, 25
+        if airframe_type == "Fixed-Wing / VTOL":
+            sev_spread, sev_sus, sev_gst = 15, 25, 30
+            mod_spread, mod_sus = 10, 18
+        else: # Multi-Rotor
+            sev_spread, sev_sus, sev_gst = 20, 35, 40
+            mod_spread, mod_sus = 15, 25
+            
     else: # Rotary (Helicopter/Large VTOL)
         sev_spread, sev_sus, sev_gst = 25, 45, 50
         mod_spread, mod_sus = 15, 30
 
-    # 1. EVALUATE TURBULENCE RISK AGAINST AIRFRAME LIMITS
+    # 1. EVALUATE TURBULENCE RISK AGAINST AIRFRAME & AERO LIMITS
     if gust_spread >= sev_spread or s_c >= sev_sus or g_c >= sev_gst or wx in [95, 96, 99]:
         turb_risk = "SEVERE"
     elif gust_spread >= mod_spread or s_c >= mod_sus or (not is_stable and alt <= 400 and s_c >= mod_sus - 5):
@@ -73,9 +86,10 @@ def get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class
         turb_risk = "LIGHT"
 
     # 2. EVALUATE ICING RISK
-    # Rotary wings are exceptionally susceptible to icing degradation on rotor blades.
     ice_risk = icing_cond
-    if "Rotary" in airframe_class and ice_risk in ["TRACE (Ice Crystals)", "LIGHT (Rime)"]:
-        ice_risk = "MODERATE (Rotor Degradation)"
+    
+    # Rotary wings and Fixed-wings are exceptionally susceptible to icing degradation
+    if ("Rotary" in airframe_class or airframe_type == "Fixed-Wing / VTOL") and ice_risk in ["TRACE (Ice Crystals)", "LIGHT (Rime)"]:
+        ice_risk = "MODERATE (Airfoil Degradation)"
 
     return turb_risk, ice_risk
