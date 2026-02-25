@@ -186,16 +186,6 @@ st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=display_icao, di
 if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
-airframe_class = st.sidebar.selectbox(
-    "Airframe Class (Transport Canada):", 
-    options=[
-        "Small (250g - 25kg)", 
-        "Micro (< 250g)", 
-        "Heavy (> 25kg)", 
-        "Rotary (Helicopter)"
-    ]
-)
-
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 
 def log_refresh_callback():
@@ -212,7 +202,7 @@ st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
-    "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/forecast" # Note: ECMWF requires forecast endpoint
+    "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/forecast" 
 }
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
@@ -226,7 +216,6 @@ st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
 st.divider()
 
-# --- DIAGNOSTIC UI FALLBACKS ---
 if data is None:
     st.error("⚠️ CRITICAL: Atmospheric Data API Offline.")
     st.stop()
@@ -290,7 +279,6 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
-# The API now delivers native knots, k_conv strictly serves as a 1.0 multiplier
 is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
 k_conv = 0.539957 if is_kmh else 1.0
 raw_wind_unit = "KT"
@@ -320,7 +308,6 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
-# Fully robust Lapse Rate estimation for missing Canadian Freezing Levels
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list is not None and frz_raw_list[idx] is not None:
     frz_raw = frz_raw_list[idx]
@@ -329,7 +316,6 @@ else:
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
-        # Standard Atmosphere Lapse Rate: Temp drops ~1.98C per 1,000 ft
         est_frz = (t_temp / 1.98) * 1000
         frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
 
@@ -337,14 +323,12 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# --- THE GEOPOTENTIAL ANCHOR ---
-# Anchors the tactical shear profile strictly to available WMO pressure levels rather than specific model meters.
 u_v_list = h.get('wind_speed_1000hPa')
 if u_v_list and u_v_list[idx] is not None:
     u_v = u_v_list[idx] * k_conv
     u_dir = h['wind_direction_1000hPa'][idx]
     u_h_list = h.get('geopotential_height_1000hPa')
-    u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 110 # Fallback to 110m (approx 360ft)
+    u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 110
 else:
     u_v_list = h.get('wind_speed_925hPa')
     if u_v_list and u_v_list[idx] is not None:
@@ -409,7 +393,7 @@ for alt in [400, 300, 200, 100]:
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
     d_c = format_dir(d_c_raw, s_c)
     
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, t_temp)
+    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, t_temp)
     
     if int(s_c) == 0:
         mat_dir, mat_spd = "CALM", "0"
@@ -465,7 +449,7 @@ else:
         d_e = format_dir(d_e_raw, s_e)
         
         g_e = s_e + gust_delta
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, t_temp)
         
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
@@ -581,7 +565,6 @@ csv_header = (
     f"Regional Area: {regional_name}\n"
     f"Automated Weather Station: {stn_display_str}\n"
     f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
-    f"Airframe Class: {airframe_class}\n"
     f"Wind Unit Standard: {raw_wind_unit}\n\n" 
     "--- FORECASTED SURFACE CONDITIONS ---\n"
     f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
@@ -607,7 +590,7 @@ def log_download_callback():
         st.session_state.get("lat_input", 44.1628), 
         st.session_state.get("lon_input", -77.3832), 
         st.session_state.get("icao_input", icao), 
-        f"DOWNLOAD_CSV_{airframe_class[:5]}"
+        "DOWNLOAD_CSV"
     )
 
 st.download_button(
