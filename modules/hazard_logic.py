@@ -129,13 +129,46 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     return turb, ice
 
 def apply_tactical_highlights(text):
-    """Applies HTML highlighting to critical METAR/TAF elements."""
+    """
+    Applies HTML highlighting to METAR/TAF.
+    Strict Audit Rule: Evaluates each line and applies a single color 
+    based on the lowest flight category present in that line.
+    """
     if not text or text == "NIL" or text == "UNAVAILABLE":
         return text
         
-    text = re.sub(r'\b(FZ[A-Z]+)\b', r'<span class="fz-warn">\1</span>', text)
-    text = re.sub(r'\b(BKN|OVC)(0[0-0][0-9])\b', r'<span class="ifr-text">\1\2</span>', text)
-    text = re.sub(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', r'<span class="mvfr-text">\1\2</span>', text)
-    text = re.sub(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', r'<span class="ifr-text">\1</span>', text)
+    lines = text.split('\n')
+    formatted_lines = []
     
-    return text
+    for line in lines:
+        # Priority 1: Freezing Conditions (Worst Case)
+        if re.search(r'\b(FZ[A-Z]*)\b', line):
+            formatted_lines.append(f'<span class="fz-warn">{line}</span>')
+            continue
+            
+        # Priority 2: IFR (Ceiling < 1000ft, OR VV, OR Vis < 3SM)
+        is_ifr = False
+        if re.search(r'\b(BKN|OVC|VV)(00[0-9])\b', line): # 000 to 009
+            is_ifr = True
+        elif re.search(r'\b([M]?[0-2](?:\s?[1-3]/[2-4])?SM)\b', line): # Matches < 3SM fractions
+            is_ifr = True
+            
+        if is_ifr:
+            formatted_lines.append(f'<span class="ifr-text">{line}</span>')
+            continue
+            
+        # Priority 3: MVFR (Ceiling 1000-3000ft OR Vis 3-5SM)
+        is_mvfr = False
+        if re.search(r'\b(BKN|OVC)(0[1-2][0-9]|030)\b', line): # 010 to 030
+            is_mvfr = True
+        elif re.search(r'\b([3-5]SM)\b', line): # 3SM, 4SM, 5SM
+            is_mvfr = True
+            
+        if is_mvfr:
+            formatted_lines.append(f'<span class="mvfr-text">{line}</span>')
+            continue
+            
+        # Priority 4: VFR / No Highlight
+        formatted_lines.append(line)
+        
+    return '\n'.join(formatted_lines)
