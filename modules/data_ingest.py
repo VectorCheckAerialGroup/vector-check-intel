@@ -4,48 +4,83 @@ import ssl
 
 def fetch_mission_data(lat, lon, model_url):
     """
-    Fetches raw atmospheric column data from Open-Meteo.
-    Blends 2.5km HRDPS for surface data with 10km RDPS for upper-air data to maintain high resolution.
+    Fetches raw atmospheric column data.
+    Uses a Dual-Fetch architecture to seamlessly merge 2.5km HRDPS surface data 
+    with 10km RDPS upper-air data without triggering API schema validation errors.
     """
     is_hrdps = "gem" in model_url
-    
-    # The array string commands the API to use HRDPS first, then fallback to RDPS for missing upper-air data
-    model_param = "gem_hrdps_continental,gem_regional" if is_hrdps else "ecmwf_ifs04"
-
-    hourly_params = [
-        "temperature_2m", "relative_humidity_2m", "weather_code", 
-        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
-        "freezing_level_height", "temperature_950hPa"
-    ]
-    
-    if is_hrdps:
-        hourly_params.extend(["wind_speed_120m", "wind_direction_120m"])
-    else:
-        hourly_params.extend(["wind_speed_100m", "wind_direction_100m"])
-
-    # Pressure levels for the 1,000 to 5,000ft upper trajectory stack
-    pressure_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
-    for p in pressure_levels:
-        hourly_params.extend([
-            f"geopotential_height_{p}hPa",
-            f"wind_speed_{p}hPa",
-            f"wind_direction_{p}hPa"
-        ])
-
-    params_str = ",".join(hourly_params)
-    
-    # Construct URL. Explicitly offload knot-conversion to the API server here.
-    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models={model_param}&timezone=UTC&wind_speed_unit=knots"
 
     try:
+        # Ignore SSL certificate verification to prevent firewall/cloud blockages
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.3'})
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            return data
+
+        if is_hrdps:
+            # ---------------------------------------------------------
+            # FETCH 1: Pure 2.5km HRDPS (Boundary Layer & Surface)
+            # ---------------------------------------------------------
+            hrdps_params = (
+                "temperature_2m,relative_humidity_2m,weather_code,"
+                "wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
+                "freezing_level_height,wind_speed_120m,wind_direction_120m"
+            )
+            url_sfc = f"{model_url}?latitude={lat}&longitude={lon}&hourly={hrdps_params}&models=gem_hrdps_continental&timezone=UTC&wind_speed_unit=knots"
+            
+            req_sfc = urllib.request.Request(url_sfc, headers={'User-Agent': 'VectorCheck-App/3.0'})
+            with urllib.request.urlopen(req_sfc, context=ctx, timeout=10) as response:
+                data_master = json.loads(response.read().decode('utf-8'))
+
+            # ---------------------------------------------------------
+            # FETCH 2: Pure 10km RDPS (Upper Air Trajectory)
+            # ---------------------------------------------------------
+            rdps_params_list = ["temperature_950hPa"]
+            for p in [1000, 950, 925, 900, 850, 800, 700, 600]:
+                rdps_params_list.extend([
+                    f"geopotential_height_{p}hPa", 
+                    f"wind_speed_{p}hPa", 
+                    f"wind_direction_{p}hPa"
+                ])
+            rdps_params = ",".join(rdps_params_list)
+            url_upr = f"{model_url}?latitude={lat}&longitude={lon}&hourly={rdps_params}&models=gem_regional&timezone=UTC&wind_speed_unit=knots"
+            
+            req_upr = urllib.request.Request(url_upr, headers={'User-Agent': 'VectorCheck-App/3.0'})
+            with urllib.request.urlopen(req_upr, context=ctx, timeout=10) as response:
+                data_upr = json.loads(response.read().decode('utf-8'))
+
+            # ---------------------------------------------------------
+            # MERGE: Stitch the upper air data into the master payload
+            # ---------------------------------------------------------
+            for key, val_array in data_upr['hourly'].items():
+                if key != "time":
+                    data_master['hourly'][key] = val_array
+
+            return data_master
+
+        else:
+            # ---------------------------------------------------------
+            # STANDARD FETCH: ECMWF (Global 9km)
+            # ---------------------------------------------------------
+            ecmwf_params_list = [
+                "temperature_2m", "relative_humidity_2m", "weather_code", 
+                "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
+                "freezing_level_height", "temperature_950hPa",
+                "wind_speed_100m", "wind_direction_100m"
+            ]
+            for p in [1000, 950, 925, 900, 850, 800, 700, 600]:
+                ecmwf_params_list.extend([
+                    f"geopotential_height_{p}hPa", 
+                    f"wind_speed_{p}hPa", 
+                    f"wind_direction_{p}hPa"
+                ])
+                
+            params_str = ",".join(ecmwf_params_list)
+            url_ecmwf = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models=ecmwf_ifs04&timezone=UTC&wind_speed_unit=knots"
+            
+            req_ecmwf = urllib.request.Request(url_ecmwf, headers={'User-Agent': 'VectorCheck-App/3.0'})
+            with urllib.request.urlopen(req_ecmwf, context=ctx, timeout=10) as response:
+                return json.loads(response.read().decode('utf-8'))
+
     except Exception as e:
         print(f"Error fetching model data: {e}")
         return None
