@@ -313,7 +313,6 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
-# Fully robust fallback for Freezing Level Height
 frz_raw_list = h.get('freezing_level_height')
 frz_raw = frz_raw_list[idx] if frz_raw_list is not None else None
 frz_disp = "SFC" if t_temp <= 0 else (f"{int(round(frz_raw * 3.28, -2)):,} ft" if frz_raw else "N/A")
@@ -322,17 +321,16 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Safely extract upper wind, defaulting to 10m if upper air arrays are empty
-u_v_list = h.get('wind_speed_100m', h.get('wind_speed_10m'))
+# Ultra-safe boundary layer wind extraction. Checks 120m first, then 100m, then defaults to 10m
+u_v_list = h.get('wind_speed_120m', h.get('wind_speed_100m', h.get('wind_speed_10m')))
 u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
 
-u_dir_list = h.get('wind_direction_100m', h.get('wind_direction_10m'))
+u_dir_list = h.get('wind_direction_120m', h.get('wind_direction_100m', h.get('wind_direction_10m')))
 u_dir = u_dir_list[idx] if u_dir_list is not None else sfc_dir
-u_h = 100
+u_h = 120 if 'wind_speed_120m' in h else 100
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
-# Re-aligned to the guaranteed 925hPa WMO standard level
 t_950_list = h.get('temperature_925hPa')
 t_950 = t_950_list[idx] if t_950_list is not None else t_temp
 is_stable = t_950 > (t_temp - 2.0)
