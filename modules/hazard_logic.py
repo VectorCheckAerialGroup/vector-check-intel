@@ -1,10 +1,7 @@
 import re
 
 def get_weather_element(wx_code, wind_spd):
-    """
-    Translates WMO weather codes into human-readable text.
-    Codes 0-3 are Sky Condition (Clear/Overcast) and are strictly marked as NIL for Aviation WX.
-    """
+    """Translates WMO weather codes into human-readable text."""
     wx_map = {
         0: "NIL", 1: "NIL", 2: "NIL", 3: "NIL",
         45: "Fog", 48: "Freezing Fog",
@@ -33,44 +30,65 @@ def calculate_icing_profile(h, idx, wx_code):
     elif wx in [56, 57]:
         return "SEV MIXED"
     elif wx == 48:
-        return "MDT RIME"
+        return "MOD RIME"
     
     if t <= 0:
         if wx >= 50:
-            return "MDT MIXED"
+            return "MOD MIXED"
         elif rh >= 90:
-            return "MDT RIME"
+            return "MOD RIME"
         elif rh >= 80:
             return "LGT RIME"
             
     return "NIL"
 
-def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp):
+def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp, terrain_type="Land"):
     """
-    Evaluates turbulence and icing risk based strictly on WMO criteria.
+    Evaluates turbulence using Vector Check's proprietary intensity matrix.
+    Urban environment utilizes a pragmatic 1.25x Venturi multiplier on the 
+    forecasted base wind to balance safety with operational viability.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
-    s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
     g_spd = float(gust) if gust is not None else 0.0
     wx_val = int(wx) if wx is not None else 0
     t_val = float(t_temp) if t_temp is not None else 0.0
     
-    gust_delta = max(0, g_spd - s_spd) 
+    max_wind = max(w_spd, g_spd)
     
     turb_type = "MECH" 
-    if wx_val in [95, 96, 99]:
-        turb_type = "CONV" 
-
     turb_sev = "NIL"
-    if w_spd >= 30 or gust_delta >= 15 or wx_val in [95, 96, 99]:
-        turb_sev = "SEV"
-    elif w_spd >= 20 or gust_delta >= 10 or not is_stable:
-        turb_sev = "MDT"
-    elif w_spd >= 15 or gust_delta >= 5:
-        turb_sev = "LGT"
+    
+    # --- TRUE PHYSICS MATRIX ---
+    if terrain_type == "Water":
+        if max_wind >= 40: turb_sev = "MOD-SEV"
+        elif max_wind >= 35: turb_sev = "MOD"
+        elif max_wind >= 15: turb_sev = "LGT"
         
+    elif terrain_type == "Mountains":
+        if max_wind >= 35: turb_sev = "SEV"
+        elif max_wind >= 20: turb_sev = "MOD"
+        elif max_wind >= 15: turb_sev = "LGT"
+
+    elif terrain_type == "Urban":
+        # 1.25x Pragmatic Shear Model (e.g., 32 forecast = ~40 actual)
+        if max_wind >= 32: turb_sev = "SEV"        
+        elif max_wind >= 28: turb_sev = "MOD-SEV"  
+        elif max_wind >= 20: turb_sev = "MOD"      
+        elif max_wind >= 12: turb_sev = "LGT"      
+        
+    else: # Land (Default)
+        if max_wind >= 40: turb_sev = "SEV"
+        elif max_wind >= 35: turb_sev = "MOD-SEV"
+        elif max_wind >= 25: turb_sev = "MOD"
+        elif max_wind >= 15: turb_sev = "LGT"
+
+    if wx_val in [95, 96, 99]:
+        turb_type = "CONV"
+        turb_sev = "SEV"
+
     turb = f"{turb_sev} {turb_type}" if turb_sev != "NIL" else "NIL"
         
+    # --- ICING ALOFT LOGIC ---
     ice = icing_cond
     
     if alt > 0:
@@ -79,9 +97,9 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
             if wx_val in [66, 67]:
                 ice = "SEV CLR"
             elif wx_val in [56, 57, 48]:
-                ice = "MDT RIME"
+                ice = "MOD RIME"
             elif wx_val >= 50:
-                ice = "MDT MIXED"
+                ice = "MOD MIXED"
             
     return turb, ice
 
