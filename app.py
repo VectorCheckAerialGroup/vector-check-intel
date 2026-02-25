@@ -226,8 +226,17 @@ st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
 st.divider()
 
-if data is None or "hourly" not in data:
-    st.error("⚠️ CRITICAL: Atmospheric Data API Offline or Rejected Request. Please verify coordinates and try again.")
+# --- DIAGNOSTIC UI FALLBACKS ---
+if data is None:
+    st.error("⚠️ CRITICAL: Atmospheric Data API Offline.")
+    st.stop()
+elif "error" in data:
+    st.error(f"⚠️ CRITICAL API REJECTION: {data.get('message', 'Unknown Error')}")
+    st.markdown("**Diagnostic URL (Do not click, for Dev review only):**")
+    st.code(data.get('url', 'URL Unavailable'))
+    st.stop()
+elif "hourly" not in data:
+    st.error("⚠️ CRITICAL: Malformed data payload received from server.")
     st.stop()
 
 tf = TimezoneFinder()
@@ -310,6 +319,7 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
+# Fully robust Lapse Rate estimation for missing Canadian Freezing Levels
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list is not None and frz_raw_list[idx] is not None:
     frz_raw = frz_raw_list[idx]
@@ -325,13 +335,25 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Ultra-safe boundary layer wind extraction. Falls back to 1000hPa (RDPS upper boundary) if needed
-u_v_list = h.get('wind_speed_100m', h.get('wind_speed_1000hPa', h.get('wind_speed_10m')))
-u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
-
-u_dir_list = h.get('wind_direction_100m', h.get('wind_direction_1000hPa', h.get('wind_direction_10m')))
-u_dir = u_dir_list[idx] if u_dir_list is not None else sfc_dir
-u_h = 100 if 'wind_speed_100m' in h else 110
+# --- THE GEOPOTENTIAL ANCHOR ---
+# Instead of guessing fixed heights, we anchor the log profile to the exact 1000hPa geopotential height.
+u_v_list = h.get('wind_speed_1000hPa')
+if u_v_list and u_v_list[idx] is not None:
+    u_v = u_v_list[idx] * k_conv
+    u_dir = h['wind_direction_1000hPa'][idx]
+    u_h_list = h.get('geopotential_height_1000hPa')
+    u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 110 # Fallback to 110m (approx 360ft)
+else:
+    u_v_list = h.get('wind_speed_925hPa')
+    if u_v_list and u_v_list[idx] is not None:
+        u_v = u_v_list[idx] * k_conv
+        u_dir = h['wind_direction_925hPa'][idx]
+        u_h_list = h.get('geopotential_height_925hPa')
+        u_h = u_h_list[idx] if (u_h_list and u_h_list[idx] is not None) else 760
+    else:
+        u_v = w_spd
+        u_dir = sfc_dir
+        u_h = 10
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
