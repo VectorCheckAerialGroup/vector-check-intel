@@ -179,9 +179,7 @@ st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=(icao if icao !=
 if icao == "NONE":
     st.sidebar.markdown("<div style='font-size: 0.85rem; color: #8E949E; margin-bottom: 15px;'>No TAF-issuing station within 50km.</div>", unsafe_allow_html=True)
 
-# Terrain environment selector mapping directly to hazard matrix
 terrain_env = st.sidebar.selectbox("Terrain Environment:", options=["Land", "Water", "Mountains", "Urban"])
-
 model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"])
 
 def log_refresh_callback():
@@ -303,8 +301,6 @@ else:
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-# --- PRECISE THERMAL COLUMN INTERPOLATION (NO MORE GUESSING) ---
-# 1. Build the true thermal column from the geopotential layers
 thermal_profile = [
     {'h': data.get('elevation', 0) * 3.28084, 't': t_temp}
 ]
@@ -319,11 +315,9 @@ for p in [1000, 925, 850, 700]:
 
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
-    # Use native freezing level if available (ECMWF)
     frz_raw = float(frz_raw_list[idx])
     frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
 else:
-    # 2. Mathematically pinpoint the 0C isotherm using the thermal column (GEM)
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
@@ -416,8 +410,7 @@ for alt in [400, 300, 200, 100]:
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / max(0.1, u_h))) % 360
     d_c = format_dir(d_c_raw, s_c)
     
-    # Passing the terrain environment down into the matrix evaluator
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, t_temp, terrain_env)
+    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, t_temp, rh, terrain_env)
     
     if int(s_c) == 0:
         mat_dir, mat_spd = "CALM", "0"
@@ -486,8 +479,7 @@ else:
         d_e = format_dir(d_e_raw, s_e)
         
         g_e = s_e + gust_delta
-        # Extended trajectory must also pass terrain context
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, t_temp, terrain_env)
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, t_temp, rh, terrain_env)
         
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
@@ -596,7 +588,6 @@ st.divider()
 df_export = pd.concat([df_tactical, df_ext])
 stn_display_str = f"{icao} | {stn_dist:.1f} km {stn_dir} of AO" if icao != "NONE" else "No METAR/TAF information within a 50km radius."
 
-# Airframe removed from CSV export, Terrain Environment properly injected
 csv_header = (
     "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
     f"Target Coordinates: {lat}, {lon}\n"
