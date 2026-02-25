@@ -212,7 +212,7 @@ st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
 model_api_map = {
     "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
-    "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/ecmwf"
+    "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/forecast" # Note: ECMWF requires forecast endpoint
 }
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
@@ -232,7 +232,7 @@ if data is None:
     st.stop()
 elif "error" in data:
     st.error(f"⚠️ CRITICAL API REJECTION: {data.get('message', 'Unknown Error')}")
-    st.markdown("**Diagnostic URL (Do not click, for Dev review only):**")
+    st.markdown("**Diagnostic URL (For Dev review only):**")
     st.code(data.get('url', 'URL Unavailable'))
     st.stop()
 elif "hourly" not in data:
@@ -290,6 +290,7 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
+# The API now delivers native knots, k_conv strictly serves as a 1.0 multiplier
 is_kmh = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
 k_conv = 0.539957 if is_kmh else 1.0
 raw_wind_unit = "KT"
@@ -328,6 +329,7 @@ else:
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
+        # Standard Atmosphere Lapse Rate: Temp drops ~1.98C per 1,000 ft
         est_frz = (t_temp / 1.98) * 1000
         frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
 
@@ -336,7 +338,7 @@ raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
 # --- THE GEOPOTENTIAL ANCHOR ---
-# Instead of guessing fixed heights, we anchor the log profile to the exact 1000hPa geopotential height.
+# Anchors the tactical shear profile strictly to available WMO pressure levels rather than specific model meters.
 u_v_list = h.get('wind_speed_1000hPa')
 if u_v_list and u_v_list[idx] is not None:
     u_v = u_v_list[idx] * k_conv
@@ -401,7 +403,7 @@ stack_tactical = []
 gust_delta = max(0, gst - w_spd)
 
 for alt in [400, 300, 200, 100]:
-    s_c = w_spd + (u_v - w_spd) * (math.log(alt*0.3048/10) / math.log(u_h/10))
+    s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt*0.3048)/10) / math.log(max(1.1, u_h/10)))
     g_c = s_c + gust_delta
     
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / u_h)) % 360
