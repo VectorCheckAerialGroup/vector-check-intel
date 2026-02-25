@@ -7,33 +7,31 @@ def fetch_mission_data(lat, lon, model_url):
     """
     Fetches raw atmospheric column data.
     Relies on dedicated endpoints (/v1/gem or /v1/ecmwf) to handle native seamless blending.
-    Returns exact error payloads if the API rejects the URL.
     """
     is_gem = "gem" in model_url
     
-    # 1. Base Variables (Universally supported by all models)
+    # 1. Base Variables
     hourly_params = [
         "temperature_2m", "relative_humidity_2m", "weather_code", 
-        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
-        "temperature_925hPa"
+        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m"
     ]
     
-    # ECMWF supports native freezing level. GEM does not (we estimate it in app.py).
     if not is_gem:
         hourly_params.append("freezing_level_height")
 
-    # 2. WMO Standard Pressure Levels (Universally supported by all models)
+    # 2. WMO Standard Pressure Levels (Now includes exact thermal layers for precise FZLVL plotting)
     pressure_levels = [1000, 925, 850, 700]
     for p in pressure_levels:
         hourly_params.extend([
             f"geopotential_height_{p}hPa",
             f"wind_speed_{p}hPa",
-            f"wind_direction_{p}hPa"
+            f"wind_direction_{p}hPa",
+            f"temperature_{p}hPa"
         ])
 
     params_str = ",".join(hourly_params)
     
-    # 3. Construct clean URL without forced 'models=' overrides. Using official 'kn' tag.
+    # 3. Construct clean URL 
     url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&timezone=UTC&wind_speed_unit=kn"
 
     try:
@@ -41,7 +39,7 @@ def fetch_mission_data(lat, lon, model_url):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/12.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/13.0'})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
             return json.loads(response.read().decode('utf-8'))
             
