@@ -274,9 +274,6 @@ def format_dir(d, spd):
     if spd == 0: return 0
     return r
 
-# --- STRICT DEFENSIVE TYPING FOR API EXTRACTIONS ---
-# Prevents Python NoneType math crashes if the API fails to forecast a variable at the timeline edge.
-
 t_temp_raw = h.get('temperature_2m', [0])[idx]
 t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
@@ -303,22 +300,50 @@ else:
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
+# --- PRECISE THERMAL COLUMN INTERPOLATION (NO MORE GUESSING) ---
+# 1. Build the true thermal column from the geopotential layers
+thermal_profile = [
+    {'h': data.get('elevation', 0) * 3.28084, 't': t_temp} # Surface anchor
+]
+
+for p in [1000, 925, 850, 700]:
+    gh_list = h.get(f'geopotential_height_{p}hPa')
+    t_list = h.get(f'temperature_{p}hPa')
+    if gh_list and t_list and len(gh_list) > idx and len(t_list) > idx and gh_list[idx] is not None and t_list[idx] is not None:
+        gh_ft = float(gh_list[idx]) * 3.28084
+        # Ensure strictly ascending heights to prevent math errors
+        if gh_ft > thermal_profile[-1]['h']:
+            thermal_profile.append({'h': gh_ft, 't': float(t_list[idx])})
+
 frz_raw_list = h.get('freezing_level_height')
-if frz_raw_list is not None and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
+if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
+    # Use native freezing level if available (ECMWF)
     frz_raw = float(frz_raw_list[idx])
     frz_disp = "SFC" if t_temp <= 0 else f"{int(round(frz_raw * 3.28, -2)):,} ft"
 else:
+    # 2. Mathematically pinpoint the 0C isotherm using the thermal column (GEM)
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
-        est_frz = (t_temp / 1.98) * 1000
-        frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
+        frz_disp = ">10,000 ft" # Fallback if no freezing layer is found
+        for i in range(1, len(thermal_profile)):
+            lower = thermal_profile[i-1]
+            upper = thermal_profile[i]
+            
+            if upper['t'] <= 0:
+                t_diff = lower['t'] - upper['t']
+                if t_diff > 0:
+                    ratio = lower['t'] / t_diff
+                    frz_h = lower['h'] + ratio * (upper['h'] - lower['h'])
+                else:
+                    frz_h = lower['h']
+                frz_disp = f"{int(round(frz_h, -2)):,} ft"
+                break
 
 raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# Safe upper boundary extraction
 u_v_list = h.get('wind_speed_1000hPa')
 if u_v_list and len(u_v_list) > idx and u_v_list[idx] is not None:
     u_v = float(u_v_list[idx]) * k_conv
@@ -424,7 +449,6 @@ for p in p_levels_traj:
         wd = wd_list[idx]
         gh = gh_list[idx]
         
-        # Strict NoneType avoidance for upper air payload
         if ws is not None and wd is not None and gh is not None:
             p_profile.append({
                 'h': float(gh) * 3.28,
