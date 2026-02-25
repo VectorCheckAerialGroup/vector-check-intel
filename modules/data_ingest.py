@@ -19,14 +19,15 @@ def fetch_mission_data(lat, lon, model_url):
     if not is_gem:
         hourly_params.append("freezing_level_height")
 
-    # 2. WMO Standard Pressure Levels (Now includes exact thermal layers for precise FZLVL plotting)
+    # 2. WMO Standard Pressure Levels (Now includes RH for Tephigram Cloud Analysis)
     pressure_levels = [1000, 925, 850, 700]
     for p in pressure_levels:
         hourly_params.extend([
             f"geopotential_height_{p}hPa",
             f"wind_speed_{p}hPa",
             f"wind_direction_{p}hPa",
-            f"temperature_{p}hPa"
+            f"temperature_{p}hPa",
+            f"relative_humidity_{p}hPa"
         ])
 
     params_str = ",".join(hourly_params)
