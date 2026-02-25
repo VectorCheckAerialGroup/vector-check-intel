@@ -5,10 +5,11 @@ import ssl
 def fetch_mission_data(lat, lon, model_url):
     """
     Fetches raw atmospheric column data.
-    Uses Dual-Fetch for GEM to get pure HRDPS surface data and RDPS upper air data,
-    bypassing API schema validation crashes caused by missing variables.
+    Uses Dual-Fetch for GEM to seamlessly merge pure HRDPS surface data 
+    with pure RDPS upper air data using strictly guaranteed WMO pressure levels.
     """
     is_gem = "gem" in model_url
+    base_url = "https://api.open-meteo.com/v1/forecast" # Force master endpoint
     
     try:
         # Ignore SSL certificate verification to prevent firewall/cloud blockages
@@ -21,22 +22,21 @@ def fetch_mission_data(lat, lon, model_url):
             # FETCH 1: Pure 2.5km HRDPS (Strictly Surface Boundary Layer)
             # ---------------------------------------------------------
             hrdps_params = "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
-            url_sfc = f"{model_url}?latitude={lat}&longitude={lon}&hourly={hrdps_params}&models=gem_hrdps_continental&timezone=UTC&wind_speed_unit=knots"
+            url_sfc = f"{base_url}?latitude={lat}&longitude={lon}&hourly={hrdps_params}&models=gem_hrdps_continental&timezone=UTC&wind_speed_unit=knots"
             
-            req_sfc = urllib.request.Request(url_sfc, headers={'User-Agent': 'VectorCheck-App/4.1'})
+            req_sfc = urllib.request.Request(url_sfc, headers={'User-Agent': 'VectorCheck-App/4.2'})
             with urllib.request.urlopen(req_sfc, context=ctx, timeout=10) as response:
                 data_master = json.loads(response.read().decode('utf-8'))
 
             # ---------------------------------------------------------
             # FETCH 2: Pure 10km RDPS (Upper Trajectory & Freezing Level)
             # ---------------------------------------------------------
+            # Strictly adhering to WMO Standard pressure levels to prevent 400 Bad Request API crashes
             rdps_params_list = [
                 "freezing_level_height", 
-                "wind_speed_100m", 
-                "wind_direction_100m", 
-                "temperature_950hPa"
+                "temperature_925hPa" 
             ]
-            for p in [1000, 950, 925, 900, 850, 800, 700, 600]:
+            for p in [1000, 925, 850, 700]:
                 rdps_params_list.extend([
                     f"geopotential_height_{p}hPa", 
                     f"wind_speed_{p}hPa", 
@@ -44,9 +44,9 @@ def fetch_mission_data(lat, lon, model_url):
                 ])
                 
             rdps_params = ",".join(rdps_params_list)
-            url_upr = f"{model_url}?latitude={lat}&longitude={lon}&hourly={rdps_params}&models=gem_regional&timezone=UTC&wind_speed_unit=knots"
+            url_upr = f"{base_url}?latitude={lat}&longitude={lon}&hourly={rdps_params}&models=gem_regional&timezone=UTC&wind_speed_unit=knots"
             
-            req_upr = urllib.request.Request(url_upr, headers={'User-Agent': 'VectorCheck-App/4.1'})
+            req_upr = urllib.request.Request(url_upr, headers={'User-Agent': 'VectorCheck-App/4.2'})
             with urllib.request.urlopen(req_upr, context=ctx, timeout=10) as response:
                 data_upr = json.loads(response.read().decode('utf-8'))
 
@@ -66,10 +66,9 @@ def fetch_mission_data(lat, lon, model_url):
             ecmwf_params_list = [
                 "temperature_2m", "relative_humidity_2m", "weather_code", 
                 "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
-                "freezing_level_height", "temperature_950hPa",
-                "wind_speed_100m", "wind_direction_100m"
+                "freezing_level_height", "temperature_925hPa"
             ]
-            for p in [1000, 950, 925, 900, 850, 800, 700, 600]:
+            for p in [1000, 925, 850, 700]:
                 ecmwf_params_list.extend([
                     f"geopotential_height_{p}hPa", 
                     f"wind_speed_{p}hPa", 
@@ -77,9 +76,9 @@ def fetch_mission_data(lat, lon, model_url):
                 ])
                 
             params_str = ",".join(ecmwf_params_list)
-            url_ecmwf = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models=ecmwf_ifs04&timezone=UTC&wind_speed_unit=knots"
+            url_ecmwf = f"{base_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models=ecmwf_ifs04&timezone=UTC&wind_speed_unit=knots"
             
-            req_ecmwf = urllib.request.Request(url_ecmwf, headers={'User-Agent': 'VectorCheck-App/4.1'})
+            req_ecmwf = urllib.request.Request(url_ecmwf, headers={'User-Agent': 'VectorCheck-App/4.2'})
             with urllib.request.urlopen(req_ecmwf, context=ctx, timeout=10) as response:
                 return json.loads(response.read().decode('utf-8'))
 
