@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import math
 import re
+import json
 import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from timezonefinder import TimezoneFinder
 import pytz
@@ -76,30 +76,39 @@ if not check_password():
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_nearest_icao_station(user_lat, user_lon):
-    """Spatially queries the AWC API for active TAFs within 50km to bypass Canadian metadata bugs."""
+    """Spatially queries the modern AWC JSON API using a bounding box, strictly locked to 50km."""
     try:
-        # Directly querying the 'tafs' endpoint ensures the station physically issues TAFs
-        url = f"https://aviationweather.gov/api/data/dataserver?requestType=retrieve&dataSource=tafs&radialDistance=40;{user_lat},{user_lon}&hoursBeforeNow=4&format=xml"
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/1.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            xml_data = response.read()
+        # A 1-degree coordinate bounding box creates a ~111km square search grid, ensuring 
+        # we capture all candidate stations before the strict 50km Haversine formula filters them.
+        min_lat = user_lat - 1.0
+        max_lat = user_lat + 1.0
+        min_lon = user_lon - 1.0
+        max_lon = user_lon + 1.0
         
-        root = ET.fromstring(xml_data)
-        tafs = root.findall('.//TAF')
+        # Modern AWC JSON Endpoint
+        url = f"https://aviationweather.gov/api/data/taf?bbox={min_lat},{min_lon},{max_lat},{max_lon}&format=json"
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
         
         best_station = {"icao": "NONE", "dist": float('inf')}
         seen_icaos = set()
         
-        for taf in tafs:
-            icao_code = taf.find('station_id').text
+        # The JSON API returns an array of TAF dictionaries
+        for taf in data:
+            if 'icaoId' not in taf or 'lat' not in taf or 'lon' not in taf:
+                continue
+                
+            icao_code = taf['icaoId']
             if icao_code in seen_icaos:
                 continue
             seen_icaos.add(icao_code)
             
-            stn_lat = float(taf.find('latitude').text)
-            stn_lon = float(taf.find('longitude').text)
+            stn_lat = float(taf['lat'])
+            stn_lon = float(taf['lon'])
             
-            # Spherical Haversine calculation for exact kilometers
+            # Spherical Haversine calculation for exact kilometers over the Earth's curvature
             R = 6371.0 
             lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
             lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
@@ -120,6 +129,7 @@ def get_nearest_icao_station(user_lat, user_lon):
         
         if best_station["icao"] != "NONE":
             return best_station
+            
     except Exception as e:
         pass
     
