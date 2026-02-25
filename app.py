@@ -294,8 +294,6 @@ def format_dir(d, spd):
 t_temp = h['temperature_2m'][idx]
 rh = h['relative_humidity_2m'][idx]
 w_spd = h['wind_speed_10m'][idx] * k_conv
-
-# Weather code fallback protection
 wx_list = h.get('weather_code')
 wx = wx_list[idx] if wx_list is not None else 0
 
@@ -312,7 +310,6 @@ else:
 
 sfc_dir = format_dir(h['wind_direction_10m'][idx], w_spd)
 
-# --- LAPSE RATE FALLBACK ENGINE ---
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list is not None and frz_raw_list[idx] is not None:
     frz_raw = frz_raw_list[idx]
@@ -321,7 +318,6 @@ else:
     if t_temp <= 0:
         frz_disp = "SFC"
     else:
-        # Standard Atmosphere Lapse Rate: Temp drops ~1.98C per 1,000 ft
         est_frz = (t_temp / 1.98) * 1000
         frz_disp = f"~{int(round(est_frz, -2)):,} ft (Est)"
 
@@ -329,12 +325,13 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = raw_gst_list[idx] * k_conv if raw_gst_list is not None else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-u_v_list = h.get('wind_speed_120m', h.get('wind_speed_100m', h.get('wind_speed_10m')))
+# Uniform 100m extraction across all models to prevent math crashes
+u_v_list = h.get('wind_speed_100m', h.get('wind_speed_10m'))
 u_v = u_v_list[idx] * k_conv if u_v_list is not None else w_spd
 
-u_dir_list = h.get('wind_direction_120m', h.get('wind_direction_100m', h.get('wind_direction_10m')))
+u_dir_list = h.get('wind_direction_100m', h.get('wind_direction_10m'))
 u_dir = u_dir_list[idx] if u_dir_list is not None else sfc_dir
-u_h = 120 if 'wind_speed_120m' in h else 100
+u_h = 100
     
 icing_cond = calculate_icing_profile(h, idx, wx)
 
