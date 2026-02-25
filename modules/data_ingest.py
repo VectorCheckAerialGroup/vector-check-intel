@@ -1,103 +1,92 @@
-import requests
-import time
-import streamlit as st
-from modules.hazard_logic import apply_tactical_highlights
+import urllib.request
+import json
+import ssl
 
-@st.cache_data(ttl=900)
-def get_aviation_weather(icao):
+def fetch_mission_data(lat, lon, model_url):
     """
-    Fetches raw METAR and TAF strings directly from the Aviation Weather Center
-    using an active retry/backoff loop to prevent timeout crashes.
+    Fetches raw atmospheric column data from Open-Meteo.
+    Explicitly forces High-Resolution models to prevent low-res defaults.
     """
-    if not icao or icao == "UNKNOWN":
-        return "N/A", "N/A"
-        
-    def fetch_with_retry(url, retries=3, timeout=10):
-        """Helper function to hit the API multiple times before failing."""
-        for attempt in range(retries):
-            try:
-                response = requests.get(url, timeout=timeout)
-                if response.status_code == 200:
-                    text = response.text.strip()
-                    return text if text else "NIL"
-                return "UNAVAILABLE"
-            except requests.exceptions.RequestException:
-                if attempt < retries - 1:
-                    time.sleep(2)  # Backoff for 2 seconds before striking again
-                else:
-                    return f"API ERROR: Connection Timed Out after {retries} attempts."
-        return "UNAVAILABLE"
+    # 1. Force High-Resolution Models
+    if "gem" in model_url:
+        model_param = "gem_hrdps_continental" # 2.5km Canadian Mesoscale
+    elif "ecmwf" in model_url:
+        model_param = "ecmwf_ifs04" # 9km Global ECMWF
+    else:
+        model_param = "best_match"
+
+    # 2. Build the parameter payload for the hazard matrix
+    hourly_params = [
+        "temperature_2m", "relative_humidity_2m", "weather_code", 
+        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", 
+        "freezing_level_height", "temperature_950hPa"
+    ]
+    
+    # GEM outputs low-level wind at 120m, ECMWF at 100m
+    if "gem" in model_url:
+        hourly_params.extend(["wind_speed_120m", "wind_direction_120m"])
+    else:
+        hourly_params.extend(["wind_speed_100m", "wind_direction_100m"])
+
+    # Pressure levels for the 1,000 to 5,000ft upper trajectory stack
+    pressure_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
+    for p in pressure_levels:
+        hourly_params.extend([
+            f"geopotential_height_{p}hPa",
+            f"wind_speed_{p}hPa",
+            f"wind_direction_{p}hPa"
+        ])
+
+    params_str = ",".join(hourly_params)
+    
+    # 3. Construct URL and force knot conversion on the server side
+    url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={params_str}&models={model_param}&timezone=UTC&wind_speed_unit=knots"
 
     try:
-        # Fetch METAR
-        metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw"
-        metar_raw = fetch_with_retry(metar_url)
-
-        # Fetch TAF
-        taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
-        taf_raw = fetch_with_retry(taf_url)
-
-        # Apply HTML formatting before passing to the UI
-        formatted_metar = apply_tactical_highlights(metar_raw)
-        formatted_taf = apply_tactical_highlights(taf_raw)
-
-        return formatted_metar, formatted_taf
+        # Ignore SSL certificate verification to prevent firewall/cloud blockages
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
         
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return data
     except Exception as e:
-        return f"API ERROR: {e}", f"API ERROR: {e}"
-
-@st.cache_data(ttl=900)
-def fetch_mission_data(lat, lon, model_api_url):
-    """
-    Fetches the high-resolution atmospheric column from Open-Meteo.
-    Dynamically switches to commercial endpoints if an API key is present in secrets.
-    Timeout increased to 15 seconds to handle massive spatial payloads.
-    """
-    try:
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "hourly": [
-                "temperature_2m", "relative_humidity_2m", "weather_code", 
-                "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
-                "wind_speed_100m", "wind_direction_100m",
-                "wind_speed_120m", "wind_direction_120m",
-                "temperature_950hPa", "freezing_level_height"
-            ],
-            "timezone": "UTC"
-        }
-        
-        p_levels = [1000, 950, 925, 900, 850, 800, 700, 600]
-        for p in p_levels:
-            params["hourly"].extend([
-                f"temperature_{p}hPa",
-                f"relative_humidity_{p}hPa",
-                f"geopotential_height_{p}hPa",
-                f"wind_speed_{p}hPa",
-                f"wind_direction_{p}hPa"
-            ])
-
-        # --- COMMERCIAL API UPGRADE LOGIC ---
-        # Try to pull the key. If the section doesn't exist, fail gracefully.
-        try:
-            api_key = st.secrets["open_meteo"]["api_key"]
-            if api_key:
-                params["apikey"] = api_key
-                # Swap the base URL to the commercial server
-                model_api_url = model_api_url.replace("api.open-meteo.com", "customer-api.open-meteo.com")
-        except (KeyError, FileNotFoundError):
-            # No key found. Proceed with standard free endpoint.
-            pass
-
-        # Increased timeout to 15 seconds for heavy data pulls
-        response = requests.get(model_api_url, params=params, timeout=15)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"API Request Failed: Status {response.status_code}")
-            return None
-            
-    except Exception as e:
-        print(f"Data Fetch Critical Error: {e}")
+        print(f"Error fetching model data: {e}")
         return None
+
+def get_aviation_weather(icao):
+    """Fetches raw METAR and TAF directly from the Aviation Weather Center API."""
+    metar = "UNAVAILABLE"
+    taf = "UNAVAILABLE"
+    
+    if not icao or icao == "NONE" or icao == "N/A":
+        return metar, taf
+        
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        # Fetch latest METAR (hours=1 grabs the most recent issuance)
+        metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw&hours=1"
+        req_m = urllib.request.Request(metar_url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req_m, context=ctx, timeout=5) as resp:
+            m_data = resp.read().decode('utf-8').strip()
+            if m_data:
+                # If multiple METARs exist in the hour (e.g., a SPECI), grab the top one
+                metar = m_data.split('\n')[0]
+
+        # Fetch active TAF
+        taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
+        req_t = urllib.request.Request(taf_url, headers={'User-Agent': 'VectorCheck-App/2.0'})
+        with urllib.request.urlopen(req_t, context=ctx, timeout=5) as resp:
+            t_data = resp.read().decode('utf-8').strip()
+            if t_data:
+                taf = t_data
+
+    except Exception as e:
+        print(f"Error fetching AWC text data: {e}")
+        
+    return metar, taf
