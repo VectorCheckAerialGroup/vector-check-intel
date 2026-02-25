@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import math
 import re
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from timezonefinder import TimezoneFinder
 import pytz
@@ -70,6 +72,60 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
+# SPATIAL ENGINE: AUTO-LOCATE NEAREST TAF STATION
+# ---------------------------------------------------------
+@st.cache_data(ttl=3600)
+def get_nearest_icao_station(user_lat, user_lon):
+    """Spatially queries the Aviation Weather Center API for the nearest TAF station <= 50km."""
+    try:
+        # Request 40 radial miles (~64km) to ensure 50km is safely covered by the API return
+        url = f"https://aviationweather.gov/api/data/dataserver?requestType=retrieve&dataSource=stations&radialDistance=40;{user_lat},{user_lon}&format=xml"
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
+        
+        root = ET.fromstring(xml_data)
+        stations = root.findall('.//Station')
+        
+        best_station = {"icao": "NONE", "name": "No METAR/TAF information within a 50km radius.", "dist": float('inf')}
+        
+        for stn in stations:
+            site_type = stn.find('site_type')
+            if site_type is not None and 'TAF' in site_type.text:
+                stn_lat = float(stn.find('latitude').text)
+                stn_lon = float(stn.find('longitude').text)
+                
+                # Spherical Haversine calculation for exact kilometers
+                R = 6371.0 
+                lat1, lon1 = math.radians(user_lat), math.radians(user_lon)
+                lat2, lon2 = math.radians(stn_lat), math.radians(stn_lon)
+                
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+                
+                a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                dist = R * c
+                
+                # STRICT DOCTRINE LIMIT: Must be <= 50.0 km
+                if dist <= 50.0 and dist < best_station["dist"]:
+                    name_elem = stn.find('site_name')
+                    stn_name = name_elem.text if name_elem is not None else stn.find('station_id').text
+                    best_station = {
+                        "icao": stn.find('station_id').text,
+                        "name": stn_name.title(), 
+                        "dist": dist
+                    }
+        
+        if best_station["icao"] != "NONE":
+            return best_station
+    except Exception as e:
+        pass
+    
+    # Graceful fallback if nothing is within 50km or API fails
+    return {"icao": "NONE", "name": "No METAR/TAF information within a 50km radius.", "dist": None}
+
+# ---------------------------------------------------------
 # MAIN DASHBOARD EXECUTION
 # ---------------------------------------------------------
 
@@ -84,7 +140,18 @@ except Exception:
 st.sidebar.header("Mission Parameters")
 lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
 lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
-icao = st.sidebar.text_input("Nearest ICAO", value="CYTR", key="icao_input").upper().strip()
+
+# Automated Spatial Query Execution
+station_data = get_nearest_icao_station(lat, lon)
+icao = station_data["icao"]
+stn_name = station_data["name"]
+stn_dist = station_data["dist"]
+
+# Locked UI Element
+display_icao = icao if icao != "NONE" else "N/A"
+st.sidebar.text_input("Nearest Valid ICAO (Auto-Locked)", value=display_icao, disabled=True)
+if icao == "NONE":
+    st.sidebar.warning("No TAF-issuing station within 50km.")
 
 # Transport Canada Airframe Classification
 airframe_class = st.sidebar.selectbox(
@@ -105,7 +172,7 @@ def log_refresh_callback():
         st.session_state.get("active_operator", "UNKNOWN"), 
         st.session_state.get("lat_input", 44.1628), 
         st.session_state.get("lon_input", -77.3832), 
-        st.session_state.get("icao_input", "CYTR"), 
+        st.session_state.get("icao_input", icao), 
         "MANUAL_REFRESH"
     )
 
@@ -117,7 +184,12 @@ model_api_map = {
 }
 
 data = fetch_mission_data(lat, lon, model_api_map[model_choice])
-metar_raw, taf_raw = get_aviation_weather(icao)
+
+# Controlled Fetch to avoid bad API calls
+if icao != "NONE":
+    metar_raw, taf_raw = get_aviation_weather(icao)
+else:
+    metar_raw, taf_raw = "NIL", "NIL"
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
@@ -277,7 +349,6 @@ if data and "hourly" in data:
         
         turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_stable, icing_cond, airframe_class, t_temp)
         
-        # Apply CALM/VRB string formatting to dataframe for parity with UI
         if int(s_c) == 0:
             mat_dir, mat_spd = "CALM", "0"
         elif int(s_c) <= 3:
@@ -322,7 +393,6 @@ if data and "hourly" in data:
         g_e = s_e + gust_delta
         turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_stable, icing_cond, airframe_class, t_temp)
         
-        # Apply CALM/VRB string formatting to dataframe for parity with UI
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
         elif int(s_e) <= 3:
@@ -380,37 +450,46 @@ if data and "hourly" in data:
 
     st.divider()
 
-    clean_metar = re.sub('<[^<]+>', '', metar_raw)
-    clean_taf = re.sub('<[^<]+>', '', taf_raw)
-    clean_taf = re.sub(r'\n\s*\n', '\n', clean_taf).strip()
-    metar_disp = apply_tactical_highlights(clean_metar)
-    taf_disp = apply_tactical_highlights(clean_taf)
-    taf_disp = taf_disp.replace('\n', '<br>')
-    
-    st.subheader(f"Actuals ({icao})")
-    st.markdown(f'''
-    <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
-        <div class="obs-text">
-            <strong style="color: #8E949E;">METAR/SPECI</strong><br>
-            <div style="line-height: 1.3; margin-bottom: 15px; margin-top: 5px;">
-                {metar_disp}
-            </div>
-            <strong style="color: #8E949E;">TAF</strong><br>
-            <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px;">
-                {taf_disp}
+    # Controlled Rendering of Station Actuals based on 50km Rule
+    if icao == "NONE":
+        st.subheader("Station Actuals")
+        st.warning("No METAR/TAF information within a 50km radius.")
+        clean_metar = "NIL"
+        clean_taf = "NIL"
+    else:
+        clean_metar = re.sub('<[^<]+>', '', metar_raw)
+        clean_taf = re.sub('<[^<]+>', '', taf_raw)
+        clean_taf = re.sub(r'\n\s*\n', '\n', clean_taf).strip()
+        metar_disp = apply_tactical_highlights(clean_metar)
+        taf_disp = apply_tactical_highlights(clean_taf)
+        taf_disp = taf_disp.replace('\n', '<br>')
+        
+        st.subheader(f"Station Actuals: {stn_name} ({icao}) | {stn_dist:.1f} km from AO")
+        st.markdown(f'''
+        <div style="background-color: #1B1E23; padding: 15px; border-radius: 5px;">
+            <div class="obs-text">
+                <strong style="color: #8E949E;">METAR/SPECI</strong><br>
+                <div style="line-height: 1.3; margin-bottom: 15px; margin-top: 5px;">
+                    {metar_disp}
+                </div>
+                <strong style="color: #8E949E;">TAF</strong><br>
+                <div style="line-height: 1.3; font-size: 0.95rem; margin-top: 5px;">
+                    {taf_disp}
+                </div>
             </div>
         </div>
-    </div>
-    ''', unsafe_allow_html=True)
+        ''', unsafe_allow_html=True)
     
     st.divider()
 
     df_export = pd.concat([df_tactical, df_ext])
     
-    # AUDITED CSV HEADER: Now includes explicit Forecasted Surface Conditions block
+    stn_display_str = f"{stn_name} ({icao}) | Distance: {stn_dist:.1f} km" if icao != "NONE" else stn_name
+    
     csv_header = (
         "VECTOR CHECK AERIAL GROUP INC. - Atmospheric Risk Assessment\n"
-        f"Target ICAO: {icao} | Coordinates: {lat}, {lon}\n"
+        f"Target Coordinates: {lat}, {lon}\n"
+        f"Automated Weather Station: {stn_display_str}\n"
         f"Forecast Model: {model_choice} | Valid Time: {selected_time_str}\n"
         f"Airframe Class: {airframe_class}\n"
         f"Wind Unit Standard: {raw_wind_unit}\n\n" 
@@ -437,14 +516,14 @@ if data and "hourly" in data:
             st.session_state.get("active_operator", "UNKNOWN"), 
             st.session_state.get("lat_input", 44.1628), 
             st.session_state.get("lon_input", -77.3832), 
-            st.session_state.get("icao_input", "CYTR"), 
+            st.session_state.get("icao_input", icao), 
             f"DOWNLOAD_CSV_{airframe_class[:5]}"
         )
     
     st.download_button(
         label="Download Actuals and Forecast data (CSV)",
         data=csv_data,
-        file_name=f"VCAG_Hazard_Matrix_{icao}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"VCAG_Hazard_Matrix_{lat}_{lon}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         on_click=log_download_callback
     )
