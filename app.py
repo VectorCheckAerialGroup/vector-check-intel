@@ -385,7 +385,6 @@ for i in range(nearest_idx, max_idx + 1):
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
     is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
     
-    # MET TECH CEILING FIX: Only BKN/OVC constitutes a ceiling (c_base_agl). SCT is ignored for Matrix limits.
     c_base_agl = 10000 
     c_amt = "CLR"
     
@@ -395,25 +394,23 @@ for i in range(nearest_idx, max_idx + 1):
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
         
-        # 1. Hunt for True Ceiling (BKN/OVC)
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 3.0: 
-                # Synoptic Filter: Bypass boundary layer moisture if vis is clear and no WX
-                if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
+                # ADVANCED BOUNDARY LAYER DEWPOINT FILTER
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                     continue
                 c_base_agl = int(round(h_agl, -2))
                 c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
                 break
                 
-        # 2. Hunt for Scattered (SCT) - purely for visual awareness, NOT a matrix failure point
         if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 5.0:
-                    if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
+                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                         continue
-                    c_amt = "SCT" # Notice c_base_agl remains 10000, preventing a flight halt
+                    c_amt = "SCT" 
                     break
 
     alt_msl = sfc_elevation + 400
@@ -619,24 +616,22 @@ if is_convective:
 else:
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
     
-    # 1. Hunt for True Ceiling (BKN/OVC)
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
-            # Synoptic Filter
-            if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
+            # ADVANCED BOUNDARY LAYER DEWPOINT FILTER
+            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                 continue
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             c_base_agl = int(round(h_agl, -2))
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
             
-    # 2. Hunt for Scattered (Visual awareness only)
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
                     continue
                 sct_h = int(round(h_agl, -2))
                 c_base_disp = f"{sct_h:,} ft SCT"
