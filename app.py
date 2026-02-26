@@ -305,7 +305,6 @@ sfc_spread = t_temp - td
 sfc_dir_raw = h.get('wind_direction_10m', [0])[idx]
 sfc_dir = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-# --- NATIVE VISIBILITY EXTRACTION & CAPPING (Strict Formatting) ---
 vis_raw_list = h.get('visibility')
 if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     vis_m = float(vis_raw_list[idx])
@@ -315,7 +314,6 @@ if vis_raw_list and len(vis_raw_list) > idx and vis_raw_list[idx] is not None:
     else:
         vis_disp = f"{vis_sm:.1f} SM"
 else:
-    # Fallback to RH estimator if API payload drops native visibility
     if t_temp_raw is not None and rh_raw is not None and rh > 0:
         vis_est = int((100-rh)/5 * 1.13)
         if vis_est > 7:
@@ -325,9 +323,7 @@ else:
     else:
         vis_disp = "NIL"
 
-# --- THERMAL PROFILE GENERATION ---
 sfc_elevation = data.get('elevation', 0) * 3.28084
-# Added 'rh' to profile for altitude interpolation
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 
 for p in [1000, 925, 850, 700]:
@@ -366,7 +362,6 @@ def get_interp_thermals(alt_msl, profile):
             return i_t, int(i_rh)
     return profile[0]['t'], profile[0]['rh']
 
-# --- PRECISE FREEZING LEVEL DETERMINATION ---
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
     frz_raw = float(frz_raw_list[idx])
@@ -389,41 +384,40 @@ else:
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
-# --- CLOUD BASE ANALYSIS (CONVECTIVE VS STRATIFORM) ---
 t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 
-# Environmental Lapse Rate Check (Trigger Convective calculation if highly unstable)
 lapse_rate_temp_drop = t_temp - t_950
 is_steep_lapse_rate = lapse_rate_temp_drop >= 7.5
 is_convective = (wx >= 80) or is_steep_lapse_rate
 
+# Calculate AGL Cloud Base for the Visible Moisture Gate
+c_base_agl = 10000
+
 if is_convective:
-    # Rule of thumb for unstable boundary layer
     raw_base = max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER)
-    c_base_disp = f"{int(round(raw_base, -2)):,} ft CONV"
+    c_base_agl = int(round(raw_base, -2))
+    c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
-    # NWP Tephigram analysis for stable layers (Strict SOP Compliance)
     c_base_disp = "> 10,000 ft CLR"
     c_amt = "CLR"
     
-    # 1. Skip surface layer [0] to prevent Fog from being classified as a 0ft ceiling.
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
     
-    # 2. Search for a solid ceiling (OVC/BKN) aloft
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-            c_base_disp = f"{int(round(h_agl, -2)):,} ft {c_amt}"
+            c_base_agl = int(round(h_agl, -2))
+            c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
             
-    # 3. If no ceiling found, search for scattered layers
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                c_base_disp = f"{int(round(h_agl, -2)):,} ft SCT"
+                c_base_agl = int(round(h_agl, -2))
+                c_base_disp = f"{c_base_agl:,} ft SCT"
                 break
 
 raw_gst_list = h.get('wind_gusts_10m')
@@ -489,18 +483,17 @@ stack_tactical = []
 gust_delta = max(0, gst - w_spd)
 
 for alt in [400, 300, 200, 100]:
-    # 1. Wind Interpolation
     s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt*0.3048)/10) / math.log(max(1.1, u_h/10)))
     g_c = s_c + gust_delta
     
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / max(0.1, u_h))) % 360
     d_c = format_dir(d_c_raw, s_c)
     
-    # 2. Thermal / Moisture Interpolation (The fix for the false positive Rime)
     alt_msl = sfc_elevation + alt
     alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
     
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env)
+    # Passing the exact c_base_agl into the engine to strictly enforce the Visible Moisture Gate
+    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
     
     if int(s_c) == 0:
         mat_dir, mat_spd = "CALM", "0"
@@ -570,11 +563,10 @@ else:
         
         g_e = s_e + gust_delta
         
-        # 2. Thermal / Moisture Interpolation Aloft
         alt_msl = sfc_elevation + alt
         alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
         
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env)
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
         
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
