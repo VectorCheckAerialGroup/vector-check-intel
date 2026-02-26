@@ -151,7 +151,7 @@ def hazard_lvl(h_str):
     return 0
 
 # ---------------------------------------------------------
-# SPATIAL ENGINES & DATA FETCH
+# SPATIAL ENGINES & CACHED DATA FETCH
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_location_name(user_lat, user_lon):
@@ -218,6 +218,15 @@ def get_nearest_icao_station(user_lat, user_lon):
         pass
     return {"icao": "NONE", "dist": None, "dir": ""}
 
+# API SHIELD: Cache data to prevent HTTP 429 Too Many Requests errors
+@st.cache_data(ttl=900)
+def fetch_weather_payload(fetch_lat, fetch_lon, fetch_model):
+    return fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
+
+@st.cache_data(ttl=900)
+def fetch_metar_taf(fetch_icao):
+    return get_aviation_weather(fetch_icao)
+
 # --- SIDEBAR CONFIGURATION ---
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
@@ -256,10 +265,10 @@ model_api_map = {
     "ECMWF (Global 9km)": "https://api.open-meteo.com/v1/forecast" 
 }
 
-data = fetch_mission_data(lat, lon, model_api_map[model_choice])
+data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
 
 if icao != "NONE":
-    metar_raw, taf_raw = get_aviation_weather(icao)
+    metar_raw, taf_raw = fetch_metar_taf(icao)
 else:
     metar_raw, taf_raw = "NIL", "NIL"
 
@@ -302,18 +311,18 @@ max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
 # ---------------------------------------------------------
-# NEW: 48-HOUR TEMPORAL MATRIX UI & LOGIC
+# 48-HOUR TEMPORAL MATRIX UI & LOGIC
 # ---------------------------------------------------------
 st.subheader("Mission Go/No-Go Temporal Matrix")
 
 with st.expander("⚙️ Configure Operational Constraints"):
-    tc1, tc2, tc3, tc4, tc5, tc6 = st.columns(6)
-    t_wind = tc1.number_input("Max Wind (KT)", value=20)
-    t_gst = tc2.number_input("Max Gust (KT)", value=25)
-    t_ceil = tc3.number_input("Min Ceiling (ft AGL)", value=500, step=100)
-    t_vis = tc4.number_input("Min Vis (SM)", value=3.0, step=0.5)
-    t_turb = tc5.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
-    t_ice = tc6.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
+    # Reduced to 5 columns for merged Wind/Gust box
+    tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=25)
+    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=500, step=100)
+    t_vis = tc3.number_input("Min Vis (SM)", value=3.0, step=0.5)
+    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
+    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
 
 # Build the Timeline Data
 timeline_html_blocks = []
@@ -400,9 +409,9 @@ for i in range(nearest_idx, max_idx + 1):
     
     turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
 
-    # Execute Threshold Gate Logic
-    if w_spd > t_wind: failures.append(f"Wind ({int(w_spd)}KT)")
-    if gst > t_gst: failures.append(f"Gust ({int(gst)}KT)")
+    # Execute Threshold Gate Logic (Merged Wind & Gust check)
+    max_wind_val = max(w_spd, gst)
+    if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
     if c_base_agl < t_ceil: failures.append(f"Ceil ({c_base_agl}ft)")
     if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
