@@ -326,8 +326,8 @@ else:
 sfc_elevation = data.get('elevation', 0) * 3.28084
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 
-# Extended to 300hPa for the high-altitude Tephigram and upper-level clouds
-for p in [1000, 925, 850, 700, 600, 500, 400, 300]:
+# Updated to the universally supported WMO mandatory pressure levels
+for p in [1000, 925, 850, 700, 500, 250]:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
