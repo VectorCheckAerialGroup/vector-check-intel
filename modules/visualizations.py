@@ -11,7 +11,7 @@ def calc_td(t, rh):
 
 def plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_h):
     """
-    Renders a compact, high-resolution digital Tephigram (T/Td profile).
+    Renders a compact, high-resolution tactical Skew-T profile.
     Safely skips underground pressure levels at high-elevation terrain.
     """
     altitudes = [sfc_h]
@@ -31,43 +31,79 @@ def plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_h):
             
             if gh_val is not None and t_val is not None and rh_val is not None:
                 alt_ft = float(gh_val) * 3.28084
-                # Only plot the layer if it exists physically above the previous layer
                 if alt_ft > altitudes[-1]: 
                     altitudes.append(alt_ft)
                     temps.append(float(t_val))
                     dewpoints.append(calc_td(float(t_val), int(rh_val)))
                     
-    # Abort gracefully if the API provided zero valid aloft layers
     if len(altitudes) < 2:
         return None
 
+    # --- SKEW-T MATHEMATICAL TRANSFORMATION ---
+    skew_factor = 0.004  # Slant coefficient
+    min_y = max(0, sfc_h - 200)
+    max_alt = max(10000, int(altitudes[-1]) + 1500)
+    y_bg = list(range(0, max_alt + 1000, 500))
+    
     # --- STYLE & SCALING ---
     plt.style.use('dark_background')
-    # Reduced figsize for compactness, increased DPI for ultra-crisp rendering
     fig, ax = plt.subplots(figsize=(6, 3.5), dpi=200) 
     fig.patch.set_facecolor('#1B1E23')
     ax.set_facecolor('#1B1E23')
     
-    # Data Plotting
-    ax.plot(temps, altitudes, color='#ff4b4b', label='Temp (°C)', linewidth=1.5, marker='o', markersize=3)
-    ax.plot(dewpoints, altitudes, color='#2abf2a', label='Dewpt (°C)', linewidth=1.5, marker='o', markersize=3)
-    
-    # Cloud / Visible Moisture Indicator (Fills gray where T and Td are within 3C)
-    ax.fill_betweenx(altitudes, dewpoints, temps, where=[(t - d) <= 3.0 for t, d in zip(temps, dewpoints)], color='#8E949E', alpha=0.3, label='Moisture / Cloud')
+    # 1. DRAW BACKGROUND THERMODYNAMIC GRID (Windy.com Style)
+    # Isotherms (Constant Temperature - Slanted Right)
+    for t_iso in range(-80, 80, 10):
+        x_iso = [t_iso + skew_factor * a for a in y_bg]
+        ax.plot(x_iso, y_bg, color='#3E444E', linewidth=0.8, zorder=1)
 
-    # Formatting (No Title)
-    ax.set_ylabel('Altitude (ft ASL)', color='#A0A4AB', fontsize=9)
-    ax.set_xlabel('Temperature (°C)', color='#A0A4AB', fontsize=9)
-    ax.tick_params(axis='x', colors='#D1D5DB', labelsize=8)
-    ax.tick_params(axis='y', colors='#D1D5DB', labelsize=8)
+    # Dry Adiabats (Cooling ~3.0°C/1000ft - Curved Left)
+    for t_dry_sfc in range(-40, 120, 10):
+        x_dry = [(t_dry_sfc - 0.003 * a) + skew_factor * a for a in y_bg]
+        ax.plot(x_dry, y_bg, color='#A87C4F', linestyle='--', linewidth=0.6, alpha=0.7, zorder=1)
+        
+    # Moist Adiabats (Cooling ~1.5°C/1000ft - Steeper Curve Left)
+    for t_moist_sfc in range(-40, 80, 10):
+        x_moist = [(t_moist_sfc - 0.0015 * a) + skew_factor * a for a in y_bg]
+        ax.plot(x_moist, y_bg, color='#4A6B53', linestyle=':', linewidth=0.8, alpha=0.7, zorder=1)
+
+    # Isobars / Altitude Lines (Horizontal)
+    for a_line in range(0, max_alt + 1000, 2000):
+        ax.axhline(a_line, color='#3E444E', linewidth=0.8, zorder=1)
+
+    # 2. TRANSFORM & PLOT MISSION DATA
+    skewed_temps = [t + skew_factor * a for t, a in zip(temps, altitudes)]
+    skewed_dews = [d + skew_factor * a for d, a in zip(dewpoints, altitudes)]
     
-    # Spine Colors
+    # Fill Cloud Deck (Where spread <= 3.0°C)
+    fill_cond = [(t - d) <= 3.0 for t, d in zip(temps, dewpoints)]
+    ax.fill_betweenx(altitudes, skewed_dews, skewed_temps, where=fill_cond, color='#ffffff', alpha=0.2, zorder=2, label='Cloud / Moisture')
+
+    # Temperature & Dewpoint Profiles
+    ax.plot(skewed_temps, altitudes, color='#ff4b4b', label='Temp', linewidth=2, marker='o', markersize=3, zorder=3)
+    ax.plot(skewed_dews, altitudes, color='#4b7Bff', label='Dewpt', linewidth=2, marker='o', markersize=3, zorder=3)
+    
+    # 3. DYNAMIC SCALING & CUSTOM X-AXIS
+    min_x = min(skewed_dews) - 10
+    max_x = max(skewed_temps) + 15
+    ax.set_xlim(min_x, max_x)
+    ax.set_ylim(min_y, max_alt)
+    
+    # Replace default skewed X-ticks with true Isotherm labels
+    ax.set_xticks([])
+    for t_iso in range(-80, 80, 10):
+        bot_x = t_iso + skew_factor * min_y
+        if min_x <= bot_x <= max_x:
+            # Places temperature labels exactly at the bottom of the slanted lines
+            ax.text(bot_x, min_y - (max_alt - min_y)*0.03, f"{t_iso}°", color='#A0A4AB', ha='center', va='top', fontsize=7)
+
+    # Formatting
+    ax.set_ylabel('Altitude (ft ASL)', color='#A0A4AB', fontsize=8)
+    ax.tick_params(axis='y', colors='#A0A4AB', labelsize=7)
+    
     for spine in ax.spines.values():
         spine.set_color('#3E444E')
         
-    ax.grid(color='#2D3139', linestyle='--', linewidth=0.5)
-    
-    # Legend
     ax.legend(loc='upper right', facecolor='#1B1E23', edgecolor='#3E444E', fontsize=7)
     
     plt.tight_layout()
