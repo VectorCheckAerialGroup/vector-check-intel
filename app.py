@@ -327,7 +327,8 @@ else:
 
 # --- THERMAL PROFILE GENERATION ---
 sfc_elevation = data.get('elevation', 0) * 3.28084
-thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread}]
+# Added 'rh' to profile for altitude interpolation
+thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 
 for p in [1000, 925, 850, 700]:
     gh_list = h.get(f'geopotential_height_{p}hPa')
@@ -346,8 +347,24 @@ for p in [1000, 925, 850, 700]:
                     'h': p_gh, 
                     't': p_t, 
                     'td': p_td, 
-                    'spread': p_t - p_td
+                    'spread': p_t - p_td,
+                    'rh': p_rh
                 })
+
+def get_interp_thermals(alt_msl, profile):
+    """Interpolates exact Temp and RH for a specific altitude."""
+    if not profile: return 0.0, 0
+    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
+    if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
+    for i in range(len(profile)-1):
+        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
+            lower = profile[i]
+            upper = profile[i+1]
+            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
+            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
+            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
+            return i_t, int(i_rh)
+    return profile[0]['t'], profile[0]['rh']
 
 # --- PRECISE FREEZING LEVEL DETERMINATION ---
 frz_raw_list = h.get('freezing_level_height')
@@ -472,13 +489,18 @@ stack_tactical = []
 gust_delta = max(0, gst - w_spd)
 
 for alt in [400, 300, 200, 100]:
+    # 1. Wind Interpolation
     s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt*0.3048)/10) / math.log(max(1.1, u_h/10)))
     g_c = s_c + gust_delta
     
     d_c_raw = (sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt*0.3048, u_h) / max(0.1, u_h))) % 360
     d_c = format_dir(d_c_raw, s_c)
     
-    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, t_temp, rh, terrain_env)
+    # 2. Thermal / Moisture Interpolation (The fix for the false positive Rime)
+    alt_msl = sfc_elevation + alt
+    alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
+    
+    turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env)
     
     if int(s_c) == 0:
         mat_dir, mat_spd = "CALM", "0"
@@ -547,7 +569,12 @@ else:
         d_e = format_dir(d_e_raw, s_e)
         
         g_e = s_e + gust_delta
-        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, t_temp, rh, terrain_env)
+        
+        # 2. Thermal / Moisture Interpolation Aloft
+        alt_msl = sfc_elevation + alt
+        alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
+        
+        turb, ice = get_turb_ice(alt, s_e, w_spd, g_e, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env)
         
         if int(s_e) == 0:
             mat_dir_ext, mat_spd_ext = "CALM", "0"
