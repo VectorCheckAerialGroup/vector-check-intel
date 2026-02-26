@@ -385,26 +385,35 @@ for i in range(nearest_idx, max_idx + 1):
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
     is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
     
-    c_base_agl = 10000
+    # MET TECH CEILING FIX: Only BKN/OVC constitutes a ceiling (c_base_agl). SCT is ignored for Matrix limits.
+    c_base_agl = 10000 
+    c_amt = "CLR"
+    
     if is_convective:
         c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+        c_amt = "CONV"
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
+        
+        # 1. Hunt for True Ceiling (BKN/OVC)
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
-            # Nocturnal Inversion Filter (Matrix Loop)
             if layer['spread'] <= 3.0: 
-                if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
-                    continue # Bypass shallow mist/BR
+                # Synoptic Filter: Bypass boundary layer moisture if vis is clear and no WX
+                if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
+                    continue
                 c_base_agl = int(round(h_agl, -2))
+                c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
                 break
-        if c_base_agl == 10000:
+                
+        # 2. Hunt for Scattered (SCT) - purely for visual awareness, NOT a matrix failure point
+        if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 5.0:
-                    if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                    if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
                         continue
-                    c_base_agl = int(round(h_agl, -2))
+                    c_amt = "SCT" # Notice c_base_agl remains 10000, preventing a flight halt
                     break
 
     alt_msl = sfc_elevation + 400
@@ -601,31 +610,37 @@ lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or lapse_rate_temp_drop >= 7.5
 
 c_base_agl = 10000
+c_amt = "CLR"
+c_base_disp = "> 10,000 ft CLR"
+
 if is_convective:
     c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
     c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
-    c_base_disp = "> 10,000 ft CLR"
-    c_amt = "CLR"
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+    
+    # 1. Hunt for True Ceiling (BKN/OVC)
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
-        # Nocturnal Inversion Filter (Single Hour Loop)
         if layer['spread'] <= 3.0: 
-            if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+            # Synoptic Filter
+            if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
                 continue
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             c_base_agl = int(round(h_agl, -2))
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
+            
+    # 2. Hunt for Scattered (Visual awareness only)
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                if h_agl < 1000 and wx < 40 and vis_sm >= 3.0:
                     continue
-                c_base_agl = int(round(h_agl, -2))
-                c_base_disp = f"{c_base_agl:,} ft SCT"
+                sct_h = int(round(h_agl, -2))
+                c_base_disp = f"{sct_h:,} ft SCT"
+                c_amt = "SCT"
                 break
 
 raw_gst_list = h.get('wind_gusts_10m')
