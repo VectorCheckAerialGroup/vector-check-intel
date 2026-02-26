@@ -227,16 +227,13 @@ def fetch_weather_payload(fetch_lat, fetch_lon, fetch_model):
 def fetch_metar_taf(fetch_icao):
     return get_aviation_weather(fetch_icao)
 
-# API SHIELD: Cache external calculations to prevent sliding-bar lag and limits
 @st.cache_data(ttl=10800)
 def fetch_space_weather_cached(dt_iso_str):
-    """Caches Space Weather (NOAA data) for 3 hours based on the ISO time string."""
     dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
     return get_kp_index(dt_utc)
 
 @st.cache_data(ttl=86400)
 def fetch_astronomy_cached(lat_val, lon_val, dt_iso_str, tz_name, tz_abbr_str):
-    """Caches Astronomy Ephemeris math to prevent repetitive calculation load."""
     dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
     local_tz = pytz.timezone(tz_name) if tz_name else timezone.utc
     return get_astronomical_data(lat_val, lon_val, dt_utc, local_tz, tz_abbr_str)
@@ -273,7 +270,7 @@ def log_refresh_callback():
     try:
         log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
     except Exception:
-        pass # Silently swallow telemetry timeouts to protect UX
+        pass 
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
@@ -394,13 +391,20 @@ for i in range(nearest_idx, max_idx + 1):
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
         for layer in search_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
+            # Nocturnal Inversion Filter (Matrix Loop)
             if layer['spread'] <= 3.0: 
-                c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+                if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                    continue # Bypass shallow mist/BR
+                c_base_agl = int(round(h_agl, -2))
                 break
         if c_base_agl == 10000:
             for layer in search_profile:
+                h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 5.0:
-                    c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+                    if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                        continue
+                    c_base_agl = int(round(h_agl, -2))
                     break
 
     alt_msl = sfc_elevation + 400
@@ -605,15 +609,22 @@ else:
     c_amt = "CLR"
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
     for layer in search_profile:
+        h_agl = max(0, layer['h'] - sfc_elevation)
+        # Nocturnal Inversion Filter (Single Hour Loop)
         if layer['spread'] <= 3.0: 
+            if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                continue
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
-            c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+            c_base_agl = int(round(h_agl, -2))
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
     if c_amt == "CLR":
         for layer in search_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                c_base_agl = int(round(max(0, layer['h'] - sfc_elevation), -2))
+                if layer['t'] > t_temp and h_agl < 500 and vis_sm >= 2.0:
+                    continue
+                c_base_agl = int(round(h_agl, -2))
                 c_base_disp = f"{c_base_agl:,} ft SCT"
                 break
 
