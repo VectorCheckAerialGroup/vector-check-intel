@@ -37,28 +37,73 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. AUTHENTICATION GATEWAY
+# 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
 def check_password():
-    def password_entered():
-        user = st.session_state["username"]
-        pwd = st.session_state["password"]
+    """Returns True if the user is authenticated and has accepted the EULA."""
+    
+    # Initialize session states
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+    if "eula_accepted" not in st.session_state:
+        st.session_state["eula_accepted"] = False
+
+    # If everything is cleared, let them in
+    if st.session_state["password_correct"] and st.session_state["eula_accepted"]:
+        return True
+
+    # --- RENDER THE GATEWAY UI ---
+    st.title("Vector Check Aerial Group Inc.")
+    st.caption("Atmospheric Risk Management System - Restricted Access")
+    st.divider()
+
+    # Step 1: EULA Acceptance
+    st.subheader("End User License Agreement")
+    eula_text = """
+    **1. NOT A CERTIFIED BRIEFING:** This is a supplemental situational awareness tool. It DOES NOT replace official NAV CANADA or NOAA flight weather briefings.
+    
+    **2. PIC RESPONSIBILITY:** The Pilot in Command (PIC) retains absolute authority for flight safety. Atmospheric models are subject to error. Vector Check Aerial Group Inc. does not authorize flight operations.
+    
+    **3. LIMITATION OF LIABILITY:** Provided "AS IS". Vector Check Aerial Group Inc. shall not be liable for loss of aircraft, property damage, personal injury, or loss of profits arising from the use of this software.
+    """
+    st.info(eula_text)
+    
+    eula_check = st.checkbox("I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
+
+    # Step 2: Authentication
+    st.subheader("Operator Authentication")
+    
+    def verify_credentials():
+        user = st.session_state["username_input"]
+        pwd = st.session_state["password_input"]
         
+        # Verify against Streamlit secrets
         if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
-            st.session_state["password_correct"] = True
-            st.session_state["active_operator"] = user
-            log_action(user, 0.0, 0.0, "SYS", "AUTHENTICATION_SUCCESS")
-            del st.session_state["password"]  
-            del st.session_state["username"]
+            if not st.session_state.get("eula_checkbox_state", False):
+                st.error("⚠️ REGULATORY HALT: You must accept the EULA to authenticate.")
+                st.session_state["password_correct"] = False
+            else:
+                st.session_state["password_correct"] = True
+                st.session_state["eula_accepted"] = True
+                st.session_state["active_operator"] = user
+                log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
+                # Clean up memory
+                del st.session_state["password_input"]  
+                del st.session_state["username_input"]
         else:
             st.session_state["password_correct"] = False
+            st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
 
-    if "password_correct" not in st.session_state:
-        st.title("Vector Check Aerial Group Inc.")
-        st.caption("Atmospheric Risk Management System - Restricted Access")
-        st.text_input("Operator ID", key="username")
-        st.text_input("Passcode", type="password", key="password")
-        st.button("Authenticate", on_click=password_entered)
-        return False
+    # Track checkbox state dynamically
+    st.session_state["eula_checkbox_state"] = eula_check
+    
+    st.text_input("Operator ID", key="username_input")
+    st.text_input("Passcode", type="password", key="password_input")
+    st.button("Acknowledge & Authenticate", on_click=verify_credentials)
+    
+    return False
+
+if not check_password():
+    st.stop()
         
     elif not st.session_state["password_correct"]:
         st.title("Vector Check Aerial Group Inc.")
