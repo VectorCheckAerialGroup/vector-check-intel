@@ -54,22 +54,32 @@ def check_password():
     st.caption("Atmospheric Risk Management System - Restricted Access")
     st.divider()
 
-    st.subheader("End User License Agreement")
+    st.subheader("End User License Agreement & Assumption of Risk")
+    
     eula_text = """
-    **1. NOT A CERTIFIED BRIEFING:** This is a supplemental situational awareness tool. It DOES NOT replace official NAV CANADA or NOAA flight weather briefings.
-    
-    **2. PIC RESPONSIBILITY:** The Pilot in Command (PIC) retains absolute authority for flight safety. Atmospheric models are subject to error. Vector Check Aerial Group Inc. does not authorize flight operations.
-    
-    **3. LIMITATION OF LIABILITY:** Provided "AS IS". Vector Check Aerial Group Inc. shall not be liable for loss of aircraft, property damage, personal injury, or loss of profits arising from the use of this software.
+<div style="color: #A0A4AB; font-size: 0.9rem; line-height: 1.5; margin-bottom: 20px;">
+<strong>1. UNAUTHORIZED FOR PRIMARY DECISION MAKING (NOT A CERTIFIED BRIEFING)</strong><br>
+This Atmospheric Risk Management System is an uncertified, supplemental situational awareness tool. It aggregates and visualizes raw numerical weather prediction (NWP) models. It is STRICTLY PROHIBITED to use this software as a primary or sole source of aeronautical weather information. It DOES NOT replace, nor is it an alternative to, official flight weather briefings provided by NAV CANADA, Environment and Climate Change Canada (ECCC), NOAA, or other designated civil aviation authorities.
+<br><br>
+<strong>2. ABSOLUTE PILOT IN COMMAND (PIC) RESPONSIBILITY</strong><br>
+In accordance with Transport Canada Civil Aviation (TCCA) regulations, the Pilot in Command (PIC) retains absolute, non-transferable authority and responsibility for the safe operation of the aircraft. Atmospheric models are inherently flawed, subject to latency, and cannot accurately predict micro-climates, sudden localized shear, or boundary layer anomalies. Vector Check Aerial Group Inc. does not clear, authorize, or endorse any flight operations.
+<br><br>
+<strong>3. MAXIMUM LIMITATION OF LIABILITY</strong><br>
+This software is provided "AS IS" and "AS AVAILABLE" with zero warranties, express or implied. To the maximum extent permitted by Canadian law, Vector Check Aerial Group Inc., its directors, officers, and affiliates shall bear ZERO LIABILITY for any direct, indirect, punitive, or consequential damages. This includes, but is not limited to: loss of airframes, destruction of payloads, property damage, personal injury, death, loss of revenue, or regulatory fines resulting from the use of, or inability to use, this software.
+<br><br>
+<strong>4. INDEMNIFICATION</strong><br>
+By accessing this software, you agree to fully indemnify, defend, and hold harmless Vector Check Aerial Group Inc. from any and all claims, lawsuits, liabilities, penalties, or legal fees arising from your flight operations, your violation of any aviation regulations, or your misinterpretation of the data provided herein.
+</div>
     """
-    st.info(eula_text)
-    
-    eula_check = st.checkbox("I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
+    st.markdown(eula_text, unsafe_allow_html=True)
     
     st.subheader("Operator Authentication")
     
     # Using st.form prevents the page from refreshing on every keystroke
     with st.form("login_form"):
+        eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this EULA.")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
         user = st.text_input("Operator ID")
         pwd = st.text_input("Passcode", type="password")
         submitted = st.form_submit_button("Acknowledge & Authenticate")
