@@ -450,8 +450,8 @@ fig = go.Figure(data=go.Bar(
 ))
 
 fig.update_layout(
-    height=90, 
-    margin=dict(l=0, r=0, t=0, b=40),
+    height=55, # NARROWED: Was 90, now compressed for a sleek gauge look
+    margin=dict(l=0, r=0, t=0, b=25), # Tightened bottom margin
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
     xaxis=dict(
@@ -469,18 +469,21 @@ fig.update_layout(
     showlegend=False
 )
 
-# Plotly Event Listener - Specifically catching TypeError to prevent swallowing rerun loops
+# Plotly Event Listener - Safely extracting point_index to fix KeyError
 try:
     event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
     if event and "selection" in event and "points" in event["selection"] and len(event["selection"]["points"]) > 0:
-        clicked_idx = event["selection"]["points"][0]["pointIndex"]
-        target_time = valid_times_display[clicked_idx]
-        if st.session_state.get("forecast_slider") != target_time:
-            st.session_state.forecast_slider = target_time
-            st.rerun()
-except TypeError:
-    # Fallback for Streamlit versions < 1.35.0
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        point_data = event["selection"]["points"][0]
+        # Safely extract Streamlit's 'point_index' or fallback to Plotly's 'pointIndex'
+        clicked_idx = point_data.get("point_index", point_data.get("pointIndex", None))
+        
+        if clicked_idx is not None:
+            target_time = valid_times_display[clicked_idx]
+            if st.session_state.get("forecast_slider") != target_time:
+                st.session_state.forecast_slider = target_time
+                st.rerun()
+except Exception as e:
+    pass
 
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
