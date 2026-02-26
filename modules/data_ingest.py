@@ -10,7 +10,7 @@ def fetch_mission_data(lat, lon, model_url):
     """
     is_gem = "gem" in model_url
     
-    # 1. Base Variables (Added 'visibility' for microphysics engine)
+    # 1. Base Variables
     hourly_params = [
         "temperature_2m", "relative_humidity_2m", "weather_code", 
         "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
@@ -20,8 +20,9 @@ def fetch_mission_data(lat, lon, model_url):
     if not is_gem:
         hourly_params.append("freezing_level_height")
 
-    # 2. WMO Standard Pressure Levels (Includes RH for Tephigram Cloud Analysis)
-    pressure_levels = [1000, 925, 850, 700]
+    # 2. WMO Standard Pressure Levels (Extended to 30,000ft / 300hPa)
+    pressure_levels = [1000, 925, 850, 700, 600, 500, 400, 300]
+    
     for p in pressure_levels:
         hourly_params.extend([
             f"geopotential_height_{p}hPa",
@@ -41,7 +42,7 @@ def fetch_mission_data(lat, lon, model_url):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/13.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/14.0'})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
             return json.loads(response.read().decode('utf-8'))
             
