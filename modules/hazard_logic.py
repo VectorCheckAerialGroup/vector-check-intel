@@ -4,7 +4,6 @@ import re
 # These values are locked to prevent inadvertent logic alterations.
 URBAN_VENTURI_MULTIPLIER = 1.25
 MECH_TURB_ALTITUDE_CAP_FT = 3000
-LAPSE_RATE_STANDARD_C_PER_1000FT = 1.98
 
 def get_weather_element(wx_code, wind_spd):
     """Translates WMO weather codes into human-readable text."""
@@ -49,16 +48,17 @@ def calculate_icing_profile(h, idx, wx_code):
             
     return "NIL"
 
-def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp, rh, terrain_type="Land"):
+def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_convective, icing_cond, alt_temp, alt_rh, terrain_type="Land"):
     """
     Evaluates turbulence and icing risk with strict boundary layer caps.
+    Utilizes interpolated atmospheric data for exact altitude conditions.
     """
     w_spd = float(wind_spd) if wind_spd is not None else 0.0
     s_spd = float(sfc_spd) if sfc_spd is not None else 0.0
     g_spd = float(gust) if gust is not None else 0.0
     wx_val = int(wx) if wx is not None else 0
-    t_val = float(t_temp) if t_temp is not None else 0.0
-    rh_val = int(rh) if rh is not None else 0
+    t_val = float(alt_temp) if alt_temp is not None else 0.0
+    rh_val = int(alt_rh) if alt_rh is not None else 0
     
     max_wind = max(w_spd, g_spd)
     gust_delta = max(0, g_spd - s_spd) 
@@ -79,7 +79,6 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
             elif max_wind >= 15: turb_sev = "LGT"
 
         elif terrain_type == "Urban":
-            # Pragmatic Venturi applied mathematically to base thresholds
             if max_wind >= 32: turb_sev = "SEV"        
             elif max_wind >= 28: turb_sev = "MOD-SEV"  
             elif max_wind >= 20: turb_sev = "MOD"      
@@ -107,12 +106,11 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
     ice = "NIL"
     
     if alt > 0:
-        alt_temp = t_val - ((alt / 1000.0) * LAPSE_RATE_STANDARD_C_PER_1000FT)
-        
-        # Absolute physics constraint
-        if alt_temp > 0 or alt_temp < -40:
+        # Absolute physics constraint: No icing > 0C or < -40C
+        if t_val > 0 or t_val < -40:
             ice = "NIL"
         else:
+            # 1. Precipitation overrules RH
             if wx_val in [66, 67]: 
                 ice = "SEV CLR"
             elif wx_val in [95, 96, 99]: 
@@ -121,15 +119,16 @@ def get_turb_ice(alt, wind_spd, sfc_spd, gust, wx, is_stable, icing_cond, t_temp
                 ice = "MOD MX"
             elif wx_val in [80, 81, 82, 85, 86]: 
                 ice = "MOD MX"
+            # 2. Stratiform visible moisture (Altitude RH >= 80%)
             elif rh_val >= 80: 
-                if 0 >= alt_temp >= -15:
+                if 0 >= t_val >= -15:
                     if rh_val >= 90:
                         ice = "MOD RIME" 
                     else:
                         ice = "LGT RIME"
-                elif -15 > alt_temp >= -20:
+                elif -15 > t_val >= -20:
                     ice = "LGT RIME"
-                elif alt_temp < -20:
+                elif t_val < -20:
                     if rh_val >= 95:
                         ice = "LGT RIME"
                     else:
