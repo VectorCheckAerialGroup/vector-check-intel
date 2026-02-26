@@ -227,6 +227,20 @@ def fetch_weather_payload(fetch_lat, fetch_lon, fetch_model):
 def fetch_metar_taf(fetch_icao):
     return get_aviation_weather(fetch_icao)
 
+# API SHIELD: Cache external calculations to prevent sliding-bar lag and limits
+@st.cache_data(ttl=10800)
+def fetch_space_weather_cached(dt_iso_str):
+    """Caches Space Weather (NOAA data) for 3 hours based on the ISO time string."""
+    dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
+    return get_kp_index(dt_utc)
+
+@st.cache_data(ttl=86400)
+def fetch_astronomy_cached(lat_val, lon_val, dt_iso_str, tz_name, tz_abbr_str):
+    """Caches Astronomy Ephemeris math to prevent repetitive calculation load."""
+    dt_utc = datetime.fromisoformat(dt_iso_str).replace(tzinfo=timezone.utc)
+    local_tz = pytz.timezone(tz_name) if tz_name else timezone.utc
+    return get_astronomical_data(lat_val, lon_val, dt_utc, local_tz, tz_abbr_str)
+
 # --- SIDEBAR CONFIGURATION ---
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
 try:
@@ -256,7 +270,10 @@ model_choice = st.sidebar.selectbox("Select Forecast Model:", options=["HRDPS (C
 
 def log_refresh_callback():
     st.cache_data.clear()
-    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
+    try:
+        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
+    except Exception:
+        pass # Silently swallow telemetry timeouts to protect UX
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
@@ -450,8 +467,8 @@ fig = go.Figure(data=go.Bar(
 ))
 
 fig.update_layout(
-    height=55, # NARROWED: Was 90, now compressed for a sleek gauge look
-    margin=dict(l=0, r=0, t=0, b=25), # Tightened bottom margin
+    height=55, 
+    margin=dict(l=0, r=0, t=0, b=25),
     plot_bgcolor="#1B1E23",
     paper_bgcolor="#1B1E23",
     xaxis=dict(
@@ -469,12 +486,10 @@ fig.update_layout(
     showlegend=False
 )
 
-# Plotly Event Listener - Safely extracting point_index to fix KeyError
 try:
     event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="impact_matrix_chart", config={'displayModeBar': False})
     if event and "selection" in event and "points" in event["selection"] and len(event["selection"]["points"]) > 0:
         point_data = event["selection"]["points"][0]
-        # Safely extract Streamlit's 'point_index' or fallback to Plotly's 'pointIndex'
         clicked_idx = point_data.get("point_index", point_data.get("pointIndex", None))
         
         if clicked_idx is not None:
@@ -623,9 +638,9 @@ else:
         u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
     
 icing_cond = calculate_icing_profile(h, idx, wx)
-dt_utc_exact = datetime.fromisoformat(h["time"][idx]).replace(tzinfo=timezone.utc)
-astro = get_astronomical_data(lat, lon, dt_utc_exact, local_tz, tz_abbr)
-space_data = get_kp_index(dt_utc_exact)
+dt_utc_exact_iso = h["time"][idx]
+astro = fetch_astronomy_cached(lat, lon, dt_utc_exact_iso, tz_str, tz_abbr)
+space_data = fetch_space_weather_cached(dt_utc_exact_iso)
 
 sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['sun_alt'] > 0 else "NIL"
 moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL"
@@ -836,7 +851,10 @@ csv_header = (
 csv_data = (csv_header + df_export.to_csv()).encode('utf-8')
 
 def log_download_callback():
-    log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_CSV")
+    try:
+        log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "DOWNLOAD_CSV")
+    except Exception:
+        pass # Silently swallow telemetry timeouts
 
 st.download_button(
     label="Download Actuals and Forecast data (CSV)",
