@@ -391,7 +391,6 @@ lapse_rate_temp_drop = t_temp - t_950
 is_steep_lapse_rate = lapse_rate_temp_drop >= 7.5
 is_convective = (wx >= 80) or is_steep_lapse_rate
 
-# Calculate AGL Cloud Base for the Visible Moisture Gate
 c_base_agl = 10000
 
 if is_convective:
@@ -492,7 +491,6 @@ for alt in [400, 300, 200, 100]:
     alt_msl = sfc_elevation + alt
     alt_t, alt_rh = get_interp_thermals(alt_msl, thermal_profile)
     
-    # Passing the exact c_base_agl into the engine to strictly enforce the Visible Moisture Gate
     turb, ice = get_turb_ice(alt, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
     
     if int(s_c) == 0:
@@ -544,6 +542,7 @@ if not p_profile:
             "Alt (AGL)": f"{alt}ft", 
             "Dir": "N/A", 
             f"Spd ({raw_wind_unit})": "N/A", 
+            f"Gust ({raw_wind_unit})": "N/A",
             "Turbulence": "N/A", 
             "Icing": "N/A"
         })
@@ -579,6 +578,7 @@ else:
             "Alt (AGL)": f"{alt}ft", 
             "Dir": mat_dir_ext, 
             f"Spd ({raw_wind_unit})": mat_spd_ext, 
+            f"Gust ({raw_wind_unit})": str(int(g_e)),
             "Turbulence": turb, 
             "Icing": ice
         })
