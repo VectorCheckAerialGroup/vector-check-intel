@@ -20,8 +20,9 @@ def fetch_mission_data(lat, lon, model_url):
     if not is_gem:
         hourly_params.append("freezing_level_height")
 
-    # 2. WMO Standard Pressure Levels (Extended to 30,000ft / 300hPa)
-    pressure_levels = [1000, 925, 850, 700, 600, 500, 400, 300]
+    # 2. WMO Mandatory Aviation Pressure Levels (Supported by both HRDPS and ECMWF)
+    # 500hPa is ~18,000ft. 250hPa is ~34,000ft (Jet Stream level).
+    pressure_levels = [1000, 925, 850, 700, 500, 250]
     
     for p in pressure_levels:
         hourly_params.extend([
@@ -42,7 +43,7 @@ def fetch_mission_data(lat, lon, model_url):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/14.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/15.0'})
         with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
             return json.loads(response.read().decode('utf-8'))
             
