@@ -311,12 +311,11 @@ max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
 # ---------------------------------------------------------
-# 48-HOUR TEMPORAL MATRIX UI & LOGIC
+# 48-HOUR IMPACT MATRIX UI & LOGIC
 # ---------------------------------------------------------
-st.subheader("Mission Go/No-Go Temporal Matrix")
+st.subheader("Impact Matrix")
 
-with st.expander("⚙️ Configure Operational Constraints"):
-    # Reduced to 5 columns for merged Wind/Gust box
+with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
     t_wind = tc1.number_input("Max Wind/Gust (KT)", value=25)
     t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=500, step=100)
@@ -409,7 +408,7 @@ for i in range(nearest_idx, max_idx + 1):
     
     turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
 
-    # Execute Threshold Gate Logic (Merged Wind & Gust check)
+    # Execute Threshold Gate Logic
     max_wind_val = max(w_spd, gst)
     if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
@@ -420,11 +419,11 @@ for i in range(nearest_idx, max_idx + 1):
     time_str = datetime.fromisoformat(h["time"][i]).replace(tzinfo=timezone.utc).astimezone(local_tz).strftime('%H:%M %Z')
     
     if len(failures) == 0:
-        color = "#2abf2a"  # Green
+        color = "#1E8449"  # Deep Forest Green
         tooltip = f"{time_str} | FLIGHT AUTHORIZED"
     else:
-        color = "#ff4b4b"  # Red
-        tooltip = f"{time_str} | HALT: " + ", ".join(failures)
+        color = "#B82E2E"  # Deep Crimson Red
+        tooltip = f"{time_str} | " + ", ".join(failures)
         
     border_right = "border-right: 1px solid #1B1E23;" if i < max_idx else ""
     block_html = f'<div style="flex: 1; background-color: {color}; {border_right}" title="{tooltip}"></div>'
