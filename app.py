@@ -341,12 +341,14 @@ st.subheader("Impact Matrix")
 
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
-    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=25)
+    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=30)
     t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=500, step=100)
     t_vis = tc3.number_input("Min Vis (SM)", value=3.0, step=0.5)
-    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=1)
-    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=0)
+    # UPDATED: Index 2 is "MOD"
+    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=2)
+    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=1)
 
+# Build the Timeline Data for Plotly
 x_labels = []      
 hover_texts = []   
 color_vals = []    
@@ -452,28 +454,12 @@ for i in range(nearest_idx, max_idx + 1):
 
 tick_vals = x_labels[::4]
 tick_texts = []
-last_date_str = None
-
-# Smart Date Engine for X-Axis
-today_date = datetime.now(local_tz).date()
-tomorrow_date = today_date + timedelta(days=1)
 
 for val in tick_vals:
     idx_for_val = nearest_idx + x_labels.index(val)
     dt_local = datetime.fromisoformat(h["time"][idx_for_val]).replace(tzinfo=timezone.utc).astimezone(local_tz)
-    
     t_str = dt_local.strftime('%H:%M')
-    tick_date = dt_local.date()
-    
-    if tick_date == today_date: d_str = "Today"
-    elif tick_date == tomorrow_date: d_str = "Tomorrow"
-    else: d_str = dt_local.strftime('%b %d')
-    
-    if last_date_str is None or d_str != last_date_str:
-        tick_texts.append(f"{t_str}<br><b>{d_str}</b>")
-        last_date_str = d_str
-    else:
-        tick_texts.append(t_str)
+    tick_texts.append(t_str)
 
 fig = go.Figure(data=go.Bar(
     x=x_labels,
