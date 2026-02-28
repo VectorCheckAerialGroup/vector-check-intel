@@ -4,12 +4,12 @@ import math
 import re
 import json
 import urllib.request
+import os
 from datetime import datetime, timezone, timedelta
 from timezonefinder import TimezoneFinder
 import pytz
 import plotly.graph_objects as go
 import tempfile
-import os
 from fpdf import FPDF
 
 # Import Vector Check Modules
@@ -20,10 +20,38 @@ from modules.telemetry import log_action
 from modules.astronomy import get_astronomical_data
 from modules.space_weather import get_kp_index
 
-# --- CONSTANTS ---
+# --- CONSTANTS & PREFS ---
 CONVECTIVE_CCL_MULTIPLIER = 400
 METERS_TO_SM = 1609.34
 ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
+PREFS_FILE = "user_prefs.json"
+
+def load_prefs(user):
+    if os.path.exists(PREFS_FILE):
+        try:
+            with open(PREFS_FILE, "r") as f:
+                return json.load(f).get(user, {})
+        except Exception: pass
+    return {}
+
+def save_prefs(user, lat, lon, wind, ceil, vis, turb, ice):
+    prefs = {}
+    if os.path.exists(PREFS_FILE):
+        try:
+            with open(PREFS_FILE, "r") as f:
+                prefs = json.load(f)
+        except Exception: pass
+    
+    prefs[user] = {
+        "lat": float(lat), "lon": float(lon),
+        "wind": int(wind), "ceil": int(ceil), "vis": float(vis),
+        "turb": turb, "ice": ice
+    }
+    
+    try:
+        with open(PREFS_FILE, "w") as f:
+            json.dump(prefs, f)
+    except Exception: pass
 
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -102,10 +130,19 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state["password_correct"] = True
                     st.session_state["eula_accepted"] = True
                     st.session_state["active_operator"] = user
-                    try:
-                        log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
-                    except:
-                        pass
+                    
+                    # LOAD PREFERENCES ON SUCCESSFUL LOGIN
+                    prefs = load_prefs(user)
+                    st.session_state['input_lat'] = prefs.get('lat', 44.1628)
+                    st.session_state['input_lon'] = prefs.get('lon', -77.3832)
+                    st.session_state['input_wind'] = prefs.get('wind', 30)
+                    st.session_state['input_ceil'] = prefs.get('ceil', 500)
+                    st.session_state['input_vis'] = prefs.get('vis', 3.0)
+                    st.session_state['input_turb'] = prefs.get('turb', "MOD")
+                    st.session_state['input_ice'] = prefs.get('ice', "LGT")
+                    
+                    try: log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
+                    except: pass
                     st.rerun()
             else:
                 st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
@@ -115,58 +152,16 @@ This Agreement shall be governed by and construed in accordance with the laws of
 if not check_password():
     st.stop()
 
-# ---------------------------------------------------------
-# HELPER FUNCTIONS 
-# ---------------------------------------------------------
-def calc_td(t, rh):
-    if rh <= 0: return t
-    a = 17.625
-    b = 243.04
-    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
-    return (b * alpha) / (a - alpha)
-
-def get_interp_thermals(alt_msl, profile):
-    if not profile: return 0.0, 0
-    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
-    if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
-    for i in range(len(profile)-1):
-        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
-            lower = profile[i]
-            upper = profile[i+1]
-            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
-            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
-            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
-            return i_t, int(i_rh)
-    return profile[0]['t'], profile[0]['rh']
-
-def format_dir(d, spd):
-    r = int(round(float(d), -1)) % 360
-    if r == 0 and spd > 0: return 360
-    if spd == 0: return 0
-    return r
-
-def hazard_lvl(h_str):
-    h_str = h_str.upper()
-    if "SEV" in h_str: return 3
-    if "MOD-SEV" in h_str: return 2.5
-    if "MOD" in h_str: return 2
-    if "LGT" in h_str: return 1
-    return 0
-
-def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
-    if vis_raw_m is not None:
-        vis_sm = float(vis_raw_m) / 1609.34
-    else:
-        if rh >= 95: vis_sm = 1.5
-        elif rh >= 90: vis_sm = 3.0
-        elif rh >= 80: vis_sm = 5.0
-        else: vis_sm = 10.0
-        
-    if wx >= 50: return vis_sm
-    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
-    if vis_sm < 4.0 and rh < 85: return max(vis_sm, 7.0)
-    if vis_sm < 3.0 and wx <= 3 and rh < 95: return max(vis_sm, 4.0)
-    return vis_sm
+# Ensure keys exist if session was restored without hitting the login block
+if "input_lat" not in st.session_state:
+    prefs = load_prefs(st.session_state.get("active_operator", "UNKNOWN"))
+    st.session_state['input_lat'] = prefs.get('lat', 44.1628)
+    st.session_state['input_lon'] = prefs.get('lon', -77.3832)
+    st.session_state['input_wind'] = prefs.get('wind', 30)
+    st.session_state['input_ceil'] = prefs.get('ceil', 500)
+    st.session_state['input_vis'] = prefs.get('vis', 3.0)
+    st.session_state['input_turb'] = prefs.get('turb', "MOD")
+    st.session_state['input_ice'] = prefs.get('ice', "LGT")
 
 # ---------------------------------------------------------
 # SPATIAL ENGINES & CACHED DATA FETCH
@@ -258,8 +253,9 @@ except Exception:
     st.sidebar.caption("Aerial Group Inc.")
 
 st.sidebar.header("Mission Parameters")
-lat = st.sidebar.number_input("Latitude", value=44.1628, format="%.4f", key="lat_input")
-lon = st.sidebar.number_input("Longitude", value=-77.3832, format="%.4f", key="lon_input")
+# Input widgets natively bound to Session State keys
+lat = st.sidebar.number_input("Latitude", format="%.4f", key="input_lat")
+lon = st.sidebar.number_input("Longitude", format="%.4f", key="input_lon")
 
 regional_name = get_location_name(lat, lon)
 st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
@@ -334,7 +330,6 @@ nearest_idx = time_diffs.index(min(time_diffs))
 max_idx = min(len(h["time"]) - 1, nearest_idx + 48)
 valid_times_display = times_display[nearest_idx : max_idx + 1]
 
-# Setup Session State for Slider logic
 if "forecast_slider" not in st.session_state or st.session_state.forecast_slider not in valid_times_display:
     st.session_state.forecast_slider = valid_times_display[0]
 
@@ -345,11 +340,12 @@ st.subheader("Impact Matrix")
 
 with st.expander("Configure Operational Constraints"):
     tc1, tc2, tc3, tc4, tc5 = st.columns(5)
-    t_wind = tc1.number_input("Max Wind/Gust (KT)", value=30)
-    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=500, step=100)
-    t_vis = tc3.number_input("Min Vis (SM)", value=3.0, step=0.5)
-    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=2)
-    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=1)
+    # Constraints bound directly to Session State for persistence
+    t_wind = tc1.number_input("Max Wind/Gust (KT)", key="input_wind")
+    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", step=100, key="input_ceil")
+    t_vis = tc3.number_input("Min Vis (SM)", step=0.5, key="input_vis")
+    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], key="input_turb")
+    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], key="input_ice")
 
 x_labels = []      
 hover_texts = []   
@@ -399,7 +395,6 @@ for i in range(nearest_idx, max_idx + 1):
         c_amt = "CONV"
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
-        # HIERARCHY GATE 1: BKN/OVC (CEILING)
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 3.0: 
@@ -408,7 +403,6 @@ for i in range(nearest_idx, max_idx + 1):
                 c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
                 break
         
-        # HIERARCHY GATE 2: SCT
         if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
@@ -418,7 +412,6 @@ for i in range(nearest_idx, max_idx + 1):
                     c_amt = "SCT"
                     break
                     
-        # HIERARCHY GATE 3: FEW
         if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
@@ -627,7 +620,6 @@ if is_convective:
     c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
-    # HIERARCHY SEARCH - STEP 1: CEILING (BKN/OVC)
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
@@ -637,7 +629,6 @@ else:
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
             
-    # HIERARCHY SEARCH - STEP 2: SCATTERED (SCT)
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
@@ -648,7 +639,6 @@ else:
                 c_base_disp = f"{c_base_agl:,} ft SCT"
                 break
                 
-    # HIERARCHY SEARCH - STEP 3: FEW
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
@@ -993,3 +983,12 @@ This system translates raw meteorological model data for uncrewed systems. It do
 <em>Usage of this system, including geographic querying and PDF generation, is actively logged to a secure database for audit and security purposes.</em>
 </div>
 """, unsafe_allow_html=True)
+
+# AUTO-SAVE STATE PERSISTENCE ENGINE
+try:
+    save_prefs(
+        st.session_state.get("active_operator", "UNKNOWN"),
+        lat, lon, t_wind, t_ceil, t_vis, t_turb, t_ice
+    )
+except Exception:
+    pass
