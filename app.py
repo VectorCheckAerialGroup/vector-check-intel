@@ -399,23 +399,33 @@ for i in range(nearest_idx, max_idx + 1):
         c_amt = "CONV"
     else:
         search_profile = profile[1:] if len(profile) > 1 else profile
+        # HIERARCHY GATE 1: BKN/OVC (CEILING)
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 3.0: 
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
-                    continue
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                 c_base_agl = int(round(h_agl, -2))
                 c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
                 break
-                
+        
+        # HIERARCHY GATE 2: SCT
         if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 5.0:
-                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
-                        continue
+                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                     c_base_agl = int(round(h_agl, -2))
-                    c_amt = "SCT" 
+                    c_amt = "SCT"
+                    break
+                    
+        # HIERARCHY GATE 3: FEW
+        if c_amt == "CLR":
+            for layer in search_profile:
+                h_agl = max(0, layer['h'] - sfc_elevation)
+                if layer['spread'] <= 7.0:
+                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                    c_base_agl = int(round(h_agl, -2))
+                    c_amt = "FEW"
                     break
 
     alt_msl = sfc_elevation + 400
@@ -610,32 +620,43 @@ is_convective = (wx >= 80) or lapse_rate_temp_drop >= 7.5
 
 c_base_agl = 99999
 c_amt = "CLR"
-c_base_disp = "CLR BLO 10,000ft"
+c_base_disp = "CLR"
 
 if is_convective:
     c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
     c_base_disp = f"{c_base_agl:,} ft CONV"
 else:
     search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+    # HIERARCHY SEARCH - STEP 1: CEILING (BKN/OVC)
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
-            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
-                continue
+            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             c_base_agl = int(round(h_agl, -2))
             c_base_disp = f"{c_base_agl:,} ft {c_amt}"
             break
             
+    # HIERARCHY SEARCH - STEP 2: SCATTERED (SCT)
     if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 5.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50:
-                    continue
-                sct_h = int(round(h_agl, -2))
-                c_base_disp = f"{sct_h:,} ft SCT"
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                c_base_agl = int(round(h_agl, -2))
                 c_amt = "SCT"
+                c_base_disp = f"{c_base_agl:,} ft SCT"
+                break
+                
+    # HIERARCHY SEARCH - STEP 3: FEW
+    if c_amt == "CLR":
+        for layer in search_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
+            if layer['spread'] <= 7.0:
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                c_base_agl = int(round(h_agl, -2))
+                c_amt = "FEW"
+                c_base_disp = f"{c_base_agl:,} ft FEW"
                 break
 
 raw_gst_list = h.get('wind_gusts_10m')
