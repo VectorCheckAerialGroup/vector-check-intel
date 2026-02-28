@@ -1,5 +1,6 @@
 import json
 import urllib.request
+import streamlit as st
 
 def get_aviation_weather(icao):
     try:
@@ -17,6 +18,12 @@ def get_aviation_weather(icao):
 
 def fetch_mission_data(lat, lon, model_url):
     try:
+        # COMMERCIAL SLA UPGRADE: Detect secure API key and reroute to dedicated servers
+        api_key = st.secrets.get("open_meteo", {}).get("api_key", None)
+        
+        if api_key:
+            model_url = model_url.replace("https://api.open-meteo.com", "https://customer-api.open-meteo.com")
+
         # Base surface variables
         vars_list = [
             "temperature_2m", "relative_humidity_2m", "wind_speed_10m", 
@@ -25,7 +32,6 @@ def fetch_mission_data(lat, lon, model_url):
         ]
         
         # Dynamic Pressure Level Resolution
-        # HRDPS only supports 6 mandatory levels. ECMWF supports 15 high-res levels.
         if "gem" in model_url:
             p_levels = [1000, 925, 850, 700, 500, 250]
         else:
@@ -40,12 +46,18 @@ def fetch_mission_data(lat, lon, model_url):
             
         vars_str = ",".join(vars_list)
         
+        # Build URL
         url = f"{model_url}?latitude={lat}&longitude={lon}&hourly={vars_str}&timezone=UTC"
+        
+        # Inject API Key for Commercial Authorization
+        if api_key:
+            url += f"&apikey={api_key}"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode('utf-8'))
             return data
+            
     except urllib.error.HTTPError as e:
         return {"error": True, "message": f"HTTP {e.code}: {e.read().decode('utf-8')}"}
     except Exception as e:
