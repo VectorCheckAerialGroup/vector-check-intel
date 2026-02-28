@@ -164,6 +164,59 @@ if "input_lat" not in st.session_state:
     st.session_state['input_ice'] = prefs.get('ice', "LGT")
 
 # ---------------------------------------------------------
+# HELPER FUNCTIONS 
+# ---------------------------------------------------------
+def calc_td(t, rh):
+    if rh <= 0: return t
+    a = 17.625
+    b = 243.04
+    alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
+    return (b * alpha) / (a - alpha)
+
+def get_interp_thermals(alt_msl, profile):
+    if not profile: return 0.0, 0
+    if alt_msl <= profile[0]['h']: return profile[0]['t'], profile[0]['rh']
+    if alt_msl >= profile[-1]['h']: return profile[-1]['t'], profile[-1]['rh']
+    for i in range(len(profile)-1):
+        if profile[i]['h'] <= alt_msl <= profile[i+1]['h']:
+            lower = profile[i]
+            upper = profile[i+1]
+            frac = (alt_msl - lower['h']) / (upper['h'] - lower['h']) if upper['h'] != lower['h'] else 0
+            i_t = lower['t'] + frac * (upper['t'] - lower['t'])
+            i_rh = lower['rh'] + frac * (upper['rh'] - lower['rh'])
+            return i_t, int(i_rh)
+    return profile[0]['t'], profile[0]['rh']
+
+def format_dir(d, spd):
+    r = int(round(float(d), -1)) % 360
+    if r == 0 and spd > 0: return 360
+    if spd == 0: return 0
+    return r
+
+def hazard_lvl(h_str):
+    h_str = h_str.upper()
+    if "SEV" in h_str: return 3
+    if "MOD-SEV" in h_str: return 2.5
+    if "MOD" in h_str: return 2
+    if "LGT" in h_str: return 1
+    return 0
+
+def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
+    if vis_raw_m is not None:
+        vis_sm = float(vis_raw_m) / 1609.34
+    else:
+        if rh >= 95: vis_sm = 1.5
+        elif rh >= 90: vis_sm = 3.0
+        elif rh >= 80: vis_sm = 5.0
+        else: vis_sm = 10.0
+        
+    if wx >= 50: return vis_sm
+    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
+    if vis_sm < 4.0 and rh < 85: return max(vis_sm, 7.0)
+    if vis_sm < 3.0 and wx <= 3 and rh < 95: return max(vis_sm, 4.0)
+    return vis_sm
+
+# ---------------------------------------------------------
 # SPATIAL ENGINES & CACHED DATA FETCH
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
