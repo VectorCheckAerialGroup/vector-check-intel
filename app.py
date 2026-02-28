@@ -20,6 +20,8 @@ from modules.space_weather import get_kp_index
 # --- CONSTANTS ---
 CONVECTIVE_CCL_MULTIPLIER = 400
 METERS_TO_SM = 1609.34
+# Master High-Res Level Array
+ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
 
 # 1. PAGE CONFIG & CSS
 st.set_page_config(page_title="Vector Check: Atmospheric Risk Management", layout="wide")
@@ -344,7 +346,6 @@ with st.expander("Configure Operational Constraints"):
     t_wind = tc1.number_input("Max Wind/Gust (KT)", value=30)
     t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=500, step=100)
     t_vis = tc3.number_input("Min Vis (SM)", value=3.0, step=0.5)
-    # UPDATED: Index 2 is "MOD"
     t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=2)
     t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=1)
 
@@ -374,17 +375,17 @@ for i in range(nearest_idx, max_idx + 1):
     vis_raw_val = vis_raw_list[i] if vis_raw_list and len(vis_raw_list) > i else None
     vis_sm = calc_tactical_visibility(vis_raw_val, rh_v, w_spd, wx)
     
+    # Use High-Res Arrays if available
     profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh_v}]
-    for p in [1000, 925, 850, 700, 500, 250]:
+    for p in ALL_P_LEVELS:
         gh_list = h.get(f'geopotential_height_{p}hPa')
         t_list = h.get(f'temperature_{p}hPa')
         rh_list = h.get(f'relative_humidity_{p}hPa')
         if gh_list and t_list and rh_list and len(gh_list) > i:
-            gh_val, t_val, rh_val = gh_list[i], t_list[i], rh_list[i]
-            if gh_val is not None and t_val is not None and rh_val is not None:
-                p_gh = float(gh_val) * 3.28084
+            if gh_list[i] is not None and t_list[i] is not None and rh_list[i] is not None:
+                p_gh = float(gh_list[i]) * 3.28084
                 if p_gh > profile[-1]['h']:
-                    profile.append({'h': p_gh, 't': float(t_val), 'td': calc_td(float(t_val), int(rh_val)), 'spread': float(t_val) - calc_td(float(t_val), int(rh_val)), 'rh': int(rh_val)})
+                    profile.append({'h': p_gh, 't': float(t_list[i]), 'td': calc_td(float(t_list[i]), int(rh_list[i])), 'spread': float(t_list[i]) - calc_td(float(t_list[i]), int(rh_list[i])), 'rh': int(rh_list[i])})
 
     t_950_list = h.get('temperature_925hPa')
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
@@ -573,8 +574,9 @@ vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 if vis_sm > 7: vis_disp = "> 7 SM"
 else: vis_disp = f"{vis_sm:.1f} SM"
 
+# Use High-Res Arrays if available
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
-for p in [1000, 925, 850, 700, 500, 250]:
+for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
