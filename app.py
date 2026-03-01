@@ -131,15 +131,15 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state["eula_accepted"] = True
                     st.session_state["active_operator"] = user
                     
-                    # LOAD PREFERENCES ON SUCCESSFUL LOGIN
+                    # LOAD PREFERENCES ON SUCCESSFUL LOGIN (With Tactically Accurate Defaults)
                     prefs = load_prefs(user)
-                    st.session_state['input_lat'] = prefs.get('lat', 44.1628)
-                    st.session_state['input_lon'] = prefs.get('lon', -77.3832)
-                    st.session_state['input_wind'] = prefs.get('wind', 30)
-                    st.session_state['input_ceil'] = prefs.get('ceil', 500)
-                    st.session_state['input_vis'] = prefs.get('vis', 3.0)
-                    st.session_state['input_turb'] = prefs.get('turb', "MOD")
-                    st.session_state['input_ice'] = prefs.get('ice', "LGT")
+                    st.session_state['input_lat'] = float(prefs.get('lat', 44.1628))
+                    st.session_state['input_lon'] = float(prefs.get('lon', -77.3832))
+                    st.session_state['input_wind'] = int(prefs.get('wind', 30))
+                    st.session_state['input_ceil'] = int(prefs.get('ceil', 500))
+                    st.session_state['input_vis'] = float(prefs.get('vis', 3.0))
+                    st.session_state['input_turb'] = str(prefs.get('turb', "MOD"))
+                    st.session_state['input_ice'] = str(prefs.get('ice', "NIL"))
                     
                     try: log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
                     except: pass
@@ -155,13 +155,13 @@ if not check_password():
 # Ensure keys exist if session was restored without hitting the login block
 if "input_lat" not in st.session_state:
     prefs = load_prefs(st.session_state.get("active_operator", "UNKNOWN"))
-    st.session_state['input_lat'] = prefs.get('lat', 44.1628)
-    st.session_state['input_lon'] = prefs.get('lon', -77.3832)
-    st.session_state['input_wind'] = prefs.get('wind', 30)
-    st.session_state['input_ceil'] = prefs.get('ceil', 500)
-    st.session_state['input_vis'] = prefs.get('vis', 3.0)
-    st.session_state['input_turb'] = prefs.get('turb', "MOD")
-    st.session_state['input_ice'] = prefs.get('ice', "LGT")
+    st.session_state['input_lat'] = float(prefs.get('lat', 44.1628))
+    st.session_state['input_lon'] = float(prefs.get('lon', -77.3832))
+    st.session_state['input_wind'] = int(prefs.get('wind', 30))
+    st.session_state['input_ceil'] = int(prefs.get('ceil', 500))
+    st.session_state['input_vis'] = float(prefs.get('vis', 3.0))
+    st.session_state['input_turb'] = str(prefs.get('turb', "MOD"))
+    st.session_state['input_ice'] = str(prefs.get('ice', "NIL"))
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS 
@@ -991,7 +991,7 @@ def generate_pdf_report():
             pdf.ln(8)
         pdf.ln(5)
 
-    draw_table("TACTICAL Hazard STACK (0-400ft AGL)", df_tactical)
+    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
