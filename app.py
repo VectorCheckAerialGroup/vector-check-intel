@@ -26,6 +26,15 @@ METERS_TO_SM = 1609.34
 ALL_P_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
 PREFS_FILE = "user_prefs.json"
 
+# DETACHMENT FALLBACK COORDINATES (Used only if memory is wiped)
+USER_DEFAULTS = {
+    "VCAG": {"lat": 44.1628, "lon": -77.3832},     # Belleville, ON
+    "Vector1": {"lat": 54.4642, "lon": -110.1825}, # Cold Lake, AB
+    "Vector2": {"lat": 45.9003, "lon": -77.2818},  # Petawawa, ON
+    "Vector3": {"lat": 48.3303, "lon": -70.9961},  # Bagotville, QC
+    "Vector4": {"lat": 43.6532, "lon": -79.3832}   # Toronto, ON
+}
+
 def load_prefs(user):
     if os.path.exists(PREFS_FILE):
         try:
@@ -33,6 +42,29 @@ def load_prefs(user):
                 return json.load(f).get(user, {})
         except Exception: pass
     return {}
+
+def sanitize_prefs(prefs, user):
+    """Anti-Corruption Gate: Scrubs poisoned memory states and enforces user-specific baselines."""
+    
+    # Grab the user's specific detachment base, default to Belleville if unknown ID
+    base_loc = USER_DEFAULTS.get(user, {"lat": 44.1628, "lon": -77.3832})
+    def_lat, def_lon = base_loc["lat"], base_loc["lon"]
+    
+    lat = float(prefs.get('lat', def_lat))
+    lon = float(prefs.get('lon', def_lon))
+    wind = int(prefs.get('wind', 30))
+    ceil = int(prefs.get('ceil', 500))
+    vis = float(prefs.get('vis', 3.0))
+    turb = str(prefs.get('turb', "MOD"))
+    ice = str(prefs.get('ice', "NIL"))
+    
+    # Check for crash-induced zeroes
+    if lat == 0.0 and lon == 0.0:
+        lat, lon = def_lat, def_lon
+    if wind == 0 and ceil == 0:
+        wind, ceil, vis = 30, 500, 3.0
+        
+    return lat, lon, wind, ceil, vis, turb, ice
 
 def save_prefs(user, lat, lon, wind, ceil, vis, turb, ice):
     prefs = {}
@@ -131,15 +163,17 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state["eula_accepted"] = True
                     st.session_state["active_operator"] = user
                     
-                    # LOAD PREFERENCES ON SUCCESSFUL LOGIN (With Tactically Accurate Defaults)
-                    prefs = load_prefs(user)
-                    st.session_state['input_lat'] = float(prefs.get('lat', 44.1628))
-                    st.session_state['input_lon'] = float(prefs.get('lon', -77.3832))
-                    st.session_state['input_wind'] = int(prefs.get('wind', 30))
-                    st.session_state['input_ceil'] = int(prefs.get('ceil', 500))
-                    st.session_state['input_vis'] = float(prefs.get('vis', 3.0))
-                    st.session_state['input_turb'] = str(prefs.get('turb', "MOD"))
-                    st.session_state['input_ice'] = str(prefs.get('ice', "NIL"))
+                    # LOAD & SANITIZE PREFERENCES ON SUCCESSFUL LOGIN
+                    raw_prefs = load_prefs(user)
+                    lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, user)
+                    
+                    st.session_state['input_lat'] = lat
+                    st.session_state['input_lon'] = lon
+                    st.session_state['input_wind'] = wind
+                    st.session_state['input_ceil'] = ceil
+                    st.session_state['input_vis'] = vis
+                    st.session_state['input_turb'] = turb
+                    st.session_state['input_ice'] = ice
                     
                     try: log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
                     except: pass
@@ -154,14 +188,16 @@ if not check_password():
 
 # Ensure keys exist if session was restored without hitting the login block
 if "input_lat" not in st.session_state:
-    prefs = load_prefs(st.session_state.get("active_operator", "UNKNOWN"))
-    st.session_state['input_lat'] = float(prefs.get('lat', 44.1628))
-    st.session_state['input_lon'] = float(prefs.get('lon', -77.3832))
-    st.session_state['input_wind'] = int(prefs.get('wind', 30))
-    st.session_state['input_ceil'] = int(prefs.get('ceil', 500))
-    st.session_state['input_vis'] = float(prefs.get('vis', 3.0))
-    st.session_state['input_turb'] = str(prefs.get('turb', "MOD"))
-    st.session_state['input_ice'] = str(prefs.get('ice', "NIL"))
+    current_op = st.session_state.get("active_operator", "UNKNOWN")
+    raw_prefs = load_prefs(current_op)
+    lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, current_op)
+    st.session_state['input_lat'] = lat
+    st.session_state['input_lon'] = lon
+    st.session_state['input_wind'] = wind
+    st.session_state['input_ceil'] = ceil
+    st.session_state['input_vis'] = vis
+    st.session_state['input_turb'] = turb
+    st.session_state['input_ice'] = ice
 
 # ---------------------------------------------------------
 # HELPER FUNCTIONS 
@@ -397,8 +433,17 @@ with st.expander("Configure Operational Constraints"):
     t_wind = tc1.number_input("Max Wind/Gust (KT)", key="input_wind")
     t_ceil = tc2.number_input("Min Ceiling (ft AGL)", step=100, key="input_ceil")
     t_vis = tc3.number_input("Min Vis (SM)", step=0.5, key="input_vis")
-    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], key="input_turb")
-    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], key="input_ice")
+    
+    # Secure string fallbacks for Selectboxes
+    turb_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state['input_turb']) if st.session_state['input_turb'] in ["NIL", "LGT", "MOD", "SEV"] else 2
+    ice_idx = ["NIL", "LGT", "MOD", "SEV"].index(st.session_state['input_ice']) if st.session_state['input_ice'] in ["NIL", "LGT", "MOD", "SEV"] else 0
+    
+    t_turb = tc4.selectbox("Max Turb", ["NIL", "LGT", "MOD", "SEV"], index=turb_idx, key="input_turb_widget")
+    t_ice = tc5.selectbox("Max Icing", ["NIL", "LGT", "MOD", "SEV"], index=ice_idx, key="input_ice_widget")
+    
+    # Sync back the widgets to the master session state to maintain harmony
+    st.session_state['input_turb'] = t_turb
+    st.session_state['input_ice'] = t_ice
 
 x_labels = []      
 hover_texts = []   
