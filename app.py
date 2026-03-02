@@ -499,43 +499,52 @@ for i in range(nearest_idx, max_idx + 1):
                 if p_gh > profile[-1]['h']:
                     profile.append({'h': p_gh, 't': float(t_list[i]), 'td': calc_td(float(t_list[i]), int(rh_list[i])), 'spread': float(t_list[i]) - calc_td(float(t_list[i]), int(rh_list[i])), 'rh': int(rh_list[i])})
 
+    # CONVECTIVE GATE FIX (Thermodynamic limit applied)
     t_950_list = h.get('temperature_925hPa')
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
-    is_convective = (wx >= 80) or ((t_temp - t_950) >= 7.5)
+    lapse_rate_temp_drop = t_temp - t_950
+    is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
     c_base_agl = 99999 
     c_amt = "CLR"
     
-    if is_convective:
-        c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
-        c_amt = "CONV"
-    else:
-        search_profile = profile[1:] if len(profile) > 1 else profile
+    # Structural Layer Search MUST run first
+    search_profile = profile[1:] if len(profile) > 1 else profile
+    for layer in search_profile:
+        h_agl = max(0, layer['h'] - sfc_elevation)
+        if layer['spread'] <= 3.0: 
+            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+            c_base_agl = int(round(h_agl, -2))
+            c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+            break
+            
+    if c_amt == "CLR":
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
-            if layer['spread'] <= 3.0: 
+            if layer['spread'] <= 5.0:
                 if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                 c_base_agl = int(round(h_agl, -2))
-                c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+                c_amt = "SCT"
                 break
-        
+                
+    if c_amt == "CLR":
+        for layer in search_profile:
+            h_agl = max(0, layer['h'] - sfc_elevation)
+            if layer['spread'] <= 7.0:
+                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                c_base_agl = int(round(h_agl, -2))
+                c_amt = "FEW"
+                break
+
+    # Convective Override ONLY applies if truly convective
+    if is_convective:
         if c_amt == "CLR":
-            for layer in search_profile:
-                h_agl = max(0, layer['h'] - sfc_elevation)
-                if layer['spread'] <= 5.0:
-                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                    c_base_agl = int(round(h_agl, -2))
-                    c_amt = "SCT"
-                    break
-                    
-        if c_amt == "CLR":
-            for layer in search_profile:
-                h_agl = max(0, layer['h'] - sfc_elevation)
-                if layer['spread'] <= 7.0:
-                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                    c_base_agl = int(round(h_agl, -2))
-                    c_amt = "FEW"
-                    break
+            ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+            if ccl_base < 10000:
+                c_base_agl = ccl_base
+                c_amt = "CONV"
+        else:
+            c_amt = "CONV"
 
     alt_msl = sfc_elevation + 400
     alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
@@ -721,49 +730,53 @@ else:
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
+# CONVECTIVE GATE FIX (Thermodynamic limit applied)
 t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
-
 lapse_rate_temp_drop = t_temp - t_950
-is_convective = (wx >= 80) or lapse_rate_temp_drop >= 7.5
+is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
 
 c_base_agl = 99999
 c_amt = "CLR"
 c_base_disp = "CLR"
 
-if is_convective:
-    c_base_agl = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
-    c_base_disp = f"{c_base_agl:,} ft CONV"
-else:
-    search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_profile
+for layer in search_profile:
+    h_agl = max(0, layer['h'] - sfc_elevation)
+    if layer['spread'] <= 3.0: 
+        if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+        c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+        c_base_agl = int(round(h_agl, -2))
+        break
+        
+if c_amt == "CLR":
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
-        if layer['spread'] <= 3.0: 
+        if layer['spread'] <= 5.0:
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-            c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             c_base_agl = int(round(h_agl, -2))
-            c_base_disp = f"{c_base_agl:,} ft {c_amt}"
+            c_amt = "SCT"
             break
             
+if c_amt == "CLR":
+    for layer in search_profile:
+        h_agl = max(0, layer['h'] - sfc_elevation)
+        if layer['spread'] <= 7.0:
+            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+            c_base_agl = int(round(h_agl, -2))
+            c_amt = "FEW"
+            break
+
+if is_convective:
     if c_amt == "CLR":
-        for layer in search_profile:
-            h_agl = max(0, layer['h'] - sfc_elevation)
-            if layer['spread'] <= 5.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                c_base_agl = int(round(h_agl, -2))
-                c_amt = "SCT"
-                c_base_disp = f"{c_base_agl:,} ft SCT"
-                break
-                
-    if c_amt == "CLR":
-        for layer in search_profile:
-            h_agl = max(0, layer['h'] - sfc_elevation)
-            if layer['spread'] <= 7.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-                c_base_agl = int(round(h_agl, -2))
-                c_amt = "FEW"
-                c_base_disp = f"{c_base_agl:,} ft FEW"
-                break
+        ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+        if ccl_base < 10000:
+            c_base_agl = ccl_base
+            c_amt = "CONV"
+    else:
+        c_amt = "CONV"
+
+c_base_disp = f"{c_base_agl:,} ft {c_amt}" if c_amt != "CLR" else "CLR"
 
 raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
