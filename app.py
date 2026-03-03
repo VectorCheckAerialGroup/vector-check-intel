@@ -62,6 +62,7 @@ def sanitize_prefs(prefs, user):
     turb = str(prefs.get('turb', "MOD"))
     ice = str(prefs.get('ice', "NIL"))
     
+    # Check for crash-induced zeroes
     if lat == 0.0 or lon == 0.0:
         lat, lon = def_lat, def_lon
     if wind == 0 and ceil == 0:
@@ -166,6 +167,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state["eula_accepted"] = True
                     st.session_state["active_operator"] = user
                     
+                    # LOAD & SANITIZE PREFERENCES ON SUCCESSFUL LOGIN
                     raw_prefs = load_prefs(user)
                     lat, lon, wind, ceil, vis, turb, ice = sanitize_prefs(raw_prefs, user)
                     
@@ -188,6 +190,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
 if not check_password():
     st.stop()
 
+# Ensure keys exist if session was restored without hitting the login block
 if "input_lat" not in st.session_state:
     current_op = st.session_state.get("active_operator", "UNKNOWN")
     raw_prefs = load_prefs(current_op)
@@ -211,7 +214,7 @@ def calc_td(t, rh):
     return (b * alpha) / (a - alpha)
 
 def calculate_density_altitude(elevation_ft, temp_c, station_pressure_hpa):
-    """Calculates Density Altitude using exact station pressure."""
+    """Calculates true aerodynamic Density Altitude."""
     pa = elevation_ft + 27.288 * (1013.25 - station_pressure_hpa)
     isa_t = 15.0 - (1.98 * (elevation_ft / 1000.0))
     da = pa + 118.8 * (temp_c - isa_t)
@@ -275,7 +278,8 @@ def get_location_name(user_lat, user_lon):
         region = address.get('city', address.get('town', address.get('county', address.get('village', address.get('region', 'Unknown Region')))))
         province = address.get('state', address.get('country', 'Unknown'))
         
-        if region != 'Unknown Region' and province != 'Unknown': return f"{region}, {province}"
+        if region != 'Unknown Region' and province != 'Unknown':
+            return f"{region}, {province}"
         elif province != 'Unknown': return province
         else: return f"Coord: {user_lat:.2f}, {user_lon:.2f}"
     except Exception: 
@@ -342,7 +346,8 @@ def fetch_astronomy_cached(lat_val, lon_val, dt_iso_str, tz_name, tz_abbr_str):
 
 # --- SIDEBAR CONFIGURATION ---
 LOGO_URL = "https://raw.githubusercontent.com/VectorCheck/vector-check-intel/main/VCAG%20Inc%20-%20Logo%20Final.png"
-try: st.sidebar.image(LOGO_URL, use_container_width=True)
+try:
+    st.sidebar.image(LOGO_URL, use_container_width=True)
 except Exception:
     st.sidebar.title("Vector Check")
     st.sidebar.caption("Aerial Group Inc.")
@@ -388,8 +393,10 @@ model_api_map = {
 
 data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
 
-if icao != "NONE": metar_raw, taf_raw = fetch_metar_taf(icao)
-else: metar_raw, taf_raw = "NIL", "NIL"
+if icao != "NONE":
+    metar_raw, taf_raw = fetch_metar_taf(icao)
+else:
+    metar_raw, taf_raw = "NIL", "NIL"
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
@@ -490,7 +497,7 @@ for i in range(nearest_idx, max_idx + 1):
         gh_list = h.get(f'geopotential_height_{p}hPa')
         t_list = h.get(f'temperature_{p}hPa')
         rh_list = h.get(f'relative_humidity_{p}hPa')
-        # AUDIT FIX: Validate the high-altitude null bug before insertion
+        # High altitude null check
         if gh_list and t_list and rh_list and len(gh_list) > i:
             if gh_list[i] is not None and t_list[i] is not None and rh_list[i] is not None:
                 p_gh = float(gh_list[i]) * 3.28084
@@ -683,27 +690,6 @@ w_spd = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 wx_list = h.get('weather_code', [0])
 wx = int(wx_list[idx]) if (wx_list and len(wx_list) > idx and wx_list[idx] is not None) else 0
 
-# Advanced Extracted Metrics
-pop_raw = h.get('precipitation_probability', [0])
-pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
-
-precip_raw = h.get('precipitation', [0])
-precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and precip_raw[idx] is not None else 0.0
-
-cape_raw = h.get('cape', [0])
-cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
-
-pbl_raw = h.get('boundary_layer_height', [0])
-pbl_val = pbl_raw[idx] if pbl_raw and len(pbl_raw) > idx else None
-pbl_m = float(pbl_val) if pbl_val is not None else 0.0
-pbl_ft = int(pbl_m * 3.28084)
-pbl_disp = f"{pbl_ft:,} ft AGL" if pbl_val is not None else "UNAVAILABLE"
-
-# DENSITY ALTITUDE INJECTION 
-sfc_press_raw = h.get('surface_pressure', [1013.25])
-sfc_press = float(sfc_press_raw[idx]) if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None else 1013.25
-density_alt = calculate_density_altitude(sfc_elevation, t_temp, sfc_press)
-
 td = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
 
@@ -717,12 +703,12 @@ vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 if vis_sm > 7: vis_disp = "> 7 SM"
 else: vis_disp = f"{vis_sm:.1f} SM"
 
+# 1. BUILD THERMAL PROFILE FIRST (Required for PBL Fallback)
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
     t_list = h.get(f'temperature_{p}hPa')
     rh_list = h.get(f'relative_humidity_{p}hPa')
-    # AUDIT FIX: High altitude null prevention
     if gh_list and t_list and rh_list and len(gh_list) > idx:
         if gh_list[idx] is not None and t_list[idx] is not None and rh_list[idx] is not None:
             p_gh = float(gh_list[idx]) * 3.28084
@@ -731,6 +717,40 @@ for p in ALL_P_LEVELS:
             p_td = calc_td(p_t, p_rh)
             if p_gh > thermal_profile[-1]['h']:
                 thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
+
+# 2. DENSITY ALTITUDE INJECTION
+sfc_press_raw = h.get('surface_pressure')
+if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None:
+    sfc_press = float(sfc_press_raw[idx])
+else:
+    sfc_press = 1013.25
+density_alt = calculate_density_altitude(sfc_elevation, t_temp, sfc_press)
+
+# 3. ADVANCED EXTRACTS
+pop_raw = h.get('precipitation_probability', [0])
+pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
+
+precip_raw = h.get('precipitation', [0])
+precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and precip_raw[idx] is not None else 0.0
+
+cape_raw = h.get('cape', [0])
+cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
+
+# 4. PBL FIX: THERMODYNAMIC FALLBACK
+pbl_raw = h.get('boundary_layer_height')
+if pbl_raw and len(pbl_raw) > idx and pbl_raw[idx] is not None:
+    pbl_m = float(pbl_raw[idx])
+    pbl_ft = int(pbl_m * 3.28084)
+    pbl_disp = f"{pbl_ft:,} ft AGL"
+else:
+    # HRDPS Fallback: Scan thermal profile for the lowest temperature inversion
+    pbl_calc_agl = 2000 # Default baseline if perfectly unstable
+    if len(thermal_profile) > 1:
+        for k in range(1, len(thermal_profile)):
+            if thermal_profile[k]['t'] >= thermal_profile[k-1]['t']: # Inversion detected (lid of PBL)
+                pbl_calc_agl = max(0, thermal_profile[k-1]['h'] - sfc_elevation)
+                break
+    pbl_disp = f"{int(pbl_calc_agl):,} ft AGL (Est)"
 
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
@@ -1091,7 +1111,7 @@ def generate_pdf_report():
     draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
     
-    # ADVANCED THERMODYNAMICS INCLUDING DA
+    # ADVANCED THERMODYNAMICS
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
