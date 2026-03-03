@@ -255,9 +255,9 @@ def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
         
     if wx >= 50: return vis_sm
 
-    # THERMODYNAMIC VETO: Catch model hallucinated Fog at low RH
-    if wx in [45, 48] and rh < 95:
-        if rh >= 80: return max(vis_sm, 4.0)
+    # VAPOR PRESSURE FIX: Relaxed RH constraint from 95% down to 85% to account for Ice Fog / Mist
+    if wx in [45, 48] and rh < 85:
+        if rh >= 75: return max(vis_sm, 4.0)
         else: return max(vis_sm, 7.0)
 
     if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
@@ -722,7 +722,7 @@ for p in ALL_P_LEVELS:
             if p_gh > thermal_profile[-1]['h']:
                 thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
 
-# 3. ADVANCED METRICS (Safely Restored)
+# 3. ADVANCED METRICS 
 sfc_press_raw = h.get('surface_pressure')
 if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None:
     sfc_press = float(sfc_press_raw[idx])
@@ -862,12 +862,20 @@ moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro
 
 weather_str = get_weather_element(wx, w_spd)
 
-# THERMODYNAMIC VETO & TACTICAL OVERRIDE FOR STRING DISPLAY
-if wx in [45, 48] and rh < 95:
-    weather_str = "HAZE (HZ)" if rh >= 80 else "CLEAR"
-elif wx < 40 and rh >= 95 and vis_sm < 7.0:
-    if vis_sm <= 0.62: weather_str = "FOG (FG)"
-    else: weather_str = "MIST (BR)"
+# RECALIBRATED THERMODYNAMIC OVERRIDE FOR WINTER MIST/FOG
+if wx in [45, 48]:
+    if rh < 85:
+        weather_str = "HAZE (HZ)" if rh >= 75 else "CLEAR"
+    else:
+        weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
+elif wx < 40 and vis_sm < 7.0:
+    if rh >= 85:
+        if vis_sm <= 0.62: 
+            weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
+        else: 
+            weather_str = "MIST (BR)"
+    elif rh >= 75:
+        weather_str = "HAZE (HZ)"
 
 if int(w_spd) == 0: sfc_dir_disp, sfc_spd_disp = "CALM", "0"
 elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB", "3"
