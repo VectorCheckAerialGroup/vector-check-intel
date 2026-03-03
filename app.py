@@ -695,9 +695,12 @@ precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and prec
 cape_raw = h.get('cape', [0])
 cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
 
+# FIX: PBL 0ft correctly displays instead of evaluating to NIL
 pbl_raw = h.get('boundary_layer_height', [0])
-pbl_m = float(pbl_raw[idx]) if pbl_raw and len(pbl_raw) > idx and pbl_raw[idx] is not None else 0.0
+pbl_val = pbl_raw[idx] if pbl_raw and len(pbl_raw) > idx else None
+pbl_m = float(pbl_val) if pbl_val is not None else 0.0
 pbl_ft = int(pbl_m * 3.28084)
+pbl_disp = f"{pbl_ft:,} ft AGL" if pbl_val is not None else "UNAVAILABLE"
 
 td = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
@@ -840,15 +843,6 @@ c[4].metric("Weather", weather_str)
 c[5].metric("Visibility", vis_disp)
 c[6].metric("Freezing LVL", frz_disp)
 c[7].metric("Cloud Base", c_base_disp)
-
-st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
-
-# NEW THERMODYNAMIC & AERODYNAMIC METRICS ROW
-c2 = st.columns(4)
-c2[0].metric("Precipitation Risk", f"{pop}% ({precip} mm)")
-c2[1].metric("PBL (Boundary Layer)", f"{pbl_ft:,} ft AGL" if pbl_ft > 0 else "NIL")
-c2[2].metric("CAPE (Instability)", f"{cape} J/kg")
-c2[3].empty() # Placeholder for balance
 
 st.divider()
 
@@ -1049,8 +1043,7 @@ def generate_pdf_report():
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", "", 10)
-    # ADDED NEW METRICS TO PDF REPORT
-    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}\nPrecip Risk: {pop}% ({precip} mm) | PBL Height: {pbl_ft:,} ft AGL | CAPE: {cape} J/kg"))
+    pdf.multi_cell(0, 6, safe_txt(f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\nWind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\nWeather: {weather_str} | Visibility: {vis_disp}\nCloud Base: {c_base_disp} | Freezing Level: {frz_disp}"))
     pdf.ln(5)
 
     pdf.set_font("helvetica", "B", 12)
@@ -1093,8 +1086,15 @@ def generate_pdf_report():
             pdf.ln(8)
         pdf.ln(5)
 
-    draw_table("TACTICAL Hazard STACK (0-400ft AGL)", df_tactical)
+    draw_table("TACTICAL HAZARD STACK (0-400ft AGL)", df_tactical)
     draw_table("EXTENDED TRAJECTORY (1,000-5,000ft AGL)", df_ext)
+    
+    # NEW PDF SECTION FOR ADVANCED THERMODYNAMICS
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "THERMODYNAMIC & AERODYNAMIC PROFILE", border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", "", 10)
+    pdf.multi_cell(0, 6, safe_txt(f"Precipitation Risk: {pop}% ({precip} mm)\nPlanetary Boundary Layer (PBL): {pbl_disp}\nConvective Available Potential Energy (CAPE): {cape} J/kg"))
+    pdf.ln(5)
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp_name = tmp.name
@@ -1129,6 +1129,14 @@ fig = plot_convective_profile(h, idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
 
 if fig: st.pyplot(fig)
 else: st.warning("Insufficient atmospheric layers available to render vertical profile.")
+
+# MOVED THERMODYNAMIC & AERODYNAMIC METRICS ROW
+st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+c2 = st.columns(4)
+c2[0].metric("Precipitation Risk", f"{pop}% ({precip} mm)")
+c2[1].metric("PBL (Boundary Layer)", pbl_disp)
+c2[2].metric("CAPE (Instability)", f"{cape} J/kg")
+c2[3].empty() # Placeholder for visual balance
 
 st.divider()
 st.markdown("""
