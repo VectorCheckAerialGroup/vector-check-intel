@@ -62,7 +62,6 @@ def sanitize_prefs(prefs, user):
     turb = str(prefs.get('turb', "MOD"))
     ice = str(prefs.get('ice', "NIL"))
     
-    # Check for crash-induced zeroes
     if lat == 0.0 or lon == 0.0:
         lat, lon = def_lat, def_lon
     if wind == 0 and ceil == 0:
@@ -679,6 +678,7 @@ nav_col3.button("►", on_click=update_time, args=(1,), use_container_width=True
 
 st.sidebar.divider()
 
+# 1. CORE EXTRACTIONS
 t_temp_raw = h.get('temperature_2m', [0])[idx]
 t_temp = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
@@ -704,6 +704,7 @@ vis_sm = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 if vis_sm > 7: vis_disp = "> 7 SM"
 else: vis_disp = f"{vis_sm:.1f} SM"
 
+# 2. THERMAL PROFILE (Required for PBL Fallback & Ceilings)
 thermal_profile = [{'h': sfc_elevation, 't': t_temp, 'td': td, 'spread': sfc_spread, 'rh': rh}]
 for p in ALL_P_LEVELS:
     gh_list = h.get(f'geopotential_height_{p}hPa')
@@ -717,6 +718,37 @@ for p in ALL_P_LEVELS:
             p_td = calc_td(p_t, p_rh)
             if p_gh > thermal_profile[-1]['h']:
                 thermal_profile.append({'h': p_gh, 't': p_t, 'td': p_td, 'spread': p_t - p_td, 'rh': p_rh})
+
+# 3. RESTORED: ADVANCED METRICS 
+sfc_press_raw = h.get('surface_pressure')
+if sfc_press_raw and len(sfc_press_raw) > idx and sfc_press_raw[idx] is not None:
+    sfc_press = float(sfc_press_raw[idx])
+else:
+    sfc_press = 1013.25
+density_alt = calculate_density_altitude(sfc_elevation, t_temp, sfc_press)
+
+pop_raw = h.get('precipitation_probability', [0])
+pop = int(pop_raw[idx]) if pop_raw and len(pop_raw) > idx and pop_raw[idx] is not None else 0
+
+precip_raw = h.get('precipitation', [0])
+precip = float(precip_raw[idx]) if precip_raw and len(precip_raw) > idx and precip_raw[idx] is not None else 0.0
+
+cape_raw = h.get('cape', [0])
+cape = int(cape_raw[idx]) if cape_raw and len(cape_raw) > idx and cape_raw[idx] is not None else 0
+
+pbl_raw = h.get('boundary_layer_height')
+if pbl_raw and len(pbl_raw) > idx and pbl_raw[idx] is not None:
+    pbl_m = float(pbl_raw[idx])
+    pbl_ft = int(pbl_m * 3.28084)
+    pbl_disp = f"{pbl_ft:,} ft AGL"
+else:
+    pbl_calc_agl = 2000
+    if len(thermal_profile) > 1:
+        for k in range(1, len(thermal_profile)):
+            if thermal_profile[k]['t'] >= thermal_profile[k-1]['t']: 
+                pbl_calc_agl = max(0, thermal_profile[k-1]['h'] - sfc_elevation)
+                break
+    pbl_disp = f"{int(pbl_calc_agl):,} ft AGL (Est)"
 
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None:
@@ -785,7 +817,7 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst = (float(raw_gst_list[idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > idx and raw_gst_list[idx] is not None) else w_spd
 gst = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-# EXACT AGL INJECTION FOR TACTICAL STACK
+# 4. EXACT AGL INJECTION FOR TACTICAL STACK
 w_80_raw = h.get('wind_speed_80m', [None])[idx]
 w_120_raw = h.get('wind_speed_120m', [None])[idx]
 d_80_raw = h.get('wind_direction_80m', [None])[idx]
@@ -872,7 +904,6 @@ for alt in [400, 300, 200, 100]:
             s_c = w_120
             d_c_raw = d_120
     else:
-        # Graceful fallback to logarithmic interpolation if AGL fails
         s_c = w_spd + (u_v - w_spd) * (math.log(max(1, alt_m)/10) / math.log(max(1.1, u_h/10)))
         d_c_raw = sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt_m, u_h) / max(0.1, u_h))
         
