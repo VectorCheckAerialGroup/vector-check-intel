@@ -499,7 +499,6 @@ for i in range(nearest_idx, max_idx + 1):
                 if p_gh > profile[-1]['h']:
                     profile.append({'h': p_gh, 't': float(t_list[i]), 'td': calc_td(float(t_list[i]), int(rh_list[i])), 'spread': float(t_list[i]) - calc_td(float(t_list[i]), int(rh_list[i])), 'rh': int(rh_list[i])})
 
-    # CONVECTIVE GATE FIX (Thermodynamic limit applied)
     t_950_list = h.get('temperature_925hPa')
     t_950 = float(t_950_list[i]) if (t_950_list and len(t_950_list) > i and t_950_list[i] is not None) else t_temp
     lapse_rate_temp_drop = t_temp - t_950
@@ -508,11 +507,11 @@ for i in range(nearest_idx, max_idx + 1):
     c_base_agl = 99999 
     c_amt = "CLR"
     
-    # Structural Layer Search MUST run first
     search_profile = profile[1:] if len(profile) > 1 else profile
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
+            # Reverted Filter: Prevents forcing a 0ft OVC unless visibility is < 1.5 SM (Dense Fog)
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
@@ -536,7 +535,6 @@ for i in range(nearest_idx, max_idx + 1):
                 c_amt = "FEW"
                 break
 
-    # Convective Override ONLY applies if truly convective
     if is_convective:
         if c_amt == "CLR":
             ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
@@ -730,7 +728,6 @@ else:
                 frz_disp = f"{int(round(frz_h, -2)):,} ft"
                 break
 
-# CONVECTIVE GATE FIX (Thermodynamic limit applied)
 t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 lapse_rate_temp_drop = t_temp - t_950
@@ -744,6 +741,7 @@ search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_pr
 for layer in search_profile:
     h_agl = max(0, layer['h'] - sfc_elevation)
     if layer['spread'] <= 3.0: 
+        # Reverted Filter: Prevents forcing a 0ft OVC unless visibility is < 1.5 SM (Dense Fog)
         if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
         c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
         c_base_agl = int(round(h_agl, -2))
@@ -807,6 +805,11 @@ sun_pos_display = f"{astro['sun_dir']} | Elev: {astro['sun_alt']}°" if astro['s
 moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro['moon_alt'] > 0 else "NIL"
 
 weather_str = get_weather_element(wx, w_spd)
+
+# Tactical TAF/METAR Override for Un-coded Mist/Fog (Requires 95% RH)
+if wx < 40 and rh >= 95 and vis_sm < 7.0:
+    if vis_sm <= 0.62: weather_str = "FOG (FG)"
+    else: weather_str = "MIST (BR)"
 
 if int(w_spd) == 0: sfc_dir_disp, sfc_spd_disp = "CALM", "0"
 elif int(w_spd) <= 3: sfc_dir_disp, sfc_spd_disp = "VRB", "3"
