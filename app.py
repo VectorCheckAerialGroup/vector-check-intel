@@ -255,7 +255,6 @@ def calc_tactical_visibility(vis_raw_m, rh, w_spd, wx):
         
     if wx >= 50: return vis_sm
 
-    # VAPOR PRESSURE FIX: Relaxed RH constraint from 95% down to 85% to account for Ice Fog / Mist
     if wx in [45, 48] and rh < 85:
         if rh >= 75: return max(vis_sm, 4.0)
         else: return max(vis_sm, 7.0)
@@ -538,14 +537,12 @@ for i in range(nearest_idx, max_idx + 1):
                 c_amt = "FEW"
                 break
 
-    if is_convective:
-        if c_amt == "CLR":
-            ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
-            if ccl_base < 10000:
-                c_base_agl = ccl_base
-                c_amt = "CONV"
-        else:
-            c_amt = "CONV"
+    # UI CONVECTIVE LABEL OVERRIDE (Backend math unaffected)
+    if is_convective and c_amt == "CLR":
+        ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+        if ccl_base < 10000:
+            c_base_agl = ccl_base
+            c_amt = "BKN" if wx >= 80 else "SCT"
 
     alt_msl = sfc_elevation + 400
     alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
@@ -572,7 +569,11 @@ for i in range(nearest_idx, max_idx + 1):
     max_wind_val = max(w_spd, gst)
     if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
-    if c_base_agl < t_ceil: failures.append(f"Ceil ({c_base_agl}ft)")
+    
+    # CEILING DEFINITION FIX: Matrix only fails if the cloud layer is structurally BKN or OVC.
+    if c_base_agl < t_ceil and c_amt in ["BKN", "OVC"]: 
+        failures.append(f"Ceil ({c_base_agl}ft)")
+        
     if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
     if hazard_lvl(ice) > hazard_lvl(t_ice): failures.append(f"Ice ({ice})")
     
@@ -805,14 +806,12 @@ if c_amt == "CLR":
             c_amt = "FEW"
             break
 
-if is_convective:
-    if c_amt == "CLR":
-        ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
-        if ccl_base < 10000:
-            c_base_agl = ccl_base
-            c_amt = "CONV"
-    else:
-        c_amt = "CONV"
+# UI CONVECTIVE LABEL OVERRIDE (Backend math unaffected)
+if is_convective and c_amt == "CLR":
+    ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
+    if ccl_base < 10000:
+        c_base_agl = ccl_base
+        c_amt = "BKN" if wx >= 80 else "SCT"
 
 c_base_disp = f"{c_base_agl:,} ft {c_amt}" if c_amt != "CLR" else "CLR"
 
@@ -862,7 +861,6 @@ moon_pos_display = f"{astro['moon_dir']} | Elev: {astro['moon_alt']}°" if astro
 
 weather_str = get_weather_element(wx, w_spd)
 
-# RECALIBRATED THERMODYNAMIC OVERRIDE FOR WINTER MIST/FOG
 if wx in [45, 48]:
     if rh < 85:
         weather_str = "HAZE (HZ)" if rh >= 75 else "CLEAR"
