@@ -507,18 +507,22 @@ for i in range(nearest_idx, max_idx + 1):
     lapse_rate_temp_drop = t_temp - t_950
     is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
-    # DEEP MOISTURE PRECIPITATION VETO
+    # REBUILT DEEP MOISTURE PRECIPITATION VETO
+    precip_raw_top = h.get('precipitation', [0])
+    precip_val_top = float(precip_raw_top[i]) if precip_raw_top and len(precip_raw_top) > i and precip_raw_top[i] is not None else 0.0
+
     cb_v = None
     ct_v = None
     for layer in profile:
-        if layer['spread'] <= 3.0:
+        if layer['spread'] <= 4.0: # Loosened slightly to account for mid-level dry slots in deep rain
             if cb_v is None: cb_v = layer['h']
             ct_v = layer['h']
     c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
-    if 50 <= wx <= 59 and (c_depth >= 4000 or is_convective):
-        if wx in [51, 53]: wx = 61 
-        elif wx == 55: wx = 63 
+    # Overrides Drizzle (50-59) to Rain (61-67) if depth >= 2500ft OR actual precip volume >= 0.5mm
+    if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
+        if wx in [50, 51, 52, 53]: wx = 61 
+        elif wx in [54, 55]: wx = 63 
         elif wx == 56: wx = 66 
         elif wx == 57: wx = 67 
         
@@ -787,18 +791,18 @@ t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_95
 lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
 
-# DEEP MOISTURE PRECIPITATION VETO
+# REBUILT DEEP MOISTURE PRECIPITATION VETO
 cb_v = None
 ct_v = None
 for layer in thermal_profile:
-    if layer['spread'] <= 3.0:
+    if layer['spread'] <= 4.0:
         if cb_v is None: cb_v = layer['h']
         ct_v = layer['h']
 c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
-if 50 <= wx <= 59 and (c_depth >= 4000 or is_convective):
-    if wx in [51, 53]: wx = 61 
-    elif wx == 55: wx = 63 
+if 50 <= wx <= 59 and (c_depth >= 2500 or precip >= 0.5 or is_convective):
+    if wx in [50, 51, 52, 53]: wx = 61 
+    elif wx in [54, 55]: wx = 63 
     elif wx == 56: wx = 66 
     elif wx == 57: wx = 67 
 
@@ -833,7 +837,7 @@ if c_amt == "CLR":
             c_amt = "FEW"
             break
 
-# UI CONVECTIVE LABEL OVERRIDE (Backend math unaffected)
+# UI CONVECTIVE LABEL OVERRIDE
 if is_convective and c_amt == "CLR":
     ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
     if ccl_base < 10000:
