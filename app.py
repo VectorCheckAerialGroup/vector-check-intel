@@ -507,19 +507,17 @@ for i in range(nearest_idx, max_idx + 1):
     lapse_rate_temp_drop = t_temp - t_950
     is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
-    # REBUILT DEEP MOISTURE PRECIPITATION VETO
     precip_raw_top = h.get('precipitation', [0])
     precip_val_top = float(precip_raw_top[i]) if precip_raw_top and len(precip_raw_top) > i and precip_raw_top[i] is not None else 0.0
 
     cb_v = None
     ct_v = None
     for layer in profile:
-        if layer['spread'] <= 4.0: # Loosened slightly to account for mid-level dry slots in deep rain
+        if layer['spread'] <= 4.0: 
             if cb_v is None: cb_v = layer['h']
             ct_v = layer['h']
     c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
-    # Overrides Drizzle (50-59) to Rain (61-67) if depth >= 2500ft OR actual precip volume >= 0.5mm
     if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
         if wx in [50, 51, 52, 53]: wx = 61 
         elif wx in [54, 55]: wx = 63 
@@ -534,8 +532,14 @@ for i in range(nearest_idx, max_idx + 1):
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 3.0: 
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+            
             c_base_agl = int(round(h_agl, -2))
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+            
+            # CEILING FLOOR GATE
+            if c_base_agl == 0:
+                if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                else: c_amt = "VV"
             break
             
     if c_amt == "CLR":
@@ -545,6 +549,7 @@ for i in range(nearest_idx, max_idx + 1):
                 if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                 c_base_agl = int(round(h_agl, -2))
                 c_amt = "SCT"
+                if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
                 break
                 
     if c_amt == "CLR":
@@ -554,6 +559,7 @@ for i in range(nearest_idx, max_idx + 1):
                 if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                 c_base_agl = int(round(h_agl, -2))
                 c_amt = "FEW"
+                if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
                 break
 
     if is_convective and c_amt == "CLR":
@@ -587,7 +593,7 @@ for i in range(nearest_idx, max_idx + 1):
     max_wind_val = max(w_spd, gst)
     if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
-    if c_base_agl < t_ceil and c_amt in ["BKN", "OVC"]: 
+    if c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]: 
         failures.append(f"Ceil ({c_base_agl}ft)")
         
     if hazard_lvl(turb) > hazard_lvl(t_turb): failures.append(f"Turb ({turb})")
@@ -815,8 +821,14 @@ for layer in search_profile:
     h_agl = max(0, layer['h'] - sfc_elevation)
     if layer['spread'] <= 3.0: 
         if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
-        c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+        
         c_base_agl = int(round(h_agl, -2))
+        c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
+        
+        # CEILING FLOOR GATE
+        if c_base_agl == 0:
+            if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+            else: c_amt = "VV"
         break
         
 if c_amt == "CLR":
@@ -826,6 +838,7 @@ if c_amt == "CLR":
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt = "SCT"
+            if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
             break
             
 if c_amt == "CLR":
@@ -835,6 +848,7 @@ if c_amt == "CLR":
             if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt = "FEW"
+            if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
             break
 
 # UI CONVECTIVE LABEL OVERRIDE
