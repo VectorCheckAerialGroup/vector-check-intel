@@ -507,6 +507,21 @@ for i in range(nearest_idx, max_idx + 1):
     lapse_rate_temp_drop = t_temp - t_950
     is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
+    # DEEP MOISTURE PRECIPITATION VETO
+    cb_v = None
+    ct_v = None
+    for layer in profile:
+        if layer['spread'] <= 3.0:
+            if cb_v is None: cb_v = layer['h']
+            ct_v = layer['h']
+    c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
+
+    if 50 <= wx <= 59 and (c_depth >= 4000 or is_convective):
+        if wx in [51, 53]: wx = 61 
+        elif wx == 55: wx = 63 
+        elif wx == 56: wx = 66 
+        elif wx == 57: wx = 67 
+        
     c_base_agl = 99999 
     c_amt = "CLR"
     
@@ -537,7 +552,6 @@ for i in range(nearest_idx, max_idx + 1):
                 c_amt = "FEW"
                 break
 
-    # UI CONVECTIVE LABEL OVERRIDE (Backend math unaffected)
     if is_convective and c_amt == "CLR":
         ccl_base = int(round(max(0, sfc_spread * CONVECTIVE_CCL_MULTIPLIER), -2))
         if ccl_base < 10000:
@@ -569,8 +583,6 @@ for i in range(nearest_idx, max_idx + 1):
     max_wind_val = max(w_spd, gst)
     if max_wind_val > t_wind: failures.append(f"Wind ({int(max_wind_val)}KT)")
     if vis_sm < t_vis: failures.append(f"Vis ({vis_sm:.1f}SM)")
-    
-    # CEILING DEFINITION FIX: Matrix only fails if the cloud layer is structurally BKN or OVC.
     if c_base_agl < t_ceil and c_amt in ["BKN", "OVC"]: 
         failures.append(f"Ceil ({c_base_agl}ft)")
         
@@ -774,6 +786,21 @@ t_950_list = h.get('temperature_925hPa')
 t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_950_list[idx] is not None) else t_temp
 lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
+
+# DEEP MOISTURE PRECIPITATION VETO
+cb_v = None
+ct_v = None
+for layer in thermal_profile:
+    if layer['spread'] <= 3.0:
+        if cb_v is None: cb_v = layer['h']
+        ct_v = layer['h']
+c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
+
+if 50 <= wx <= 59 and (c_depth >= 4000 or is_convective):
+    if wx in [51, 53]: wx = 61 
+    elif wx == 55: wx = 63 
+    elif wx == 56: wx = 66 
+    elif wx == 57: wx = 67 
 
 c_base_agl = 99999
 c_amt = "CLR"
