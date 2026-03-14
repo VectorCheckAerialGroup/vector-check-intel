@@ -507,6 +507,7 @@ for i in range(nearest_idx, max_idx + 1):
     lapse_rate_temp_drop = t_temp - t_950
     is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
     
+    # THERMAL PHASE GATE (PRECIPITATION VETO)
     precip_raw_top = h.get('precipitation', [0])
     precip_val_top = float(precip_raw_top[i]) if precip_raw_top and len(precip_raw_top) > i and precip_raw_top[i] is not None else 0.0
 
@@ -519,10 +520,19 @@ for i in range(nearest_idx, max_idx + 1):
     c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
     if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
-        if wx in [50, 51, 52, 53]: wx = 61 
-        elif wx in [54, 55]: wx = 63 
-        elif wx == 56: wx = 66 
-        elif wx == 57: wx = 67 
+        frz_raw_list_mat = h.get('freezing_level_height')
+        frz_raw_mat = float(frz_raw_list_mat[i]) if frz_raw_list_mat and len(frz_raw_list_mat) > i and frz_raw_list_mat[i] is not None else 0.0
+        frz_agl_mat = max(0, (frz_raw_mat * 3.28084) - sfc_elevation)
+
+        warm_nose = any(layer['t'] > 0 for layer in profile[1:])
+        is_heavy = wx in [54, 55, 57]
+        
+        if t_temp <= 0:
+            wx = (67 if is_heavy else 66) if warm_nose else (73 if is_heavy else 71)
+        elif 0 < t_temp <= 2.5 and frz_agl_mat < 1500:
+            wx = 69 if is_heavy else 68
+        else:
+            wx = 63 if is_heavy else 61
         
     c_base_agl = 99999 
     c_amt = "CLR"
@@ -536,7 +546,6 @@ for i in range(nearest_idx, max_idx + 1):
             c_base_agl = int(round(h_agl, -2))
             c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
             
-            # CEILING FLOOR GATE
             if c_base_agl == 0:
                 if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
                 else: c_amt = "VV"
@@ -797,7 +806,7 @@ t_950 = float(t_950_list[idx]) if (t_950_list and len(t_950_list) > idx and t_95
 lapse_rate_temp_drop = t_temp - t_950
 is_convective = (wx >= 80) or (lapse_rate_temp_drop >= 7.5 and t_temp >= 10.0)
 
-# REBUILT DEEP MOISTURE PRECIPITATION VETO
+# THERMAL PHASE GATE (PRECIPITATION VETO)
 cb_v = None
 ct_v = None
 for layer in thermal_profile:
@@ -807,10 +816,18 @@ for layer in thermal_profile:
 c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
 if 50 <= wx <= 59 and (c_depth >= 2500 or precip >= 0.5 or is_convective):
-    if wx in [50, 51, 52, 53]: wx = 61 
-    elif wx in [54, 55]: wx = 63 
-    elif wx == 56: wx = 66 
-    elif wx == 57: wx = 67 
+    frz_raw_sh = float(frz_raw_list[idx]) if frz_raw_list and len(frz_raw_list) > idx and frz_raw_list[idx] is not None else 0.0
+    frz_agl_sh = max(0, (frz_raw_sh * 3.28084) - sfc_elevation)
+
+    warm_nose = any(layer['t'] > 0 for layer in thermal_profile[1:])
+    is_heavy = wx in [54, 55, 57]
+    
+    if t_temp <= 0:
+        wx = (67 if is_heavy else 66) if warm_nose else (73 if is_heavy else 71)
+    elif 0 < t_temp <= 2.5 and frz_agl_sh < 1500:
+        wx = 69 if is_heavy else 68
+    else:
+        wx = 63 if is_heavy else 61
 
 c_base_agl = 99999
 c_amt = "CLR"
@@ -825,7 +842,6 @@ for layer in search_profile:
         c_base_agl = int(round(h_agl, -2))
         c_amt = "OVC" if layer['spread'] <= 1.0 else "BKN"
         
-        # CEILING FLOOR GATE
         if c_base_agl == 0:
             if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
             else: c_amt = "VV"
