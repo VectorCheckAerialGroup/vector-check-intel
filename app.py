@@ -1988,255 +1988,258 @@ else:
     _climate_for_ens = climate if not climate.get("error") else None
     _ens_brief = generate_briefing(_ens_models, _ens_blocks, _ens_risks, _climate_for_ens)
 
-    # Two-column layout: ensemble consensus on the left, performance scorecard on the right
-    _ma_left, _ma_right = st.columns([5, 4])
+    # =========================================================================
+    # SECTION 1 — MODEL ANALYSIS (Forecast View)
+    # What the models are predicting; where they agree and disagree.
+    # =========================================================================
 
-    with _ma_left:
-        # --- Header: model count + confidence badge ---
-        _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
-        _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
+    _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
+    _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
+
+    # Header strip: model count and overall confidence badge
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">'
+        f'<span style="font-size:0.82rem;color:#9CA3AF;">'
+        f'{_ens_brief.model_count}/4 models reporting: '
+        f'<span style="color:#D1D5DB;font-weight:500;">{", ".join(_ens_brief.models_used)}</span></span>'
+        f'<span style="font-size:0.72rem;color:{_conf_clr};font-weight:600;'
+        f'border:1px solid {_conf_clr};border-radius:3px;padding:3px 10px;">'
+        f'{_ens_brief.overall_confidence} CONFIDENCE</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Plain-English consensus paragraph
+    if _ens_brief.consensus_summary:
+        st.markdown(
+            f'<div style="font-size:0.88rem;color:#D1D5DB;line-height:1.55;'
+            f'margin-bottom:14px;max-width:880px;">'
+            f'{_ens_brief.consensus_summary}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # 12-hour block table — full width, generous column sizing
+    _blk_grid = "180px 110px 90px 80px 110px 80px 70px"
+    _blk_header = (
+        f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;margin-bottom:1px;max-width:780px;">'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;letter-spacing:0.4px;">Block</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Wind</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Spread</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Gust</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Temp</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Precip</div>'
+        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Conf</div>'
+        f'</div>'
+    )
+    st.markdown(_blk_header, unsafe_allow_html=True)
+
+    for _b in _ens["blocks"]:
+        _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
+        _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
+        _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
+        _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
+
+        _blk_row = (
+            f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;max-width:780px;">'
+            f'<div style="font-size:0.82rem;color:#D1D5DB;padding:5px 8px;background:#161A1F;">{_b["block_label"]}</div>'
+            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
+            f'<div style="font-size:0.82rem;color:{_w_spr_clr};padding:5px 8px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
+            f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
+            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["gust_max"]:.0f} kt</div>'
+            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+            f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
+            f'<div style="font-size:0.82rem;color:{_pp_clr};padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
+            f'<div style="font-size:0.74rem;color:{_conf_badge_clr};padding:5px 8px;background:#161A1F;font-weight:600;">'
+            f'{_b["confidence"][:3]}</div>'
+            f'</div>'
+        )
+        st.markdown(_blk_row, unsafe_allow_html=True)
+
+    # Wind + precip summary
+    _summary_parts = []
+    if _ens_brief.wind_summary:
+        _summary_parts.append(_ens_brief.wind_summary)
+    if _ens_brief.precip_summary:
+        _summary_parts.append(_ens_brief.precip_summary)
+    if _summary_parts:
+        st.markdown(
+            f'<div style="font-size:0.82rem;color:#9CA3AF;line-height:1.55;margin-top:12px;max-width:880px;">'
+            f'{"<br>".join(_summary_parts)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Risk windows
+    if _ens["risks"]:
+        st.markdown(
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-top:16px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
+            unsafe_allow_html=True,
+        )
+        for _r in _ens["risks"]:
+            _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
+            _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
+            st.markdown(
+                f'<div style="font-size:0.82rem;color:{_r_clr};margin:4px 0;display:flex;align-items:center;gap:8px;max-width:880px;">'
+                f'<span style="font-size:0.7rem;">{_r_icon}</span>'
+                f'<span style="font-weight:500;">{_r["label"]}</span>'
+                f'<span style="color:#9CA3AF;">{_r["detail"]}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Climate anomalies
+    if _ens_brief.anomaly_flags:
+        st.markdown(
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-top:14px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
+            unsafe_allow_html=True,
+        )
+        for _af in _ens_brief.anomaly_flags[:5]:
+            st.markdown(
+                f'<div style="font-size:0.82rem;color:#E58E26;margin:3px 0;max-width:880px;">\u25cf {_af}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Confidence footer
+    if _ens_brief.confidence_summary:
+        st.markdown(
+            f'<div style="font-size:0.74rem;color:#6B7280;margin-top:14px;line-height:1.55;max-width:880px;">'
+            f'{_ens_brief.confidence_summary}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # =========================================================================
+    # SECTION 2 — MODEL PERFORMANCE (Retrospective)
+    # How each model has scored against actual observations in the last 24h.
+    # =========================================================================
+
+    st.subheader("Model Performance")
+    st.caption("Trailing 24-hour MAE of each model against the surface observation network.")
+
+    @st.cache_data(ttl=1800, show_spinner="Scoring models against actuals…")
+    def _fetch_scorecard_cached(sc_lat: float, sc_lon: float, sc_icao: str) -> dict:
+        """Fetches trailing 24h performance scorecard. Cached 30 min."""
+        sb = _get_supabase()
+        # Optional Synoptic API token (falls back to demotoken if absent).
+        # Configure via SECRETS_TOML:  [synoptic] \n token = "..."
+        try:
+            synoptic_tok = st.secrets["synoptic"]["token"]
+        except Exception:
+            synoptic_tok = None
+        return compute_performance_scorecard(
+            sc_lat, sc_lon, sc_icao,
+            sb_client=sb,
+            synoptic_token=synoptic_tok,
+            mesonet_radius_km=75.0,
+        )
+
+    _sc = _fetch_scorecard_cached(lat, lon, icao)
+
+    if not _sc.get("has_data"):
+        st.markdown(
+            f'<div style="font-size:0.85rem;color:#9CA3AF;line-height:1.5;">'
+            f'{_sc.get("message", "No surface observations available for scoring.")}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # --- Window + source summary block ---
+        _ws = _sc.get("window_start_utc")
+        _we = _sc.get("window_end_utc")
+        _tf_str = "trailing 24 hours"
+        if _ws and _we:
+            try:
+                _ws_local = _ws.astimezone(local_tz)
+                _we_local = _we.astimezone(local_tz)
+                _tz_abbr = _ws_local.strftime('%Z') or 'UTC'
+                _tf_str = (
+                    f"{_ws_local.strftime('%d %b %H:%M')} \u2192 "
+                    f"{_we_local.strftime('%d %b %H:%M')} {_tz_abbr}"
+                )
+            except Exception:
+                pass
+
+        # Source summary — break out METAR / MADIS / Kestrel
+        _metar_n = _sc.get("metar_count", 0)
+        _metar_stns = _sc.get("metar_stations", []) or []
+        _madis_total = _sc.get("mesonet_count", 0)
+        _cwop_n = _sc.get("cwop_count", 0)
+        _madis_stns = _sc.get("mesonet_stations", []) or []
+        _kestrel_n = _sc.get("kestrel_count", 0)
+
+        _src_chips = []
+        if _metar_n > 0:
+            _stn_list = ", ".join(_metar_stns[:8])
+            if len(_metar_stns) > 8:
+                _stn_list += f" +{len(_metar_stns) - 8} more"
+            _src_chips.append(
+                f'<span title="{_stn_list}" style="background:#1E2530;border:1px solid #2A3038;'
+                f'border-radius:3px;padding:3px 9px;color:#D1D5DB;">'
+                f'<b>{_metar_n}</b> METAR obs from <b>{len(_metar_stns)}</b> stations</span>'
+            )
+        if _madis_total > 0:
+            _madis_label = f'<b>{_madis_total}</b> MADIS obs from <b>{len(_madis_stns)}</b> stations'
+            if _cwop_n > 0:
+                _madis_label += f' ({_cwop_n} CWOP)'
+            _src_chips.append(
+                f'<span style="background:#1E2530;border:1px solid #2A3038;'
+                f'border-radius:3px;padding:3px 9px;color:#D1D5DB;">{_madis_label}</span>'
+            )
+        if _kestrel_n > 0:
+            _src_chips.append(
+                f'<span style="background:#1E2530;border:1px solid #2A3038;'
+                f'border-radius:3px;padding:3px 9px;color:#D1D5DB;">'
+                f'<b>{_kestrel_n}</b> Kestrel sessions</span>'
+            )
+
+        _best = _sc.get("best_performer")
+        _best_chip = ""
+        if _best:
+            _best_chip = (
+                f'<span style="background:rgba(74,222,128,0.12);border:1px solid #4ade80;'
+                f'border-radius:3px;padding:3px 9px;color:#4ade80;font-weight:600;">'
+                f'Best: {_best}</span>'
+            )
 
         st.markdown(
-            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">'
-            f'<span style="font-size:0.78rem;color:#9CA3AF;">'
-            f'{_ens_brief.model_count}/4 models reporting: {", ".join(_ens_brief.models_used)}</span>'
-            f'<span style="font-size:0.72rem;color:{_conf_clr};font-weight:600;'
-            f'border:1px solid {_conf_clr};border-radius:3px;padding:2px 8px;">'
-            f'{_ens_brief.overall_confidence} CONFIDENCE</span>'
+            f'<div style="font-size:0.78rem;color:#9CA3AF;margin-bottom:6px;">'
+            f'<span style="color:#D1D5DB;font-weight:500;">Window:</span> {_tf_str}'
+            f'</div>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:8px;font-size:0.74rem;'
+            f'margin-bottom:14px;">'
+            f'{"".join(_src_chips)} {_best_chip}'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-        # --- Consensus text ---
-        if _ens_brief.consensus_summary:
+        # --- Two-column layout: scorecard table left, trend chart always-visible right ---
+        _perf_left, _perf_right = st.columns([1, 1])
+
+        with _perf_left:
             st.markdown(
-                f'<div style="font-size:0.82rem;color:#D1D5DB;line-height:1.5;margin-bottom:10px;">'
-                f'{_ens_brief.consensus_summary}</div>',
+                '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+                'margin-bottom:8px;font-weight:500;">Mean absolute error by variable</div>',
                 unsafe_allow_html=True,
             )
 
-        # --- 12-hour block table ---
-        _blk_header = (
-            '<div style="display:grid;grid-template-columns:130px 90px 75px 65px 85px 65px 60px;gap:1px;margin-bottom:1px;">'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.4px;">Block</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Wind</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Spread</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Gust</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Temp</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Precip</div>'
-            '<div style="font-size:0.65rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;">Conf</div>'
-            '</div>'
-        )
-        st.markdown(_blk_header, unsafe_allow_html=True)
-
-        for _b in _ens["blocks"]:
-            _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
-            _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
-            _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
-            _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
-
-            _blk_row = (
-                f'<div style="display:grid;grid-template-columns:130px 90px 75px 65px 85px 65px 60px;gap:1px;">'
-                f'<div style="font-size:0.78rem;color:#D1D5DB;padding:3px 6px;background:#161A1F;">{_b["block_label"]}</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:{_w_spr_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
-                f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["gust_max"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
-                f'<div style="font-size:0.78rem;color:{_pp_clr};padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
-                f'<div style="font-size:0.72rem;color:{_conf_badge_clr};padding:3px 6px;background:#161A1F;font-weight:600;">'
-                f'{_b["confidence"][:3]}</div>'
-                f'</div>'
-            )
-            st.markdown(_blk_row, unsafe_allow_html=True)
-
-        # --- Wind + Precip summaries ---
-        _summary_parts = []
-        if _ens_brief.wind_summary:
-            _summary_parts.append(_ens_brief.wind_summary)
-        if _ens_brief.precip_summary:
-            _summary_parts.append(_ens_brief.precip_summary)
-        if _summary_parts:
-            st.markdown(
-                f'<div style="font-size:0.78rem;color:#9CA3AF;line-height:1.5;margin-top:10px;">'
-                f'{"<br>".join(_summary_parts)}</div>',
-                unsafe_allow_html=True,
-            )
-
-        # --- Risk Windows ---
-        if _ens["risks"]:
-            st.markdown(
-                '<div style="font-size:0.72rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-                'margin-top:14px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
-                unsafe_allow_html=True,
-            )
-            for _r in _ens["risks"]:
-                _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
-                _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
-                st.markdown(
-                    f'<div style="font-size:0.78rem;color:{_r_clr};margin:3px 0;display:flex;align-items:center;gap:6px;">'
-                    f'<span style="font-size:0.6rem;">{_r_icon}</span>'
-                    f'<span style="font-weight:500;">{_r["label"]}</span>'
-                    f'<span style="color:#9CA3AF;">{_r["detail"]}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-        # --- Anomaly flags from climate context ---
-        if _ens_brief.anomaly_flags:
-            st.markdown(
-                '<div style="font-size:0.72rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-                'margin-top:12px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
-                unsafe_allow_html=True,
-            )
-            for _af in _ens_brief.anomaly_flags[:5]:
-                st.markdown(
-                    f'<div style="font-size:0.78rem;color:#E58E26;margin:2px 0;">\u25cf {_af}</div>',
-                    unsafe_allow_html=True,
-                )
-
-        # --- Confidence footer ---
-        if _ens_brief.confidence_summary:
-            st.markdown(
-                f'<div style="font-size:0.72rem;color:#6B7280;margin-top:12px;line-height:1.5;">'
-                f'{_ens_brief.confidence_summary}</div>',
-                unsafe_allow_html=True,
-            )
-
-    # =============================================================================
-    # RIGHT COLUMN — Model Performance Scorecard (trailing 24h)
-    # =============================================================================
-    with _ma_right:
-        @st.cache_data(ttl=1800, show_spinner=False)
-        def _fetch_scorecard_cached(sc_lat: float, sc_lon: float, sc_icao: str) -> dict:
-            """Fetches trailing 24h performance scorecard. Cached 30 min."""
-            sb = _get_supabase()
-            # Optional Synoptic API token (falls back to demotoken if absent).
-            # Configure via SECRETS_TOML:  [synoptic] \n token = "..."
-            try:
-                synoptic_tok = st.secrets["synoptic"]["token"]
-            except Exception:
-                synoptic_tok = None
-            return compute_performance_scorecard(
-                sc_lat, sc_lon, sc_icao,
-                sb_client=sb,
-                synoptic_token=synoptic_tok,
-                mesonet_radius_km=75.0,
-            )
-
-        _sc = _fetch_scorecard_cached(lat, lon, icao)
-
-        st.markdown(
-            '<div style="font-size:0.72rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-bottom:8px;font-weight:500;">Performance vs Actuals</div>',
-            unsafe_allow_html=True,
-        )
-
-        if not _sc.get("has_data"):
-            st.markdown(
-                f'<div style="font-size:0.78rem;color:#9CA3AF;line-height:1.5;">'
-                f'{_sc.get("message", "No observations available.")}</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            # Explicit timeframe — display the actual paired-observation window
-            # converted to the operator's local timezone for clarity.
-            _ws = _sc.get("window_start_utc")
-            _we = _sc.get("window_end_utc")
-            _tf_str = "trailing 24 hours"
-            if _ws and _we:
-                try:
-                    _ws_local = _ws.astimezone(local_tz)
-                    _we_local = _we.astimezone(local_tz)
-                    _tz_abbr = _ws_local.strftime('%Z') or 'UTC'
-                    _tf_str = (
-                        f"{_ws_local.strftime('%d %b %H:%M')} \u2192 "
-                        f"{_we_local.strftime('%d %b %H:%M')} {_tz_abbr}"
-                    )
-                except Exception:
-                    pass
-
-            # Source summary line — break out METAR / MADIS / CWOP / Kestrel
-            _src_parts = []
-            if _sc["metar_count"] > 0:
-                _src_parts.append(f'{_sc["metar_count"]} METAR')
-
-            _madis_total = _sc.get("mesonet_count", 0)
-            _cwop_n = _sc.get("cwop_count", 0)
-            _madis_pro = max(0, _madis_total - _cwop_n)
-            _madis_stations = len(_sc.get("mesonet_stations", []))
-            if _madis_total > 0:
-                _madis_str = f'{_madis_total} MADIS ({_madis_stations} stns'
-                if _cwop_n > 0:
-                    _madis_str += f', {_cwop_n} CWOP'
-                _madis_str += ')'
-                _src_parts.append(_madis_str)
-
-            if _sc["kestrel_count"] > 0:
-                _src_parts.append(f'{_sc["kestrel_count"]} Kestrel')
-            _src_str = " \u00b7 ".join(_src_parts) if _src_parts else "no observations"
-
-            _best = _sc.get("best_performer")
-            _best_html = ""
-            if _best:
-                _best_html = (
-                    f'<span style="font-size:0.7rem;color:#4ade80;font-weight:600;'
-                    f'margin-left:8px;">Best: {_best}</span>'
-                )
-
-            st.markdown(
-                f'<div style="font-size:0.72rem;color:#D1D5DB;margin-bottom:4px;font-weight:500;">'
-                f'Window: {_tf_str}</div>'
-                f'<div style="font-size:0.7rem;color:#9CA3AF;margin-bottom:10px;">'
-                f'{_src_str}{_best_html}</div>',
-                unsafe_allow_html=True,
-            )
-
-            # Table layout: model name + 7 metric columns + sparkline trend
-            # Total width ~ 64 + 7*40 + 80 = 424px
-            _grid_template = "64px 40px 40px 40px 40px 40px 40px 40px 80px"
+            _grid_template = "70px 50px 50px 50px 50px 45px 55px 50px"
 
             _sc_header = (
                 f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;margin-bottom:1px;">'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;letter-spacing:0.3px;">Model</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Wind</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Dir</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Gust</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Temp</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">RH</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Press</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Vis</div>'
-                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Trend</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;letter-spacing:0.3px;">Model</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Wind</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Dir</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Gust</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Temp</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">RH</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Press</div>'
+                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Vis</div>'
                 f'</div>'
             )
             st.markdown(_sc_header, unsafe_allow_html=True)
-
-            # Unicode sparkline blocks for inline trend rendering
-            _SPARK_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-
-            def _sparkline(values, val_min=None, val_max=None) -> str:
-                """Render a list of numbers as a Unicode block-character sparkline.
-                None values become spaces, preserving time alignment."""
-                clean = [v for v in values if v is not None]
-                if not clean:
-                    return "\u2014"
-                lo = val_min if val_min is not None else min(clean)
-                hi = val_max if val_max is not None else max(clean)
-                if hi - lo < 1e-9:
-                    # Flat trend — show a row of mid-height blocks
-                    return _SPARK_BLOCKS[3] * len(values)
-                out = []
-                for v in values:
-                    if v is None:
-                        out.append(" ")
-                    else:
-                        idx = int(round((v - lo) / (hi - lo) * (len(_SPARK_BLOCKS) - 1)))
-                        idx = max(0, min(len(_SPARK_BLOCKS) - 1, idx))
-                        out.append(_SPARK_BLOCKS[idx])
-                return "".join(out)
 
             for _m in _sc["models"]:
                 _name = _m["name"]
@@ -2245,11 +2248,14 @@ else:
                 _name_style = "color:#4ade80;font-weight:600;" if _is_best else "color:#D1D5DB;"
 
                 if _m["status"] == "UNAVAILABLE":
-                    _empty_cell = f'<div style="font-size:0.7rem;color:#6B7280;padding:3px 4px;background:{_row_bg};text-align:center;">\u2014</div>'
+                    _empty_cell = (
+                        f'<div style="font-size:0.78rem;color:#6B7280;padding:5px 6px;'
+                        f'background:{_row_bg};text-align:center;">\u2014</div>'
+                    )
                     _sc_row = (
                         f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
-                        f'<div style="font-size:0.76rem;{_name_style}padding:3px 4px;background:{_row_bg};">{_name}</div>'
-                        f'{_empty_cell * 8}'
+                        f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_name}</div>'
+                        f'{_empty_cell * 7}'
                         f'</div>'
                     )
                     st.markdown(_sc_row, unsafe_allow_html=True)
@@ -2271,30 +2277,16 @@ else:
                 _p_clr, _p_val = _cell(_m["pressure_mae_hpa"], grade_pressure_mae)
                 _v_clr, _v_val = _cell(_m["vis_mae_sm"], grade_vis_mae)
 
-                # Wind-MAE rolling trend sparkline (the most operationally meaningful var)
-                _rolling = _m.get("rolling") or {}
-                _wind_trend = _rolling.get("wind_mae_kt", []) or []
-                _spark = _sparkline(_wind_trend)
-                # Color the sparkline based on the model's overall wind grade
-                _spark_clr = _w_clr
-
                 def _datacell(clr, val, weight="400"):
                     return (
-                        f'<div style="font-size:0.74rem;color:{clr};padding:3px 4px;'
+                        f'<div style="font-size:0.82rem;color:{clr};padding:5px 6px;'
                         f'background:{_row_bg};font-variant-numeric:tabular-nums;'
                         f'font-weight:{weight};text-align:center;">{val}</div>'
                     )
 
-                _spark_cell = (
-                    f'<div style="font-size:0.85rem;color:{_spark_clr};padding:0px 4px;'
-                    f'background:{_row_bg};text-align:center;line-height:1.1;'
-                    f'letter-spacing:-1px;font-family:monospace;" '
-                    f'title="6h-window wind MAE trend across last 24h">{_spark}</div>'
-                )
-
                 _sc_row = (
                     f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
-                    f'<div style="font-size:0.76rem;{_name_style}padding:3px 4px;background:{_row_bg};">{_name}</div>'
+                    f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_name}</div>'
                     f'{_datacell(_w_clr, _w_val, "500")}'
                     f'{_datacell(_d_clr, _d_val)}'
                     f'{_datacell(_g_clr, _g_val)}'
@@ -2302,53 +2294,56 @@ else:
                     f'{_datacell(_rh_clr, _rh_val)}'
                     f'{_datacell(_p_clr, _p_val)}'
                     f'{_datacell(_v_clr, _v_val)}'
-                    f'{_spark_cell}'
                     f'</div>'
                 )
                 st.markdown(_sc_row, unsafe_allow_html=True)
 
-            # Legend with units callout
+            # Legend
             st.markdown(
-                '<div style="font-size:0.62rem;color:#6B7280;margin-top:8px;line-height:1.4;">'
+                '<div style="font-size:0.66rem;color:#6B7280;margin-top:10px;line-height:1.5;">'
                 'MAE units: Wind/Gust kt \u00b7 Dir \u00b0 \u00b7 Temp \u00b0C \u00b7 '
                 'RH % \u00b7 Press hPa \u00b7 Vis sm. '
                 '<span style="color:#4ade80;">green</span> = within tolerance, '
                 '<span style="color:#E58E26;">amber</span> = drifting, '
-                '<span style="color:#ff6b4a;">red</span> = systematically off. '
-                'Direction excludes calm/light winds. Trend = 6h-window wind MAE.'
+                '<span style="color:#ff6b4a;">red</span> = systematically off.'
                 '</div>',
                 unsafe_allow_html=True,
             )
 
-    # --- Full trend chart (full width below the two-column block) ---
-    if _ens.get("error") is None and _sc.get("has_data"):
-        with st.expander("Expand 24h MAE Trend Chart", expanded=False):
+        with _perf_right:
+            st.markdown(
+                '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+                'margin-bottom:8px;font-weight:500;">Error trend (6h rolling MAE)</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Variable selector — controls which variable is plotted
             _trend_var_options = {
-                "Wind speed (kt)":        ("wind_mae_kt", "kt"),
-                "Wind direction (\u00b0)": ("dir_mae_deg", "\u00b0"),
-                "Gusts (kt)":             ("gust_mae_kt", "kt"),
-                "Temperature (\u00b0C)":  ("temp_mae_c", "\u00b0C"),
-                "RH (%)":                 ("rh_mae_pct", "%"),
-                "Pressure (hPa)":         ("pressure_mae_hpa", "hPa"),
-                "Visibility (sm)":        ("vis_mae_sm", "sm"),
+                "Wind speed":        ("wind_mae_kt", "kt"),
+                "Wind direction":    ("dir_mae_deg", "\u00b0"),
+                "Gusts":             ("gust_mae_kt", "kt"),
+                "Temperature":       ("temp_mae_c", "\u00b0C"),
+                "RH":                ("rh_mae_pct", "%"),
+                "Pressure":          ("pressure_mae_hpa", "hPa"),
+                "Visibility":        ("vis_mae_sm", "sm"),
             }
             _selected_var = st.selectbox(
                 "Variable",
                 options=list(_trend_var_options.keys()),
                 index=0,
                 key="model_trend_variable",
+                label_visibility="collapsed",
             )
             _var_key, _var_unit = _trend_var_options[_selected_var]
 
-            # Build a Plotly figure with one line per model
             _model_colors = {
-                "HRDPS":     "#60a5fa",
-                "ICON-EU":   "#60a5fa",
-                "ACCESS-G":  "#60a5fa",
+                "HRDPS":      "#60a5fa",
+                "ICON-EU":    "#60a5fa",
+                "ACCESS-G":   "#60a5fa",
                 "Best Match": "#60a5fa",
-                "GFS":       "#f59e0b",
-                "ECMWF":     "#10b981",
-                "ICON":      "#a78bfa",
+                "GFS":        "#f59e0b",
+                "ECMWF":      "#10b981",
+                "ICON":       "#a78bfa",
             }
 
             _fig_trend = go.Figure()
@@ -2362,7 +2357,6 @@ else:
                 if not _centers or not _values:
                     continue
 
-                # Convert UTC centers to local timezone for the x-axis
                 try:
                     _x_local = [c.astimezone(local_tz) for c in _centers]
                 except Exception:
@@ -2376,7 +2370,7 @@ else:
                     mode='lines+markers',
                     name=_name,
                     line=dict(color=_line_color, width=2),
-                    marker=dict(size=5),
+                    marker=dict(size=4),
                     connectgaps=False,
                     hovertemplate=f"<b>{_name}</b><br>%{{x|%d %b %H:%M}}<br>MAE: %{{y:.1f}} {_var_unit}<extra></extra>",
                 ))
@@ -2385,19 +2379,19 @@ else:
 
             if _has_any_data:
                 _fig_trend.update_layout(
-                    height=320,
-                    margin=dict(l=40, r=20, t=10, b=40),
+                    height=260,
+                    margin=dict(l=44, r=14, t=8, b=36),
                     plot_bgcolor="#1B1E23",
                     paper_bgcolor="#1B1E23",
                     xaxis=dict(
                         showgrid=True, gridcolor="#2A3038",
-                        tickfont=dict(color="#A0A4AB", size=10),
+                        tickfont=dict(color="#A0A4AB", size=9),
                         zeroline=False, fixedrange=True,
                     ),
                     yaxis=dict(
                         title=dict(text=f"MAE ({_var_unit})", font=dict(color="#A0A4AB", size=10)),
                         showgrid=True, gridcolor="#2A3038",
-                        tickfont=dict(color="#A0A4AB", size=10),
+                        tickfont=dict(color="#A0A4AB", size=9),
                         zeroline=False, fixedrange=True, rangemode="tozero",
                     ),
                     hovermode="x unified",
@@ -2410,13 +2404,22 @@ else:
                     dragmode=False,
                 )
                 st.plotly_chart(_fig_trend, use_container_width=True, config={"displayModeBar": False})
-                st.caption(
-                    "Each point = MAE within a 6-hour window centred on that timestamp, "
-                    "stepped hourly across the trailing 24 hours. "
-                    "Lower is better. Gaps indicate insufficient observations within the window."
+                st.markdown(
+                    '<div style="font-size:0.66rem;color:#6B7280;line-height:1.5;">'
+                    'Each point = MAE within a 6-hour window centred on that timestamp, '
+                    'stepped hourly. Lower is better. Gaps mean too few obs in that window.'
+                    '</div>',
+                    unsafe_allow_html=True,
                 )
             else:
-                st.caption("Insufficient paired observations to render a trend for this variable.")
+                st.markdown(
+                    '<div style="font-size:0.78rem;color:#9CA3AF;line-height:1.5;padding:20px 0;">'
+                    'Insufficient paired observations to render a trend for this variable. '
+                    'This is normal in the first few hours after a fresh model run, or for '
+                    'variables not reported by the available stations.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
 
 st.divider()
 
