@@ -312,6 +312,179 @@ def fetch_kestrel_sessions_24h(sb_client, lat: float, lon: float) -> list:
 
 
 # =============================================================================
+# MESONET / MADIS FETCH (via Synoptic Data API)
+# =============================================================================
+
+# Synoptic Data PBC aggregates MADIS plus 320+ other networks. Public data is
+# free for non-commercial use with the 'demotoken' or a registered token.
+# CANSOFCOM/government use should request a National Mesonet Program token.
+SYNOPTIC_TOKEN = "demotoken"   # Override via secrets.toml in production
+SYNOPTIC_TIMESERIES_URL = "https://api.synopticdata.com/v2/stations/timeseries"
+KM_TO_MILES = 0.621371
+
+
+def fetch_mesonet_history(
+    lat: float,
+    lon: float,
+    radius_km: float = 75.0,
+    hours: int = 24,
+    token: str = None,
+) -> list:
+    """Fetches surface obs from MADIS-aggregated networks via Synoptic Data.
+
+    Returns a list of observation dicts in the same shape as fetch_metar_history,
+    with extra fields:
+        station_id  (str)         — Synoptic STID
+        network     (str)         — provider network code/name
+        qc_flag     (str|None)    — Synoptic QC outcome ("PASS"/"FAIL"/None)
+        elevation_m (float|None)  — station elevation if known
+        source      ("MESONET"|"CWOP")  — distinguishes professional from citizen
+
+    All QC tiers are returned; the caller decides how to filter for display/scoring.
+
+    Args:
+        lat, lon:    centre point
+        radius_km:   search radius in kilometres
+        hours:       trailing window
+        token:       Synoptic API token (falls back to demotoken)
+    """
+    tok = token or SYNOPTIC_TOKEN
+    radius_mi = radius_km * KM_TO_MILES
+
+    # Variables mirror the METAR scorecard set so the merged truth set is uniform
+    vars_csv = (
+        "air_temp,wind_speed,wind_direction,wind_gust,"
+        "relative_humidity,pressure,sea_level_pressure,altimeter,visibility"
+    )
+
+    params = {
+        "radius": f"{lat:.4f},{lon:.4f},{radius_mi:.0f}",
+        "recent": str(hours * 60),    # minutes
+        "vars": vars_csv,
+        "qc": "on",
+        "qc_remove_data": "off",      # we want flagged data + the flags
+        "qc_flags": "on",
+        "units": "speed|kts,temp|C,pres|mb,height|m",
+        "obtimezone": "utc",
+        "token": tok,
+    }
+
+    qs = "&".join(f"{k}={urllib.parse.quote(str(v), safe=',|')}" for k, v in params.items())
+    url = f"{SYNOPTIC_TIMESERIES_URL}?{qs}"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("Synoptic mesonet fetch failed: %s", e)
+        return []
+
+    stations = payload.get("STATION", [])
+    if not stations:
+        return []
+
+    observations = []
+
+    def _safe_iso(t):
+        try:
+            return datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    for stn in stations:
+        try:
+            stid = stn.get("STID", "?")
+            network_name = (stn.get("MNET", {}) or {}).get("LONGNAME") or stn.get("MNET_ID", "")
+            elev = stn.get("ELEVATION")
+            try:
+                elev = float(elev) if elev is not None else None
+            except (TypeError, ValueError):
+                elev = None
+
+            # CWOP stations use network IDs in a known range. The Synoptic
+            # network_id "65" historically corresponds to APRSWXNET/CWOP.
+            mnet_id_raw = stn.get("MNET_ID")
+            try:
+                mnet_id = int(mnet_id_raw) if mnet_id_raw is not None else None
+            except (TypeError, ValueError):
+                mnet_id = None
+            is_cwop = (mnet_id == 65) or (
+                isinstance(network_name, str) and "CWOP" in network_name.upper()
+            )
+            source_tag = "CWOP" if is_cwop else "MESONET"
+
+            obs_block = stn.get("OBSERVATIONS", {}) or {}
+            qc_block = stn.get("QC", {}) or {}
+
+            times = obs_block.get("date_time", [])
+            n = len(times)
+            if n == 0:
+                continue
+
+            # The variable keys are suffixed with _set_1, _set_2 etc. We use
+            # the first available set for each variable.
+            def _series(name):
+                v = obs_block.get(f"{name}_set_1")
+                return v if isinstance(v, list) and len(v) == n else [None] * n
+
+            def _qc_series(name):
+                v = qc_block.get(f"{name}_set_1")
+                return v if isinstance(v, list) and len(v) == n else [None] * n
+
+            wspd_s = _series("wind_speed")           # kt
+            wdir_s = _series("wind_direction")       # deg
+            wgst_s = _series("wind_gust")            # kt
+            temp_s = _series("air_temp")             # C
+            rh_s   = _series("relative_humidity")    # %
+            altim_s = _series("altimeter")           # mb (preferred for METAR-comparable pressure)
+            slp_s = _series("sea_level_pressure")
+            pres_s = _series("pressure")
+            vis_s  = _series("visibility")           # statute miles per Synoptic default
+
+            wspd_qc = _qc_series("wind_speed")
+            temp_qc = _qc_series("air_temp")
+
+            for i in range(n):
+                t = _safe_iso(times[i])
+                if t is None:
+                    continue
+
+                # Pick the best pressure available
+                pressure = altim_s[i] if altim_s[i] is not None else (
+                    slp_s[i] if slp_s[i] is not None else pres_s[i]
+                )
+
+                # Aggregate QC: any per-variable QC flag presence is recorded
+                qc_status = None
+                if wspd_qc[i] or temp_qc[i]:
+                    qc_status = "FLAGGED"
+                else:
+                    qc_status = "PASS"
+
+                observations.append({
+                    "time": t,
+                    "wind_kt": wspd_s[i],
+                    "wind_dir": wdir_s[i],
+                    "gust_kt": wgst_s[i],
+                    "temp_c": temp_s[i],
+                    "pressure_hpa": pressure,
+                    "rh": rh_s[i],
+                    "visibility_sm": vis_s[i],
+                    "station_id": stid,
+                    "network": network_name,
+                    "qc_flag": qc_status,
+                    "elevation_m": elev,
+                    "source": source_tag,
+                })
+        except Exception as e:
+            logger.debug("Mesonet station %s parse failed: %s", stn.get("STID"), e)
+            continue
+
+    return observations
+
+
+# =============================================================================
 # PAIRING & MAE COMPUTATION
 # =============================================================================
 
@@ -465,6 +638,151 @@ def compute_model_mae(model_history: dict, observations: list) -> dict:
     return result
 
 
+def compute_model_pairings(model_history: dict, observations: list) -> list:
+    """Returns per-hour paired (forecast, observation) error records for one model.
+
+    Used as input to compute_rolling_mae for trend computation.
+
+    Returns a list of dicts, one per paired hour, each containing:
+        time           — datetime (UTC) of the observation
+        wind_err_kt    — |fcst - obs| or None
+        dir_err_deg    — shortest-arc absolute error or None (excludes light winds)
+        gust_err_kt    — or None
+        temp_err_c     — or None
+        pressure_err_hpa — or None
+        rh_err_pct     — or None
+        vis_err_sm     — or None
+    """
+    if not model_history or not observations:
+        return []
+
+    def _shortest_arc(a, b):
+        return abs(((a - b) + 180) % 360 - 180)
+
+    pairings = []
+    for obs in observations:
+        idx = _match_forecast_to_observation(obs["time"], model_history["times"])
+        if idx < 0:
+            continue
+
+        rec = {"time": obs["time"]}
+
+        # Wind speed
+        fw = model_history["wind_kt"][idx] if idx < len(model_history["wind_kt"]) else None
+        ow = obs.get("wind_kt")
+        rec["wind_err_kt"] = abs(fw - ow) if (fw is not None and ow is not None) else None
+
+        # Direction (skip when wind is too light)
+        fd = model_history["wind_dir"][idx] if idx < len(model_history["wind_dir"]) else None
+        od = obs.get("wind_dir")
+        if fd is not None and od is not None and (ow is None or ow >= 3.0):
+            rec["dir_err_deg"] = _shortest_arc(fd, od)
+        else:
+            rec["dir_err_deg"] = None
+
+        # Gust
+        fg = model_history["gust_kt"][idx] if idx < len(model_history["gust_kt"]) else None
+        og = obs.get("gust_kt")
+        rec["gust_err_kt"] = abs(fg - og) if (fg is not None and og is not None) else None
+
+        # Temp
+        ft = model_history["temp_c"][idx] if idx < len(model_history["temp_c"]) else None
+        ot = obs.get("temp_c")
+        rec["temp_err_c"] = abs(ft - ot) if (ft is not None and ot is not None) else None
+
+        # Pressure
+        fp = model_history["pressure_hpa"][idx] if idx < len(model_history["pressure_hpa"]) else None
+        op = obs.get("pressure_hpa")
+        rec["pressure_err_hpa"] = abs(fp - op) if (fp is not None and op is not None) else None
+
+        # RH
+        frh = model_history["rh"][idx] if idx < len(model_history["rh"]) else None
+        orh = obs.get("rh")
+        rec["rh_err_pct"] = abs(frh - orh) if (frh is not None and orh is not None) else None
+
+        # Visibility (capped at 10 sm both sides)
+        fv = model_history["visibility_sm"][idx] if idx < len(model_history["visibility_sm"]) else None
+        ov = obs.get("visibility_sm")
+        if fv is not None and ov is not None:
+            rec["vis_err_sm"] = abs(min(fv, 10.0) - min(ov, 10.0))
+        else:
+            rec["vis_err_sm"] = None
+
+        pairings.append(rec)
+
+    return pairings
+
+
+def compute_rolling_mae(
+    pairings: list,
+    window_hours: int = 6,
+    step_hours: int = 1,
+    span_hours: int = 24,
+) -> dict:
+    """Computes a sliding-window MAE timeseries for trend visualization.
+
+    Walks a `window_hours`-wide window across the trailing `span_hours` of
+    pairings, stepping by `step_hours`. Each step produces one MAE point per
+    variable using all pairings whose observation time falls in the window.
+
+    Returns:
+        dict with keys:
+            window_centers  — list of datetime (UTC) at each window centre
+            wind_mae_kt     — list of MAE values, same length as window_centers
+            dir_mae_deg     — same
+            gust_mae_kt     — same
+            temp_mae_c      — same
+            pressure_mae_hpa — same
+            rh_mae_pct      — same
+            vis_mae_sm      — same
+        Missing windows (no pairings) get None.
+    """
+    out = {
+        "window_centers": [],
+        "wind_mae_kt": [],
+        "dir_mae_deg": [],
+        "gust_mae_kt": [],
+        "temp_mae_c": [],
+        "pressure_mae_hpa": [],
+        "rh_mae_pct": [],
+        "vis_mae_sm": [],
+    }
+
+    if not pairings:
+        return out
+
+    times = [p["time"] for p in pairings]
+    end_time = max(times)
+    start_time = end_time - timedelta(hours=span_hours)
+
+    half_w = timedelta(hours=window_hours / 2.0)
+    step = timedelta(hours=step_hours)
+
+    centre = start_time + half_w
+    while centre <= end_time:
+        w_lo = centre - half_w
+        w_hi = centre + half_w
+
+        window_pairs = [p for p in pairings if w_lo <= p["time"] <= w_hi]
+
+        def _wmae(key):
+            errs = [p[key] for p in window_pairs if p.get(key) is not None]
+            return round(sum(errs) / len(errs), 2) if errs else None
+
+        out["window_centers"].append(centre)
+        out["wind_mae_kt"].append(_wmae("wind_err_kt"))
+        out["dir_mae_deg"].append(_wmae("dir_err_deg"))
+        out["gust_mae_kt"].append(_wmae("gust_err_kt"))
+        out["temp_mae_c"].append(_wmae("temp_err_c"))
+        out["pressure_mae_hpa"].append(_wmae("pressure_err_hpa"))
+        out["rh_mae_pct"].append(_wmae("rh_err_pct"))
+        out["vis_mae_sm"].append(_wmae("vis_err_sm"))
+
+        centre += step
+
+    return out
+
+
 def _composite_score(mae_dict: dict) -> float:
     """Computes a weighted composite error score for ranking.
 
@@ -521,28 +839,52 @@ def compute_performance_scorecard(
     lon: float,
     icao: str,
     sb_client=None,
+    synoptic_token: str = None,
+    mesonet_radius_km: float = 75.0,
 ) -> dict:
     """Produces the complete performance scorecard for all active models.
 
     Args:
-        lat, lon: site coordinates (used to select regional model)
-        icao: nearest ICAO for METAR history (can be "NONE")
-        sb_client: optional Supabase client for Kestrel data
+        lat, lon:           site coordinates (used to select regional model)
+        icao:               nearest ICAO for METAR history (can be "NONE")
+        sb_client:          optional Supabase client for Kestrel data
+        synoptic_token:     optional Synoptic API token (defaults to demotoken)
+        mesonet_radius_km:  search radius for MADIS/mesonet stations (default 75)
 
     Returns:
         dict with:
-          - models: list of per-model results
-          - best_performer: name of the lowest-error model
-          - observation_count: total observations used
-          - kestrel_count: how many Kestrel sessions contributed
-          - metar_count: how many METAR observations contributed
-          - has_data: True if scoring was possible
+          - models:            list of per-model results
+                                each model entry now includes 'rolling' (trend dict)
+          - best_performer:    name of the lowest-error model
+          - observation_count: total observations used in scoring
+          - metar_count:       distinct METAR records contributing
+          - mesonet_count:     distinct MADIS/Synoptic mesonet records contributing
+          - cwop_count:        subset of mesonet records flagged as CWOP
+          - mesonet_stations:  list of unique station IDs that contributed
+          - kestrel_count:     how many Kestrel sessions contributed
+          - has_data:          True if scoring was possible
     """
-    # Fetch observations (METAR + Kestrel)
+    # Fetch observations from all three sources
     metar_obs = fetch_metar_history(icao, hours=24) if icao != "NONE" else []
+    mesonet_obs = fetch_mesonet_history(
+        lat, lon,
+        radius_km=mesonet_radius_km,
+        hours=24,
+        token=synoptic_token,
+    )
     kestrel_obs = fetch_kestrel_sessions_24h(sb_client, lat, lon) if sb_client else []
 
-    all_observations = metar_obs + kestrel_obs
+    all_observations = metar_obs + mesonet_obs + kestrel_obs
+
+    # Mesonet station summary for the dashboard's source list
+    mesonet_station_ids = set()
+    cwop_count = 0
+    for o in mesonet_obs:
+        sid = o.get("station_id")
+        if sid:
+            mesonet_station_ids.add(sid)
+        if o.get("source") == "CWOP":
+            cwop_count += 1
 
     if not all_observations:
         return {
@@ -550,9 +892,12 @@ def compute_performance_scorecard(
             "best_performer": None,
             "observation_count": 0,
             "metar_count": 0,
+            "mesonet_count": 0,
+            "cwop_count": 0,
+            "mesonet_stations": [],
             "kestrel_count": 0,
             "has_data": False,
-            "message": "No METAR or Kestrel observations available in the last 24 hours.",
+            "message": "No surface observations available in the last 24 hours within the search radius.",
         }
 
     # Determine which models to score — same selection logic as ensemble
@@ -564,7 +909,6 @@ def compute_performance_scorecard(
         "ICON":  MODEL_ENDPOINTS["ICON"],
     }
 
-    # Fetch each model's history and compute MAE
     model_results = []
     for name, url in active_models.items():
         history = _fetch_model_history(name, url, lat, lon)
@@ -581,21 +925,29 @@ def compute_performance_scorecard(
                 "temp_n": 0, "pressure_n": 0, "rh_n": 0, "vis_n": 0,
                 "earliest_obs_time": None, "latest_obs_time": None,
                 "composite_score": float("inf"),
+                "rolling": None,
             })
             continue
 
+        # Aggregate MAE
         mae = compute_model_mae(history, all_observations)
         mae["name"] = name
         mae["status"] = "OK"
         mae["composite_score"] = _composite_score(mae)
+
+        # Per-hour pairings (used both for trend rendering and downstream analysis)
+        pairings = compute_model_pairings(history, all_observations)
+        mae["rolling"] = compute_rolling_mae(
+            pairings, window_hours=6, step_hours=1, span_hours=24
+        )
+
         model_results.append(mae)
 
     # Identify the best performer (lowest composite score)
     scorable = [m for m in model_results if m.get("composite_score", float("inf")) < float("inf")]
     best = min(scorable, key=lambda m: m["composite_score"])["name"] if scorable else None
 
-    # Compute the actual evaluation window from the matched observations across
-    # all models — gives the operator the precise timeframe being scored.
+    # Compute the actual evaluation window from matched observations
     all_starts = [m.get("earliest_obs_time") for m in model_results if m.get("earliest_obs_time")]
     all_ends = [m.get("latest_obs_time") for m in model_results if m.get("latest_obs_time")]
     window_start = min(all_starts) if all_starts else None
@@ -606,6 +958,9 @@ def compute_performance_scorecard(
         "best_performer": best,
         "observation_count": len(all_observations),
         "metar_count": len(metar_obs),
+        "mesonet_count": len(mesonet_obs),
+        "cwop_count": cwop_count,
+        "mesonet_stations": sorted(mesonet_station_ids),
         "kestrel_count": len(kestrel_obs),
         "window_start_utc": window_start,
         "window_end_utc": window_end,
