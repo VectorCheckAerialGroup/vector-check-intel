@@ -2114,7 +2114,18 @@ else:
         def _fetch_scorecard_cached(sc_lat: float, sc_lon: float, sc_icao: str) -> dict:
             """Fetches trailing 24h performance scorecard. Cached 30 min."""
             sb = _get_supabase()
-            return compute_performance_scorecard(sc_lat, sc_lon, sc_icao, sb_client=sb)
+            # Optional Synoptic API token (falls back to demotoken if absent).
+            # Configure via SECRETS_TOML:  [synoptic] \n token = "..."
+            try:
+                synoptic_tok = st.secrets["synoptic"]["token"]
+            except Exception:
+                synoptic_tok = None
+            return compute_performance_scorecard(
+                sc_lat, sc_lon, sc_icao,
+                sb_client=sb,
+                synoptic_token=synoptic_tok,
+                mesonet_radius_km=75.0,
+            )
 
         _sc = _fetch_scorecard_cached(lat, lon, icao)
 
@@ -2148,13 +2159,25 @@ else:
                 except Exception:
                     pass
 
-            # Source summary line
+            # Source summary line — break out METAR / MADIS / CWOP / Kestrel
             _src_parts = []
             if _sc["metar_count"] > 0:
                 _src_parts.append(f'{_sc["metar_count"]} METAR')
+
+            _madis_total = _sc.get("mesonet_count", 0)
+            _cwop_n = _sc.get("cwop_count", 0)
+            _madis_pro = max(0, _madis_total - _cwop_n)
+            _madis_stations = len(_sc.get("mesonet_stations", []))
+            if _madis_total > 0:
+                _madis_str = f'{_madis_total} MADIS ({_madis_stations} stns'
+                if _cwop_n > 0:
+                    _madis_str += f', {_cwop_n} CWOP'
+                _madis_str += ')'
+                _src_parts.append(_madis_str)
+
             if _sc["kestrel_count"] > 0:
                 _src_parts.append(f'{_sc["kestrel_count"]} Kestrel')
-            _src_str = " + ".join(_src_parts) + " obs"
+            _src_str = " \u00b7 ".join(_src_parts) if _src_parts else "no observations"
 
             _best = _sc.get("best_performer")
             _best_html = ""
@@ -2172,9 +2195,9 @@ else:
                 unsafe_allow_html=True,
             )
 
-            # Table layout: model name + 7 metric columns
-            # Total grid width ~ 70 + 7*44 = 378px (fits comfortably in widened right column)
-            _grid_template = "70px 44px 44px 44px 44px 44px 44px 44px"
+            # Table layout: model name + 7 metric columns + sparkline trend
+            # Total width ~ 64 + 7*40 + 80 = 424px
+            _grid_template = "64px 40px 40px 40px 40px 40px 40px 40px 80px"
 
             _sc_header = (
                 f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;margin-bottom:1px;">'
@@ -2186,9 +2209,34 @@ else:
                 f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">RH</div>'
                 f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Press</div>'
                 f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Vis</div>'
+                f'<div style="font-size:0.62rem;color:#6B7280;text-transform:uppercase;padding:4px 4px;text-align:center;">Trend</div>'
                 f'</div>'
             )
             st.markdown(_sc_header, unsafe_allow_html=True)
+
+            # Unicode sparkline blocks for inline trend rendering
+            _SPARK_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+
+            def _sparkline(values, val_min=None, val_max=None) -> str:
+                """Render a list of numbers as a Unicode block-character sparkline.
+                None values become spaces, preserving time alignment."""
+                clean = [v for v in values if v is not None]
+                if not clean:
+                    return "\u2014"
+                lo = val_min if val_min is not None else min(clean)
+                hi = val_max if val_max is not None else max(clean)
+                if hi - lo < 1e-9:
+                    # Flat trend — show a row of mid-height blocks
+                    return _SPARK_BLOCKS[3] * len(values)
+                out = []
+                for v in values:
+                    if v is None:
+                        out.append(" ")
+                    else:
+                        idx = int(round((v - lo) / (hi - lo) * (len(_SPARK_BLOCKS) - 1)))
+                        idx = max(0, min(len(_SPARK_BLOCKS) - 1, idx))
+                        out.append(_SPARK_BLOCKS[idx])
+                return "".join(out)
 
             for _m in _sc["models"]:
                 _name = _m["name"]
@@ -2201,7 +2249,7 @@ else:
                     _sc_row = (
                         f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
                         f'<div style="font-size:0.76rem;{_name_style}padding:3px 4px;background:{_row_bg};">{_name}</div>'
-                        f'{_empty_cell * 7}'
+                        f'{_empty_cell * 8}'
                         f'</div>'
                     )
                     st.markdown(_sc_row, unsafe_allow_html=True)
@@ -2223,12 +2271,26 @@ else:
                 _p_clr, _p_val = _cell(_m["pressure_mae_hpa"], grade_pressure_mae)
                 _v_clr, _v_val = _cell(_m["vis_mae_sm"], grade_vis_mae)
 
+                # Wind-MAE rolling trend sparkline (the most operationally meaningful var)
+                _rolling = _m.get("rolling") or {}
+                _wind_trend = _rolling.get("wind_mae_kt", []) or []
+                _spark = _sparkline(_wind_trend)
+                # Color the sparkline based on the model's overall wind grade
+                _spark_clr = _w_clr
+
                 def _datacell(clr, val, weight="400"):
                     return (
                         f'<div style="font-size:0.74rem;color:{clr};padding:3px 4px;'
                         f'background:{_row_bg};font-variant-numeric:tabular-nums;'
                         f'font-weight:{weight};text-align:center;">{val}</div>'
                     )
+
+                _spark_cell = (
+                    f'<div style="font-size:0.85rem;color:{_spark_clr};padding:0px 4px;'
+                    f'background:{_row_bg};text-align:center;line-height:1.1;'
+                    f'letter-spacing:-1px;font-family:monospace;" '
+                    f'title="6h-window wind MAE trend across last 24h">{_spark}</div>'
+                )
 
                 _sc_row = (
                     f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
@@ -2240,6 +2302,7 @@ else:
                     f'{_datacell(_rh_clr, _rh_val)}'
                     f'{_datacell(_p_clr, _p_val)}'
                     f'{_datacell(_v_clr, _v_val)}'
+                    f'{_spark_cell}'
                     f'</div>'
                 )
                 st.markdown(_sc_row, unsafe_allow_html=True)
@@ -2252,10 +2315,108 @@ else:
                 '<span style="color:#4ade80;">green</span> = within tolerance, '
                 '<span style="color:#E58E26;">amber</span> = drifting, '
                 '<span style="color:#ff6b4a;">red</span> = systematically off. '
-                'Direction excludes calm/light wind hours.'
+                'Direction excludes calm/light winds. Trend = 6h-window wind MAE.'
                 '</div>',
                 unsafe_allow_html=True,
             )
+
+    # --- Full trend chart (full width below the two-column block) ---
+    if _ens.get("error") is None and _sc.get("has_data"):
+        with st.expander("Expand 24h MAE Trend Chart", expanded=False):
+            _trend_var_options = {
+                "Wind speed (kt)":        ("wind_mae_kt", "kt"),
+                "Wind direction (\u00b0)": ("dir_mae_deg", "\u00b0"),
+                "Gusts (kt)":             ("gust_mae_kt", "kt"),
+                "Temperature (\u00b0C)":  ("temp_mae_c", "\u00b0C"),
+                "RH (%)":                 ("rh_mae_pct", "%"),
+                "Pressure (hPa)":         ("pressure_mae_hpa", "hPa"),
+                "Visibility (sm)":        ("vis_mae_sm", "sm"),
+            }
+            _selected_var = st.selectbox(
+                "Variable",
+                options=list(_trend_var_options.keys()),
+                index=0,
+                key="model_trend_variable",
+            )
+            _var_key, _var_unit = _trend_var_options[_selected_var]
+
+            # Build a Plotly figure with one line per model
+            _model_colors = {
+                "HRDPS":     "#60a5fa",
+                "ICON-EU":   "#60a5fa",
+                "ACCESS-G":  "#60a5fa",
+                "Best Match": "#60a5fa",
+                "GFS":       "#f59e0b",
+                "ECMWF":     "#10b981",
+                "ICON":      "#a78bfa",
+            }
+
+            _fig_trend = go.Figure()
+            _has_any_data = False
+
+            for _m in _sc["models"]:
+                _name = _m["name"]
+                _rolling = _m.get("rolling") or {}
+                _centers = _rolling.get("window_centers", []) or []
+                _values = _rolling.get(_var_key, []) or []
+                if not _centers or not _values:
+                    continue
+
+                # Convert UTC centers to local timezone for the x-axis
+                try:
+                    _x_local = [c.astimezone(local_tz) for c in _centers]
+                except Exception:
+                    _x_local = _centers
+
+                _line_color = _model_colors.get(_name, "#94a3b8")
+
+                _fig_trend.add_trace(go.Scatter(
+                    x=_x_local,
+                    y=_values,
+                    mode='lines+markers',
+                    name=_name,
+                    line=dict(color=_line_color, width=2),
+                    marker=dict(size=5),
+                    connectgaps=False,
+                    hovertemplate=f"<b>{_name}</b><br>%{{x|%d %b %H:%M}}<br>MAE: %{{y:.1f}} {_var_unit}<extra></extra>",
+                ))
+                if any(v is not None for v in _values):
+                    _has_any_data = True
+
+            if _has_any_data:
+                _fig_trend.update_layout(
+                    height=320,
+                    margin=dict(l=40, r=20, t=10, b=40),
+                    plot_bgcolor="#1B1E23",
+                    paper_bgcolor="#1B1E23",
+                    xaxis=dict(
+                        showgrid=True, gridcolor="#2A3038",
+                        tickfont=dict(color="#A0A4AB", size=10),
+                        zeroline=False, fixedrange=True,
+                    ),
+                    yaxis=dict(
+                        title=dict(text=f"MAE ({_var_unit})", font=dict(color="#A0A4AB", size=10)),
+                        showgrid=True, gridcolor="#2A3038",
+                        tickfont=dict(color="#A0A4AB", size=10),
+                        zeroline=False, fixedrange=True, rangemode="tozero",
+                    ),
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.0,
+                        xanchor="right", x=1.0,
+                        font=dict(color="#D1D5DB", size=10),
+                        bgcolor="rgba(0,0,0,0)",
+                    ),
+                    dragmode=False,
+                )
+                st.plotly_chart(_fig_trend, use_container_width=True, config={"displayModeBar": False})
+                st.caption(
+                    "Each point = MAE within a 6-hour window centred on that timestamp, "
+                    "stepped hourly across the trailing 24 hours. "
+                    "Lower is better. Gaps indicate insufficient observations within the window."
+                )
+            else:
+                st.caption("Insufficient paired observations to render a trend for this variable.")
 
 st.divider()
 
