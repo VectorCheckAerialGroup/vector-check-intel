@@ -34,6 +34,7 @@ import urllib.request
 import urllib.parse
 import json
 import logging
+import math
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("arms.model_performance")
@@ -166,13 +167,88 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
         f"https://aviationweather.gov/api/data/metar"
         f"?ids={icao}&format=json&hoursBeforeNow={hours}"
     )
+    return _fetch_and_parse_metar(url)
 
+
+def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
+                            hours: int = 24) -> tuple:
+    """Fetches the last N hours of METAR for ALL stations within radius_km.
+
+    Uses aviationweather.gov bbox filter to find every reporting station
+    inside a bounding box approximating the target radius, then post-filters
+    for true great-circle distance. This gives us 3-15 independent METAR
+    stations as truth instead of just the nearest one.
+
+    Returns:
+        (observations, station_ids) where station_ids is a sorted list of
+        unique ICAO codes that contributed records.
+    """
+    # Bounding box: ~111 km per degree of latitude
+    deg_lat = radius_km / 111.0
+    # Longitude scale shrinks toward poles
+    cos_lat = max(0.05, math.cos(math.radians(lat)))
+    deg_lon = radius_km / (111.0 * cos_lat)
+
+    min_lat = lat - deg_lat
+    max_lat = lat + deg_lat
+    min_lon = lon - deg_lon
+    max_lon = lon + deg_lon
+
+    url = (
+        f"https://aviationweather.gov/api/data/metar"
+        f"?bbox={min_lat:.4f},{min_lon:.4f},{max_lat:.4f},{max_lon:.4f}"
+        f"&format=json&hoursBeforeNow={hours}"
+    )
+
+    raw = _fetch_and_parse_metar(url, want_station_id=True)
+
+    # Post-filter on true great-circle distance and collect station IDs
+    filtered = []
+    station_ids = set()
+    for obs in raw:
+        s_lat = obs.get("_lat")
+        s_lon = obs.get("_lon")
+        if s_lat is None or s_lon is None:
+            # Don't reject for missing coords — keep the record but flag the station
+            filtered.append(obs)
+            sid = obs.get("station_id")
+            if sid:
+                station_ids.add(sid)
+            continue
+
+        # Haversine
+        try:
+            lat1, lat2 = math.radians(lat), math.radians(s_lat)
+            dlat = lat2 - lat1
+            dlon = math.radians(s_lon - lon)
+            a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+            d_km = 2 * 6371.0 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        except Exception:
+            d_km = radius_km  # don't reject on math errors
+
+        if d_km <= radius_km:
+            obs["_distance_km"] = round(d_km, 1)
+            filtered.append(obs)
+            sid = obs.get("station_id")
+            if sid:
+                station_ids.add(sid)
+
+    # Strip the internal coord fields before returning
+    for obs in filtered:
+        obs.pop("_lat", None)
+        obs.pop("_lon", None)
+
+    return filtered, sorted(station_ids)
+
+
+def _fetch_and_parse_metar(url: str, want_station_id: bool = False) -> list:
+    """Shared METAR JSON parse logic for single-ICAO and bbox queries."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        logger.warning("METAR history fetch failed: %s", e)
+        logger.warning("METAR fetch failed: %s", e)
         return []
 
     observations = []
@@ -234,7 +310,6 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
             rh = None
             if temp is not None and dewp is not None:
                 try:
-                    import math
                     a, b = 17.625, 243.04
                     alpha_t = (a * temp) / (b + temp)
                     alpha_d = (a * dewp) / (b + dewp)
@@ -243,7 +318,7 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
                 except Exception:
                     rh = None
 
-            observations.append({
+            record = {
                 "time": t,
                 "wind_kt": wspd,
                 "wind_dir": wdir,
@@ -252,7 +327,17 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
                 "pressure_hpa": pressure,
                 "rh": rh,
                 "visibility_sm": visib,
-            })
+                "source": "METAR",
+            }
+
+            # Capture station identity for the bbox query case
+            if want_station_id:
+                record["station_id"] = row.get("icaoId") or row.get("stationId")
+                # Coordinates needed for post-filtering by great-circle distance
+                record["_lat"] = row.get("lat")
+                record["_lon"] = row.get("lon")
+
+            observations.append(record)
         except Exception:
             continue
 
@@ -864,8 +949,13 @@ def compute_performance_scorecard(
           - kestrel_count:     how many Kestrel sessions contributed
           - has_data:          True if scoring was possible
     """
-    # Fetch observations from all three sources
-    metar_obs = fetch_metar_history(icao, hours=24) if icao != "NONE" else []
+    # Fetch observations from all three sources.
+    # METAR: pull every reporting station in the same 75km radius, not just the
+    # nearest one. This typically gives 3-15 independent METAR truth points
+    # instead of one — much more statistically meaningful.
+    metar_obs, metar_station_ids = fetch_metars_in_radius(
+        lat, lon, radius_km=mesonet_radius_km, hours=24,
+    )
     mesonet_obs = fetch_mesonet_history(
         lat, lon,
         radius_km=mesonet_radius_km,
@@ -892,6 +982,7 @@ def compute_performance_scorecard(
             "best_performer": None,
             "observation_count": 0,
             "metar_count": 0,
+            "metar_stations": [],
             "mesonet_count": 0,
             "cwop_count": 0,
             "mesonet_stations": [],
@@ -958,6 +1049,7 @@ def compute_performance_scorecard(
         "best_performer": best,
         "observation_count": len(all_observations),
         "metar_count": len(metar_obs),
+        "metar_stations": metar_station_ids,
         "mesonet_count": len(mesonet_obs),
         "cwop_count": cwop_count,
         "mesonet_stations": sorted(mesonet_station_ids),
