@@ -2218,6 +2218,30 @@ else:
             unsafe_allow_html=True,
         )
 
+        # Variable selector for the trend chart — placed above the column split
+        # so the table on the left and the chart on the right start at exactly
+        # the same y-coordinate. Visibility intentionally omitted; mesonet
+        # stations rarely report it and METAR-only sample sizes were producing
+        # misleading scores.
+        _trend_var_options = {
+            "Wind speed":        ("wind_mae_kt", "kt"),
+            "Wind direction":    ("dir_mae_deg", "\u00b0"),
+            "Gusts":             ("gust_mae_kt", "kt"),
+            "Temperature":       ("temp_mae_c", "\u00b0C"),
+            "RH":                ("rh_mae_pct", "%"),
+            "Pressure":          ("pressure_mae_hpa", "hPa"),
+        }
+        _sel_l, _sel_r = st.columns([1, 1])
+        with _sel_r:
+            _selected_var = st.selectbox(
+                "Trend variable",
+                options=list(_trend_var_options.keys()),
+                index=0,
+                key="model_trend_variable",
+                label_visibility="collapsed",
+            )
+        _var_key, _var_unit = _trend_var_options[_selected_var]
+
         # --- Two-column layout: scorecard table left, trend chart always-visible right ---
         _perf_left, _perf_right = st.columns([1, 1])
 
@@ -2316,26 +2340,6 @@ else:
                 'margin-bottom:8px;font-weight:500;">Error trend (6h rolling MAE)</div>',
                 unsafe_allow_html=True,
             )
-
-            # Variable selector — controls which variable is plotted.
-            # Visibility intentionally omitted; mesonet stations rarely report it
-            # and METAR-only sample sizes were producing misleading scores.
-            _trend_var_options = {
-                "Wind speed":        ("wind_mae_kt", "kt"),
-                "Wind direction":    ("dir_mae_deg", "\u00b0"),
-                "Gusts":             ("gust_mae_kt", "kt"),
-                "Temperature":       ("temp_mae_c", "\u00b0C"),
-                "RH":                ("rh_mae_pct", "%"),
-                "Pressure":          ("pressure_mae_hpa", "hPa"),
-            }
-            _selected_var = st.selectbox(
-                "Variable",
-                options=list(_trend_var_options.keys()),
-                index=0,
-                key="model_trend_variable",
-                label_visibility="collapsed",
-            )
-            _var_key, _var_unit = _trend_var_options[_selected_var]
 
             _model_colors = {
                 "HRDPS":      "#60a5fa",
@@ -2640,16 +2644,22 @@ st.divider()
 st.subheader("Vertical Profile Trend")
 
 def _extract_sfc_at(idx_v):
-    """Extract surface temp / dewpoint / pressure at a given hourly index."""
+    """Extract surface temp / dewpoint / pressure / wind at a given hourly index."""
     try:
         t_v = h.get('temperature_2m', [0])[idx_v]
         rh_v = h.get('relative_humidity_2m', [0])[idx_v]
         p_v = h.get('surface_pressure', [0])[idx_v]
+        ws_v = h.get('wind_speed_10m', [0])[idx_v]
+        wd_v = h.get('wind_direction_10m', [0])[idx_v]
         t_c = float(t_v) if t_v is not None else 0.0
         rh_p = int(rh_v) if rh_v is not None else 0
         td_c = calc_td(t_c, rh_p)
         p_h = float(p_v) if p_v is not None else 1013.25
-        return t_c, td_c, p_h
+        # Wind speed conversion to kt — Open-Meteo serves either m/s or km/h
+        # depending on the wind_speed_unit query parameter; k_conv handles both.
+        ws_kt = (float(ws_v) if ws_v is not None else 0.0) * k_conv
+        wd_deg = float(wd_v) if wd_v is not None else 0.0
+        return t_c, td_c, p_h, ws_kt, wd_deg
     except Exception:
         return None
 
@@ -2684,11 +2694,14 @@ for _col, (_pidx, _ptitle, _pcolor) in zip(_sounding_cols, _panel_specs):
         if _sfc is None:
             _col.warning(f"{_ptitle}: surface data unavailable.")
             continue
-        _t, _td, _p = _sfc
+        _t, _td, _p, _ws, _wd = _sfc
         _fig = plot_compact_sounding(
             h, _pidx, _t, _td, _p,
             title=f"{_ptitle} \u2014 {_time_label(_pidx)}",
             panel_color=_pcolor,
+            sfc_wind_kt=_ws,
+            sfc_wind_dir=_wd,
+            sfc_elevation_ft=sfc_elevation,
         )
         if _fig is None:
             _col.warning(f"{_ptitle}: insufficient pressure-level data.")
@@ -2699,10 +2712,13 @@ for _col, (_pidx, _ptitle, _pcolor) in zip(_sounding_cols, _panel_specs):
 if _any_rendered:
     st.markdown(
         '<div style="font-size:0.7rem;color:#6B7280;line-height:1.5;margin-top:6px;">'
-        'Skew-T-style vertical profile. <span style="color:#ff4b4b;">red</span> = temperature, '
+        'Skew-T with dry adiabats (warm diagonals), moist adiabats (dotted), '
+        'and the freezing isotherm (cyan dashed). '
+        '<span style="color:#ff4b4b;">red</span> = temperature, '
         '<span style="color:#2abf2a;">green</span> = dewpoint. '
-        'Where the lines converge, the layer is saturated. '
-        'Compare the three panels to see how the column is changing.'
+        'Shaded gray bands mark layers where T\u2212Td \u2264 2\u00b0C (saturation/cloud). '
+        'Wind barbs show speed and direction at standard pressure levels. '
+        'Compare panels left-to-right to read how the column is evolving.'
         '</div>',
         unsafe_allow_html=True,
     )
