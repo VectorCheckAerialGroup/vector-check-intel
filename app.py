@@ -16,7 +16,7 @@ from supabase import create_client, Client
 # Import Vector Check Modules
 from modules.data_ingest    import get_aviation_weather, fetch_mission_data, get_model_run_info
 from modules.hazard_logic   import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
-from modules.visualizations import plot_convective_profile
+from modules.visualizations import plot_convective_profile, plot_compact_sounding
 from modules.telemetry      import log_action
 from modules.astronomy      import get_astronomical_data
 from modules.space_weather  import get_kp_index
@@ -1146,20 +1146,6 @@ precip     = float(precip_raw[forecast_idx]) if precip_raw and len(precip_raw) >
 cape_raw = h.get('cape', [0])
 cape     = int(cape_raw[forecast_idx]) if cape_raw and len(cape_raw) > forecast_idx and cape_raw[forecast_idx] is not None else 0
 
-pbl_raw = h.get('boundary_layer_height')
-if pbl_raw and len(pbl_raw) > forecast_idx and pbl_raw[forecast_idx] is not None:
-    pbl_m  = float(pbl_raw[forecast_idx])
-    pbl_ft = int(pbl_m * 3.28084)
-    pbl_disp = f"{pbl_ft:,} ft AGL"
-else:
-    pbl_calc_agl = 2000
-    if len(thermal_profile) > 1:
-        for k in range(1, len(thermal_profile)):
-            if thermal_profile[k]['t'] >= thermal_profile[k - 1]['t']:
-                pbl_calc_agl = max(0, thermal_profile[k - 1]['h'] - sfc_elevation)
-                break
-    pbl_disp = f"{int(pbl_calc_agl):,} ft AGL (Est)"
-
 frz_raw_list = h.get('freezing_level_height')
 if frz_raw_list and len(frz_raw_list) > forecast_idx and frz_raw_list[forecast_idx] is not None:
     frz_raw  = float(frz_raw_list[forecast_idx])
@@ -1637,7 +1623,7 @@ def generate_pdf_report() -> bytes:
     pdf.set_font("helvetica", "", 10)
     pdf.multi_cell(0, 6, safe_txt(
         f"Precipitation Risk: {pop}% ({precip} mm)\n"
-        f"Density Altitude (DA): {density_alt:,} ft | PBL Height: {pbl_disp}\n"
+        f"Density Altitude (DA): {density_alt:,} ft\n"
         f"Convective Available Potential Energy (CAPE): {cape} J/kg"
     ))
     pdf.ln(5)
@@ -1996,7 +1982,7 @@ else:
     _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
     _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
 
-    # Header strip: model count and overall confidence badge
+    # Header strip: model count and overall confidence badge — full width
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">'
         f'<span style="font-size:0.82rem;color:#9CA3AF;">'
@@ -2009,106 +1995,123 @@ else:
         unsafe_allow_html=True,
     )
 
-    # Plain-English consensus paragraph
-    if _ens_brief.consensus_summary:
+    # Two columns: 12-hour forecast block table on left, narrative on right
+    _ma_left, _ma_right = st.columns([1, 1])
+
+    with _ma_left:
         st.markdown(
-            f'<div style="font-size:0.88rem;color:#D1D5DB;line-height:1.55;'
-            f'margin-bottom:14px;max-width:880px;">'
-            f'{_ens_brief.consensus_summary}</div>',
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-bottom:8px;font-weight:500;">12-hour forecast blocks</div>',
             unsafe_allow_html=True,
         )
 
-    # 12-hour block table — full width, generous column sizing
-    _blk_grid = "180px 110px 90px 80px 110px 80px 70px"
-    _blk_header = (
-        f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;margin-bottom:1px;max-width:780px;">'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;letter-spacing:0.4px;">Block</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Wind</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Spread</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Gust</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Temp</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Precip</div>'
-        f'<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;padding:5px 8px;">Conf</div>'
-        f'</div>'
-    )
-    st.markdown(_blk_header, unsafe_allow_html=True)
-
-    for _b in _ens["blocks"]:
-        _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
-        _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
-        _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
-        _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
-
-        _blk_row = (
-            f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;max-width:780px;">'
-            f'<div style="font-size:0.82rem;color:#D1D5DB;padding:5px 8px;background:#161A1F;">{_b["block_label"]}</div>'
-            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-            f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
-            f'<div style="font-size:0.82rem;color:{_w_spr_clr};padding:5px 8px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
-            f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
-            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-            f'{_b["gust_max"]:.0f} kt</div>'
-            f'<div style="font-size:0.82rem;color:#E5E7EB;padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-            f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
-            f'<div style="font-size:0.82rem;color:{_pp_clr};padding:5px 8px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
-            f'<div style="font-size:0.74rem;color:{_conf_badge_clr};padding:5px 8px;background:#161A1F;font-weight:600;">'
-            f'{_b["confidence"][:3]}</div>'
+        # Block table — sized to fit comfortably in a half-width column
+        _blk_grid = "120px 80px 60px 55px 80px 55px 50px"
+        _blk_header = (
+            f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;margin-bottom:1px;">'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;letter-spacing:0.3px;">Block</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Wind</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Spread</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Gust</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Temp</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Precip</div>'
+            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Conf</div>'
             f'</div>'
         )
-        st.markdown(_blk_row, unsafe_allow_html=True)
+        st.markdown(_blk_header, unsafe_allow_html=True)
 
-    # Wind + precip summary
-    _summary_parts = []
-    if _ens_brief.wind_summary:
-        _summary_parts.append(_ens_brief.wind_summary)
-    if _ens_brief.precip_summary:
-        _summary_parts.append(_ens_brief.precip_summary)
-    if _summary_parts:
-        st.markdown(
-            f'<div style="font-size:0.82rem;color:#9CA3AF;line-height:1.55;margin-top:12px;max-width:880px;">'
-            f'{"<br>".join(_summary_parts)}</div>',
-            unsafe_allow_html=True,
-        )
+        for _b in _ens["blocks"]:
+            _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
+            _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
+            _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
+            _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
 
-    # Risk windows
-    if _ens["risks"]:
+            _blk_row = (
+                f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;">'
+                f'<div style="font-size:0.78rem;color:#D1D5DB;padding:5px 6px;background:#161A1F;">{_b["block_label"]}</div>'
+                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+                f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
+                f'<div style="font-size:0.78rem;color:{_w_spr_clr};padding:5px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
+                f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
+                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+                f'{_b["gust_max"]:.0f} kt</div>'
+                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
+                f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
+                f'<div style="font-size:0.78rem;color:{_pp_clr};padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
+                f'<div style="font-size:0.72rem;color:{_conf_badge_clr};padding:5px 6px;background:#161A1F;font-weight:600;">'
+                f'{_b["confidence"][:3]}</div>'
+                f'</div>'
+            )
+            st.markdown(_blk_row, unsafe_allow_html=True)
+
+    with _ma_right:
         st.markdown(
             '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-top:16px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
+            'margin-bottom:8px;font-weight:500;">Consensus &amp; risk</div>',
             unsafe_allow_html=True,
         )
-        for _r in _ens["risks"]:
-            _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
-            _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
+
+        # Plain-English consensus paragraph
+        if _ens_brief.consensus_summary:
             st.markdown(
-                f'<div style="font-size:0.82rem;color:{_r_clr};margin:4px 0;display:flex;align-items:center;gap:8px;max-width:880px;">'
-                f'<span style="font-size:0.7rem;">{_r_icon}</span>'
-                f'<span style="font-weight:500;">{_r["label"]}</span>'
-                f'<span style="color:#9CA3AF;">{_r["detail"]}</span>'
-                f'</div>',
+                f'<div style="font-size:0.85rem;color:#D1D5DB;line-height:1.55;margin-bottom:12px;">'
+                f'{_ens_brief.consensus_summary}</div>',
                 unsafe_allow_html=True,
             )
 
-    # Climate anomalies
-    if _ens_brief.anomaly_flags:
-        st.markdown(
-            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-top:14px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
-            unsafe_allow_html=True,
-        )
-        for _af in _ens_brief.anomaly_flags[:5]:
+        # Wind + precip summary
+        _summary_parts = []
+        if _ens_brief.wind_summary:
+            _summary_parts.append(_ens_brief.wind_summary)
+        if _ens_brief.precip_summary:
+            _summary_parts.append(_ens_brief.precip_summary)
+        if _summary_parts:
             st.markdown(
-                f'<div style="font-size:0.82rem;color:#E58E26;margin:3px 0;max-width:880px;">\u25cf {_af}</div>',
+                f'<div style="font-size:0.8rem;color:#9CA3AF;line-height:1.55;margin-bottom:12px;">'
+                f'{"<br>".join(_summary_parts)}</div>',
                 unsafe_allow_html=True,
             )
 
-    # Confidence footer
-    if _ens_brief.confidence_summary:
-        st.markdown(
-            f'<div style="font-size:0.74rem;color:#6B7280;margin-top:14px;line-height:1.55;max-width:880px;">'
-            f'{_ens_brief.confidence_summary}</div>',
-            unsafe_allow_html=True,
-        )
+        # Risk windows
+        if _ens["risks"]:
+            st.markdown(
+                '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+                'margin-top:8px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
+                unsafe_allow_html=True,
+            )
+            for _r in _ens["risks"]:
+                _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
+                _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
+                st.markdown(
+                    f'<div style="font-size:0.78rem;color:{_r_clr};margin:4px 0;line-height:1.4;">'
+                    f'<span style="font-size:0.65rem;margin-right:6px;">{_r_icon}</span>'
+                    f'<span style="font-weight:500;">{_r["label"]}</span>'
+                    f' \u2014 <span style="color:#9CA3AF;">{_r["detail"]}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Climate anomalies
+        if _ens_brief.anomaly_flags:
+            st.markdown(
+                '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+                'margin-top:10px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
+                unsafe_allow_html=True,
+            )
+            for _af in _ens_brief.anomaly_flags[:5]:
+                st.markdown(
+                    f'<div style="font-size:0.78rem;color:#E58E26;margin:3px 0;line-height:1.4;">\u25cf {_af}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Confidence footer
+        if _ens_brief.confidence_summary:
+            st.markdown(
+                f'<div style="font-size:0.72rem;color:#6B7280;margin-top:12px;line-height:1.5;'
+                f'padding-top:10px;border-top:1px solid #2A3038;">'
+                f'{_ens_brief.confidence_summary}</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
 
@@ -2225,7 +2228,7 @@ else:
                 unsafe_allow_html=True,
             )
 
-            _grid_template = "70px 50px 50px 50px 50px 45px 55px 50px"
+            _grid_template = "70px 50px 50px 50px 50px 45px 55px"
 
             _sc_header = (
                 f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;margin-bottom:1px;">'
@@ -2236,7 +2239,6 @@ else:
                 f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Temp</div>'
                 f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">RH</div>'
                 f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Press</div>'
-                f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Vis</div>'
                 f'</div>'
             )
             st.markdown(_sc_header, unsafe_allow_html=True)
@@ -2255,7 +2257,7 @@ else:
                     _sc_row = (
                         f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
                         f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_name}</div>'
-                        f'{_empty_cell * 7}'
+                        f'{_empty_cell * 6}'
                         f'</div>'
                     )
                     st.markdown(_sc_row, unsafe_allow_html=True)
@@ -2275,7 +2277,6 @@ else:
                 _t_clr, _t_val = _cell(_m["temp_mae_c"], grade_temp_mae)
                 _rh_clr, _rh_val = _cell(_m["rh_mae_pct"], grade_rh_mae, "{:.0f}")
                 _p_clr, _p_val = _cell(_m["pressure_mae_hpa"], grade_pressure_mae)
-                _v_clr, _v_val = _cell(_m["vis_mae_sm"], grade_vis_mae)
 
                 def _datacell(clr, val, weight="400"):
                     return (
@@ -2293,7 +2294,6 @@ else:
                     f'{_datacell(_t_clr, _t_val)}'
                     f'{_datacell(_rh_clr, _rh_val)}'
                     f'{_datacell(_p_clr, _p_val)}'
-                    f'{_datacell(_v_clr, _v_val)}'
                     f'</div>'
                 )
                 st.markdown(_sc_row, unsafe_allow_html=True)
@@ -2302,7 +2302,7 @@ else:
             st.markdown(
                 '<div style="font-size:0.66rem;color:#6B7280;margin-top:10px;line-height:1.5;">'
                 'MAE units: Wind/Gust kt \u00b7 Dir \u00b0 \u00b7 Temp \u00b0C \u00b7 '
-                'RH % \u00b7 Press hPa \u00b7 Vis sm. '
+                'RH % \u00b7 Press hPa. '
                 '<span style="color:#4ade80;">green</span> = within tolerance, '
                 '<span style="color:#E58E26;">amber</span> = drifting, '
                 '<span style="color:#ff6b4a;">red</span> = systematically off.'
@@ -2317,7 +2317,9 @@ else:
                 unsafe_allow_html=True,
             )
 
-            # Variable selector — controls which variable is plotted
+            # Variable selector — controls which variable is plotted.
+            # Visibility intentionally omitted; mesonet stations rarely report it
+            # and METAR-only sample sizes were producing misleading scores.
             _trend_var_options = {
                 "Wind speed":        ("wind_mae_kt", "kt"),
                 "Wind direction":    ("dir_mae_deg", "\u00b0"),
@@ -2325,7 +2327,6 @@ else:
                 "Temperature":       ("temp_mae_c", "\u00b0C"),
                 "RH":                ("rh_mae_pct", "%"),
                 "Pressure":          ("pressure_mae_hpa", "hPa"),
-                "Visibility":        ("vis_mae_sm", "sm"),
             }
             _selected_var = st.selectbox(
                 "Variable",
@@ -2378,39 +2379,36 @@ else:
                     _has_any_data = True
 
             if _has_any_data:
+                # Height tuned to align visually with the 4-row scorecard table
+                # on the left (~150px including header). Plot area sits next to
+                # the rows, legend bottom-anchored matches the legend strip below.
                 _fig_trend.update_layout(
-                    height=260,
-                    margin=dict(l=44, r=14, t=8, b=36),
+                    height=200,
+                    margin=dict(l=44, r=8, t=4, b=28),
                     plot_bgcolor="#1B1E23",
                     paper_bgcolor="#1B1E23",
                     xaxis=dict(
                         showgrid=True, gridcolor="#2A3038",
                         tickfont=dict(color="#A0A4AB", size=9),
                         zeroline=False, fixedrange=True,
+                        nticks=5,
                     ),
                     yaxis=dict(
-                        title=dict(text=f"MAE ({_var_unit})", font=dict(color="#A0A4AB", size=10)),
+                        title=dict(text=_var_unit, font=dict(color="#A0A4AB", size=9), standoff=4),
                         showgrid=True, gridcolor="#2A3038",
                         tickfont=dict(color="#A0A4AB", size=9),
                         zeroline=False, fixedrange=True, rangemode="tozero",
                     ),
                     hovermode="x unified",
                     legend=dict(
-                        orientation="h", yanchor="bottom", y=1.0,
-                        xanchor="right", x=1.0,
-                        font=dict(color="#D1D5DB", size=10),
+                        orientation="h", yanchor="top", y=-0.18,
+                        xanchor="left", x=0.0,
+                        font=dict(color="#D1D5DB", size=9),
                         bgcolor="rgba(0,0,0,0)",
                     ),
                     dragmode=False,
                 )
                 st.plotly_chart(_fig_trend, use_container_width=True, config={"displayModeBar": False})
-                st.markdown(
-                    '<div style="font-size:0.66rem;color:#6B7280;line-height:1.5;">'
-                    'Each point = MAE within a 6-hour window centred on that timestamp, '
-                    'stepped hourly. Lower is better. Gaps mean too few obs in that window.'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
             else:
                 st.markdown(
                     '<div style="font-size:0.78rem;color:#9CA3AF;line-height:1.5;padding:20px 0;">'
@@ -2633,20 +2631,89 @@ st.divider()
 
 
 
-st.subheader("Vertical Atmospheric Profile (Convective Ops)")
-fig_skewt = plot_convective_profile(h, forecast_idx, t_temp, td, w_spd, sfc_dir, sfc_elevation)
+# =============================================================================
+# THREE-PANEL VERTICAL PROFILE TREND
+# Past hour, current hour, future hour — side by side so the operator can
+# see how the column is evolving in time.
+# =============================================================================
 
-if fig_skewt: st.pyplot(fig_skewt)
-else:         st.warning("Insufficient atmospheric layers available to render vertical profile.")
+st.subheader("Vertical Profile Trend")
+
+def _extract_sfc_at(idx_v):
+    """Extract surface temp / dewpoint / pressure at a given hourly index."""
+    try:
+        t_v = h.get('temperature_2m', [0])[idx_v]
+        rh_v = h.get('relative_humidity_2m', [0])[idx_v]
+        p_v = h.get('surface_pressure', [0])[idx_v]
+        t_c = float(t_v) if t_v is not None else 0.0
+        rh_p = int(rh_v) if rh_v is not None else 0
+        td_c = calc_td(t_c, rh_p)
+        p_h = float(p_v) if p_v is not None else 1013.25
+        return t_c, td_c, p_h
+    except Exception:
+        return None
+
+# Build three panels. If there isn't a past or future hour available within the
+# loaded forecast window we fall back to clamping at the boundaries — better
+# than refusing to render anything.
+_max_idx = len(h.get('time', [])) - 1
+_idx_past = max(0, forecast_idx - 1)
+_idx_now  = forecast_idx
+_idx_fut  = min(_max_idx, forecast_idx + 1)
+
+_panel_specs = [
+    (_idx_past, "T \u2212 1 h", "#9CA3AF"),
+    (_idx_now,  "Current",     "#E58E26"),
+    (_idx_fut,  "T + 1 h",     "#9CA3AF"),
+]
+
+# Time labels — give the operator absolute timestamps for context
+def _time_label(idx_v):
+    try:
+        t_iso = h['time'][idx_v]
+        dt = datetime.fromisoformat(t_iso).replace(tzinfo=timezone.utc).astimezone(local_tz)
+        return dt.strftime('%d %b %H:%M')
+    except Exception:
+        return ""
+
+_sounding_cols = st.columns(3)
+_any_rendered = False
+for _col, (_pidx, _ptitle, _pcolor) in zip(_sounding_cols, _panel_specs):
+    with _col:
+        _sfc = _extract_sfc_at(_pidx)
+        if _sfc is None:
+            _col.warning(f"{_ptitle}: surface data unavailable.")
+            continue
+        _t, _td, _p = _sfc
+        _fig = plot_compact_sounding(
+            h, _pidx, _t, _td, _p,
+            title=f"{_ptitle} \u2014 {_time_label(_pidx)}",
+            panel_color=_pcolor,
+        )
+        if _fig is None:
+            _col.warning(f"{_ptitle}: insufficient pressure-level data.")
+        else:
+            st.pyplot(_fig)
+            _any_rendered = True
+
+if _any_rendered:
+    st.markdown(
+        '<div style="font-size:0.7rem;color:#6B7280;line-height:1.5;margin-top:6px;">'
+        'Skew-T-style vertical profile. <span style="color:#ff4b4b;">red</span> = temperature, '
+        '<span style="color:#2abf2a;">green</span> = dewpoint. '
+        'Where the lines converge, the layer is saturated. '
+        'Compare the three panels to see how the column is changing.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
 
 # SENSOR DEGRADATION METRICS
-c2 = st.columns(4)
+c2 = st.columns(3)
 c2[0].metric("Precipitation Risk",  f"{pop}% ({precip} mm)")
 c2[1].metric("Density Altitude (DA)", f"{density_alt:,} ft")
-c2[2].metric("PBL (Boundary Layer)", pbl_disp)
-c2[3].metric("CAPE (Instability)",   f"{cape} J/kg")
+c2[2].metric("CAPE (Instability)",   f"{cape} J/kg")
 
 st.divider()
 st.markdown("""
