@@ -44,6 +44,7 @@ from modules.ensemble_analysis import (
     MODEL_ENDPOINTS,
     REGIONAL_MODELS,
     _select_regional_model,
+    _is_conus_coverage,
     KMH_TO_KT,
     REQUEST_TIMEOUT_S,
     USER_AGENT,
@@ -84,8 +85,11 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
     Returns dict with 'times', 'wind_kt', 'gust_kt', 'wind_dir', 'temp_c',
     'pressure_hpa', 'rh' lists, or None on failure.
     """
+    # If the endpoint URL already contains a query string (e.g. CONUS-specific
+    # endpoints with "?models=ncep_hrrr_conus"), append our params with &
+    sep = "&" if "?" in endpoint_url else "?"
     url = (
-        f"{endpoint_url}?latitude={lat}&longitude={lon}"
+        f"{endpoint_url}{sep}latitude={lat}&longitude={lon}"
         f"&hourly={_PERF_VARS}"
         f"&past_days=1&forecast_days=1"
         f"&timezone=UTC"
@@ -174,18 +178,18 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
                             hours: int = 24) -> tuple:
     """Fetches the last N hours of METAR for ALL stations within radius_km.
 
-    Uses aviationweather.gov bbox filter to find every reporting station
-    inside a bounding box approximating the target radius, then post-filters
-    for true great-circle distance. This gives us 3-15 independent METAR
-    stations as truth instead of just the nearest one.
+    The aviationweather.gov bbox endpoint returns only the *latest* report
+    for each station in the box. To get the full hourly history we do this
+    in two phases:
+        1. bbox query → list of station IDs in the box (latest record only)
+        2. for each station ID → ids=XXXX query with hoursBeforeNow=N to
+           pull the trailing-N-hour history
 
     Returns:
         (observations, station_ids) where station_ids is a sorted list of
         unique ICAO codes that contributed records.
     """
-    # Bounding box: ~111 km per degree of latitude
     deg_lat = radius_km / 111.0
-    # Longitude scale shrinks toward poles
     cos_lat = max(0.05, math.cos(math.radians(lat)))
     deg_lon = radius_km / (111.0 * cos_lat)
 
@@ -194,29 +198,25 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
     min_lon = lon - deg_lon
     max_lon = lon + deg_lon
 
-    url = (
+    # --- Phase 1: discover stations in the bbox ---
+    bbox_url = (
         f"https://aviationweather.gov/api/data/metar"
         f"?bbox={min_lat:.4f},{min_lon:.4f},{max_lat:.4f},{max_lon:.4f}"
-        f"&format=json&hoursBeforeNow={hours}"
+        f"&format=json&hoursBeforeNow=2"   # only need recent ping for discovery
     )
+    discovery = _fetch_and_parse_metar(bbox_url, want_station_id=True)
 
-    raw = _fetch_and_parse_metar(url, want_station_id=True)
-
-    # Post-filter on true great-circle distance and collect station IDs
-    filtered = []
+    # Filter to stations within the great-circle radius and collect IDs
     station_ids = set()
-    for obs in raw:
+    for obs in discovery:
         s_lat = obs.get("_lat")
         s_lon = obs.get("_lon")
-        if s_lat is None or s_lon is None:
-            # Don't reject for missing coords — keep the record but flag the station
-            filtered.append(obs)
-            sid = obs.get("station_id")
-            if sid:
-                station_ids.add(sid)
+        sid = obs.get("station_id")
+        if not sid:
             continue
-
-        # Haversine
+        if s_lat is None or s_lon is None:
+            station_ids.add(sid)
+            continue
         try:
             lat1, lat2 = math.radians(lat), math.radians(s_lat)
             dlat = lat2 - lat1
@@ -224,21 +224,29 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
             a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
             d_km = 2 * 6371.0 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         except Exception:
-            d_km = radius_km  # don't reject on math errors
-
+            d_km = radius_km
         if d_km <= radius_km:
-            obs["_distance_km"] = round(d_km, 1)
-            filtered.append(obs)
-            sid = obs.get("station_id")
-            if sid:
-                station_ids.add(sid)
+            station_ids.add(sid)
 
-    # Strip the internal coord fields before returning
-    for obs in filtered:
-        obs.pop("_lat", None)
-        obs.pop("_lon", None)
+    if not station_ids:
+        return [], []
 
-    return filtered, sorted(station_ids)
+    # --- Phase 2: fetch full N-hour history for each station via ids= ---
+    # Limit to 15 stations to keep API load and latency reasonable.
+    station_list = sorted(station_ids)[:15]
+    all_observations = []
+    for sid in station_list:
+        sid_url = (
+            f"https://aviationweather.gov/api/data/metar"
+            f"?ids={sid}&format=json&hoursBeforeNow={hours}"
+        )
+        sid_obs = _fetch_and_parse_metar(sid_url, want_station_id=True)
+        for o in sid_obs:
+            o.pop("_lat", None)
+            o.pop("_lon", None)
+            all_observations.append(o)
+
+    return all_observations, station_list
 
 
 def _fetch_and_parse_metar(url: str, want_station_id: bool = False) -> list:
@@ -991,33 +999,51 @@ def compute_performance_scorecard(
             "message": "No surface observations available in the last 24 hours within the search radius.",
         }
 
-    # Determine which models to score — same selection logic as ensemble
+    # Determine which models to score. Each gets a coverage flag — out-of-
+    # coverage models still appear in the scorecard with an OUT_OF_COVERAGE
+    # status so the operator can see which models aren't available and why.
     regional_name, regional_url = _select_regional_model(lat, lon)
-    active_models = {
-        regional_name: regional_url,
-        "GFS":   MODEL_ENDPOINTS["GFS"],
-        "ECMWF": MODEL_ENDPOINTS["ECMWF"],
-        "ICON":  MODEL_ENDPOINTS["ICON"],
-    }
+    in_conus = _is_conus_coverage(lat, lon)
+
+    all_candidate_models = [
+        # (display_name, endpoint_url, in_coverage)
+        (regional_name, regional_url, True),  # always in coverage by definition
+        ("GFS",   MODEL_ENDPOINTS["GFS"],   True),
+        ("ECMWF", MODEL_ENDPOINTS["ECMWF"], True),
+        ("ICON",  MODEL_ENDPOINTS["ICON"],  True),
+        ("NAM",   MODEL_ENDPOINTS["NAM"],   in_conus),
+        ("HRRR",  MODEL_ENDPOINTS["HRRR"],  in_conus),
+    ]
+
+    def _empty_record(name: str, status: str) -> dict:
+        return {
+            "name": name,
+            "status": status,
+            "wind_mae_kt": None, "dir_mae_deg": None,
+            "gust_mae_kt": None, "temp_mae_c": None,
+            "pressure_mae_hpa": None, "rh_mae_pct": None,
+            "vis_mae_sm": None,
+            "sample_count": 0,
+            "wind_n": 0, "dir_n": 0, "gust_n": 0,
+            "temp_n": 0, "pressure_n": 0, "rh_n": 0, "vis_n": 0,
+            "earliest_obs_time": None, "latest_obs_time": None,
+            "composite_score": float("inf"),
+            "rolling": None,
+        }
 
     model_results = []
-    for name, url in active_models.items():
+    for name, url, in_coverage in all_candidate_models:
+        if not in_coverage:
+            # Don't query — return an OUT_OF_COVERAGE placeholder so the
+            # dashboard can show the row with a clear "not available here"
+            # state rather than silently letting Open-Meteo return GFS data
+            # masquerading as the requested model.
+            model_results.append(_empty_record(name, "OUT_OF_COVERAGE"))
+            continue
+
         history = _fetch_model_history(name, url, lat, lon)
         if history is None:
-            model_results.append({
-                "name": name,
-                "status": "UNAVAILABLE",
-                "wind_mae_kt": None, "dir_mae_deg": None,
-                "gust_mae_kt": None, "temp_mae_c": None,
-                "pressure_mae_hpa": None, "rh_mae_pct": None,
-                "vis_mae_sm": None,
-                "sample_count": 0,
-                "wind_n": 0, "dir_n": 0, "gust_n": 0,
-                "temp_n": 0, "pressure_n": 0, "rh_n": 0, "vis_n": 0,
-                "earliest_obs_time": None, "latest_obs_time": None,
-                "composite_score": float("inf"),
-                "rolling": None,
-            })
+            model_results.append(_empty_record(name, "UNAVAILABLE"))
             continue
 
         # Aggregate MAE
