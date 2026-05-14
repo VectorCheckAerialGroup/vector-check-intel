@@ -33,6 +33,12 @@ MODEL_ENDPOINTS = {
     "GFS":   "https://api.open-meteo.com/v1/gfs",
     "ECMWF": "https://api.open-meteo.com/v1/ecmwf",
     "ICON":  "https://api.open-meteo.com/v1/dwd-icon",
+    # CONUS-only NCEP mesoscale models served via Open-Meteo's /v1/gfs endpoint.
+    # The &models= parameter targets the specific NWP system; outside CONUS
+    # these endpoints fall back to GFS-13km, which would duplicate our GFS
+    # member, so we gate inclusion on CONUS coverage.
+    "HRRR":  "https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus",
+    "NAM":   "https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus",
 }
 
 # Regional high-resolution model swap-ins when outside primary coverage.
@@ -62,6 +68,11 @@ def _is_europe_coverage(lat: float, lon: float) -> bool:
 def _is_oceania_coverage(lat: float, lon: float) -> bool:
     """BOM ACCESS-G is strongest over Australia/Pacific."""
     return (-50.0 <= lat <= 10.0) and (100.0 <= lon <= 180.0)
+
+
+def _is_conus_coverage(lat: float, lon: float) -> bool:
+    """HRRR / NAM 3km CONUS nest covers ~21-50N, -134 to -60W (incl. Alaska partial)."""
+    return (21.0 <= lat <= 50.0) and (-134.0 <= lon <= -60.0)
 
 
 def _select_regional_model(lat: float, lon: float) -> tuple:
@@ -198,8 +209,11 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
     """Fetches one model's hourly forecast. Returns ModelForecast (valid=False on failure)."""
     mf = ModelForecast(name=name)
 
+    # If the endpoint URL already contains a query string (e.g. "?models=..."),
+    # use & to append our parameters; otherwise use ?
+    sep = "&" if "?" in url else "?"
     full_url = (
-        f"{url}?latitude={lat}&longitude={lon}"
+        f"{url}{sep}latitude={lat}&longitude={lon}"
         f"&hourly={_HOURLY_VARS}&timezone=UTC&forecast_days=4"
     )
 
@@ -245,22 +259,32 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
 
 
 def fetch_all_models(lat: float, lon: float) -> list:
-    """Fetches all 4 models. Returns list of valid ModelForecast objects.
+    """Fetches the active ensemble for this location. Returns list of valid
+    ModelForecast objects.
 
-    Uses a regional high-resolution model in place of HRDPS when the query
-    point is outside HRDPS coverage. GFS, ECMWF, and ICON are global and
-    always included.
+    Ensemble composition:
+      - 1 regional high-res model (HRDPS / ICON-EU / ACCESS-G / Best Match)
+      - 3 global models (GFS, ECMWF, ICON)
+      - 2 additional CONUS-specific models (NAM, HRRR) if site is in CONUS
+
+    For Canadian sites the typical ensemble size is 4. For CONUS sites it
+    grows to 5-6 (HRDPS over the northern CONUS strip + HRRR/NAM).
     """
-    # Pick the local high-res model for this region
     regional_name, regional_url = _select_regional_model(lat, lon)
 
-    # Build the active endpoint list: regional model + three global models
     active_endpoints = {
         regional_name: regional_url,
         "GFS":   MODEL_ENDPOINTS["GFS"],
         "ECMWF": MODEL_ENDPOINTS["ECMWF"],
         "ICON":  MODEL_ENDPOINTS["ICON"],
     }
+
+    # Add CONUS-specific high-res mesoscale models if the site is in CONUS.
+    # NAM 3km has a longer forecast horizon (60h) than HRRR (48h) but lower
+    # update cadence (4×/day vs hourly).
+    if _is_conus_coverage(lat, lon):
+        active_endpoints["NAM"] = MODEL_ENDPOINTS["NAM"]
+        active_endpoints["HRRR"] = MODEL_ENDPOINTS["HRRR"]
 
     results = []
     for name, url in active_endpoints.items():
