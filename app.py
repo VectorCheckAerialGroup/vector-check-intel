@@ -917,7 +917,15 @@ if data is None:
     st.error("⚠️ CRITICAL: Atmospheric Data API Offline.")
     st.stop()
 elif "error" in data:
-    st.error(f"⚠️ CRITICAL API REJECTION: {data.get('message', 'Unknown Error')}")
+    _err_msg = data.get('message', 'Unknown Error')
+    st.error(f"⚠️ CRITICAL API REJECTION: {_err_msg}")
+    st.caption(
+        f"Model **{model_choice}** failed to return data for these coordinates. "
+        "This may be due to (1) a temporary outage in that model's data feed, "
+        "(2) the location falling outside the model's resolved grid, or "
+        "(3) a specific variable being unsupported by this model. "
+        "Try selecting a different model from the sidebar (e.g. ECMWF or GFS as a stable fallback)."
+    )
     st.stop()
 elif "hourly" not in data:
     st.error("⚠️ CRITICAL: Malformed data payload received from server.")
