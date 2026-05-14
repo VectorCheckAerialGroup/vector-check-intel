@@ -848,17 +848,48 @@ if icao == "NONE":
 
 terrain_env = st.sidebar.selectbox("Terrain Environment:", options=["Land", "Water", "Mountains", "Urban"])
 
-# HRDPS (GEM 2.5km) coverage: Canada + northern US strip
-# Approximate bounds: 40-75°N latitude, -145 to -50°W longitude
-_hrdps_in_range = (40.0 <= lat <= 75.0) and (-145.0 <= lon <= -50.0)
+# ---------------------------------------------------------------------------
+# Model selector — coverage-aware
+# Each model has a defined coverage area. We only expose models that actually
+# cover the operator's location; outside coverage they're listed in the caption
+# below the dropdown so the operator can see what isn't available and why.
+# ---------------------------------------------------------------------------
 
-if _hrdps_in_range:
-    _model_options = ["HRDPS (Canada 2.5km)", "ECMWF (Global 9km)"]
-else:
-    _model_options = ["ECMWF (Global 9km)"]
-    st.sidebar.caption("HRDPS unavailable — outside GEM coverage area")
+# Coverage gates (lat min, lat max, lon min, lon max)
+_HRDPS_BOUNDS = (40.0, 75.0, -145.0, -50.0)    # Canada + northern US strip
+_HRRR_NAM_BOUNDS = (21.0, 50.0, -134.0, -60.0) # CONUS
+_ICONEU_BOUNDS = (29.0, 71.0, -23.0, 45.0)     # Europe
 
-model_choice = st.sidebar.selectbox("Select Forecast Model:", options=_model_options)
+def _in_bounds(b):
+    return (b[0] <= lat <= b[1]) and (b[2] <= lon <= b[3])
+
+# Each entry: display label -> (endpoint url, model_id for run-info, in_coverage)
+_all_models = {
+    "HRDPS (Canada 2.5km)":   ("https://api.open-meteo.com/v1/gem",                              "hrdps",  _in_bounds(_HRDPS_BOUNDS)),
+    "ECMWF (Global 9km)":     ("https://api.open-meteo.com/v1/ecmwf",                            "ecmwf",  True),  # global
+    "GFS (Global 13km)":      ("https://api.open-meteo.com/v1/gfs",                              "gfs",    True),  # global
+    "ICON (Global 13km)":     ("https://api.open-meteo.com/v1/dwd-icon",                         "icon",   True),  # global
+    "ICON-EU (Europe 7km)":   ("https://api.open-meteo.com/v1/dwd-icon",                         "icon-eu", _in_bounds(_ICONEU_BOUNDS)),
+    "NAM 3km (CONUS)":        ("https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus",        "nam",    _in_bounds(_HRRR_NAM_BOUNDS)),
+    "HRRR 3km (CONUS)":       ("https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus",       "hrrr",   _in_bounds(_HRRR_NAM_BOUNDS)),
+}
+
+# Build dropdown of in-coverage models
+_in_coverage = [name for name, (_url, _id, ok) in _all_models.items() if ok]
+_out_of_coverage = [name for name, (_url, _id, ok) in _all_models.items() if not ok]
+
+# Default ordering — surface the highest-resolution in-coverage model first
+_priority = ["HRDPS (Canada 2.5km)", "HRRR 3km (CONUS)", "NAM 3km (CONUS)",
+             "ICON-EU (Europe 7km)", "ECMWF (Global 9km)", "GFS (Global 13km)",
+             "ICON (Global 13km)"]
+_model_options = sorted(_in_coverage, key=lambda n: _priority.index(n) if n in _priority else 99)
+
+model_choice = st.sidebar.selectbox("Forecast Model:", options=_model_options)
+
+# Show what's NOT available so the operator understands the gap
+if _out_of_coverage:
+    _unavail_str = ", ".join(name.split(" (")[0] for name in _out_of_coverage)
+    st.sidebar.caption(f"Not available at this location: {_unavail_str}")
 
 
 def log_refresh_callback():
@@ -869,10 +900,9 @@ def log_refresh_callback():
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
-model_api_map = {
-    "HRDPS (Canada 2.5km)": "https://api.open-meteo.com/v1/gem",
-    "ECMWF (Global 9km)":   "https://api.open-meteo.com/v1/forecast",
-}
+# Resolve selected model into endpoint + identifier for run-cycle lookup
+_selected_url, _selected_id, _ = _all_models[model_choice]
+model_api_map = {model_choice: _selected_url}
 
 data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
 
@@ -932,10 +962,10 @@ if "forecast_slider" not in st.session_state or st.session_state.forecast_slider
 # This tells us which NWP cycle (00Z/06Z/12Z/18Z for GEM/ECMWF, hourly for HRRR, etc.)
 # produced the forecast currently being displayed.
 @st.cache_data(ttl=1800)
-def _fetch_run_info_cached(mdl_url: str) -> dict:
-    return get_model_run_info(mdl_url)
+def _fetch_run_info_cached(mdl_url: str, mdl_id: str) -> dict:
+    return get_model_run_info(mdl_url, model_id=mdl_id)
 
-_run_info = _fetch_run_info_cached(model_api_map[model_choice])
+_run_info = _fetch_run_info_cached(_selected_url, _selected_id)
 
 # Build model title with run cycle indicator
 if _run_info and _run_info.get("run_cycle_z"):
@@ -1982,11 +2012,15 @@ else:
     _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
     _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
 
+    # Compute the expected ensemble size: 4 globally, 6 in CONUS (HRRR + NAM added).
+    # The lat/lon check mirrors _is_conus_coverage() in ensemble_analysis.
+    _expected_ensemble_size = 6 if (21.0 <= lat <= 50.0 and -134.0 <= lon <= -60.0) else 4
+
     # Header strip: model count and overall confidence badge — full width
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">'
         f'<span style="font-size:0.82rem;color:#9CA3AF;">'
-        f'{_ens_brief.model_count}/4 models reporting: '
+        f'{_ens_brief.model_count}/{_expected_ensemble_size} models reporting: '
         f'<span style="color:#D1D5DB;font-weight:500;">{", ".join(_ens_brief.models_used)}</span></span>'
         f'<span style="font-size:0.72rem;color:{_conf_clr};font-weight:600;'
         f'border:1px solid {_conf_clr};border-radius:3px;padding:3px 10px;">'
@@ -2175,11 +2209,8 @@ else:
 
         _src_chips = []
         if _metar_n > 0:
-            _stn_list = ", ".join(_metar_stns[:8])
-            if len(_metar_stns) > 8:
-                _stn_list += f" +{len(_metar_stns) - 8} more"
             _src_chips.append(
-                f'<span title="{_stn_list}" style="background:#1E2530;border:1px solid #2A3038;'
+                f'<span style="background:#1E2530;border:1px solid #2A3038;'
                 f'border-radius:3px;padding:3px 9px;color:#D1D5DB;">'
                 f'<b>{_metar_n}</b> METAR obs from <b>{len(_metar_stns)}</b> stations</span>'
             )
@@ -2212,11 +2243,57 @@ else:
             f'<span style="color:#D1D5DB;font-weight:500;">Window:</span> {_tf_str}'
             f'</div>'
             f'<div style="display:flex;flex-wrap:wrap;gap:8px;font-size:0.74rem;'
-            f'margin-bottom:14px;">'
+            f'margin-bottom:10px;">'
             f'{"".join(_src_chips)} {_best_chip}'
             f'</div>',
             unsafe_allow_html=True,
         )
+
+        # Explicit station provenance list — what the actuals are coming from.
+        # Visible inline (not just in a tooltip) so the operator can
+        # immediately see and verify the truth set.
+        _provenance_lines = []
+        if _metar_stns:
+            _metar_str = ", ".join(_metar_stns)
+            _provenance_lines.append(
+                f'<div style="font-size:0.72rem;color:#9CA3AF;margin:2px 0;">'
+                f'<span style="color:#6B7280;text-transform:uppercase;letter-spacing:0.4px;'
+                f'font-size:0.65rem;font-weight:500;">METAR:</span> '
+                f'<span style="color:#D1D5DB;font-family:monospace;">{_metar_str}</span>'
+                f'</div>'
+            )
+        if _madis_stns:
+            # Truncate long MADIS lists — they can get very long with mesonets
+            _shown = _madis_stns[:20]
+            _madis_str = ", ".join(_shown)
+            if len(_madis_stns) > 20:
+                _madis_str += f' \u2026 +{len(_madis_stns) - 20} more'
+            _provenance_lines.append(
+                f'<div style="font-size:0.72rem;color:#9CA3AF;margin:2px 0;">'
+                f'<span style="color:#6B7280;text-transform:uppercase;letter-spacing:0.4px;'
+                f'font-size:0.65rem;font-weight:500;">MADIS:</span> '
+                f'<span style="color:#D1D5DB;font-family:monospace;">{_madis_str}</span>'
+                f'</div>'
+            )
+        if _kestrel_n > 0:
+            _provenance_lines.append(
+                f'<div style="font-size:0.72rem;color:#9CA3AF;margin:2px 0;">'
+                f'<span style="color:#6B7280;text-transform:uppercase;letter-spacing:0.4px;'
+                f'font-size:0.65rem;font-weight:500;">KESTREL:</span> '
+                f'<span style="color:#D1D5DB;">'
+                f'{_kestrel_n} session{"s" if _kestrel_n != 1 else ""} from local uploads'
+                f'</span>'
+                f'</div>'
+            )
+
+        if _provenance_lines:
+            st.markdown(
+                f'<div style="background:#161A1F;border-left:2px solid #2A3038;'
+                f'padding:6px 10px;margin-bottom:14px;border-radius:0 3px 3px 0;">'
+                f'{"".join(_provenance_lines)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         # Variable selector for the trend chart — placed above the column split
         # so the table on the left and the chart on the right start at exactly
@@ -2272,6 +2349,24 @@ else:
                 _is_best = (_name == _best)
                 _row_bg = "#1E2530" if _is_best else "#161A1F"
                 _name_style = "color:#4ade80;font-weight:600;" if _is_best else "color:#D1D5DB;"
+
+                if _m["status"] == "OUT_OF_COVERAGE":
+                    # Distinct dimmed row + an explicit "Out of coverage" message
+                    # spanning the data columns. This is much clearer than letting
+                    # Open-Meteo silently substitute GFS data.
+                    _msg_cell = (
+                        f'<div style="font-size:0.7rem;color:#6B7280;padding:5px 6px;'
+                        f'background:{_row_bg};text-align:center;font-style:italic;'
+                        f'grid-column: span 6;">Outside coverage area</div>'
+                    )
+                    _sc_row = (
+                        f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;opacity:0.55;">'
+                        f'<div style="font-size:0.82rem;color:#6B7280;padding:5px 6px;background:{_row_bg};">{_name}</div>'
+                        f'{_msg_cell}'
+                        f'</div>'
+                    )
+                    st.markdown(_sc_row, unsafe_allow_html=True)
+                    continue
 
                 if _m["status"] == "UNAVAILABLE":
                     _empty_cell = (
@@ -2349,6 +2444,8 @@ else:
                 "GFS":        "#f59e0b",
                 "ECMWF":      "#10b981",
                 "ICON":       "#a78bfa",
+                "NAM":        "#ec4899",   # pink
+                "HRRR":       "#06b6d4",   # cyan
             }
 
             _fig_trend = go.Figure()
