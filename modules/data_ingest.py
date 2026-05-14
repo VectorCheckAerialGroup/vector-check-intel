@@ -3,35 +3,53 @@ import json
 from datetime import datetime, timezone
 
 
-def get_model_run_info(model_url: str) -> dict:
+def get_model_run_info(model_url: str, model_id: str = None) -> dict:
     """Fetches the latest model run cycle timestamp from Open-Meteo metadata.
 
-    Each model exposes a meta.json at a predictable path under its static assets.
-    The response contains `last_run_initialisation_time` (Unix timestamp) which
-    identifies which cycle (00Z, 06Z, 12Z, 18Z, etc.) produced the current data.
+    Each model exposes a meta.json at a predictable path. The response contains
+    `last_run_initialisation_time` (Unix timestamp) which identifies which
+    cycle (00Z, 06Z, 12Z, 18Z, etc.) produced the current data.
 
     Args:
-        model_url: the forecast endpoint (e.g. https://api.open-meteo.com/v1/gem)
+        model_url:  the forecast endpoint (e.g. https://api.open-meteo.com/v1/gem)
+        model_id:   optional explicit identifier ('hrdps', 'gfs', 'ecmwf',
+                    'icon', 'nam', 'hrrr'). When provided, takes precedence
+                    over substring matching on model_url. Required when querying
+                    HRRR/NAM since both share the v1/gfs URL prefix.
 
     Returns:
         dict with keys: run_cycle_z (e.g. "12Z"), run_date (YYYY-MM-DD),
         run_datetime_utc (datetime), age_hours (int), or empty dict on failure
     """
-    # Map forecast endpoints to their metadata paths.
-    # These endpoints aggregate multiple underlying models; we probe the
-    # primary model for each endpoint to get a representative run cycle.
-    meta_map = {
-        "v1/gem":      "https://api.open-meteo.com/data/cmc_gem_hrdps_continental/static/meta.json",
-        "v1/forecast": "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
-        "v1/gfs":      "https://api.open-meteo.com/data/ncep_gfs025/static/meta.json",
-        "v1/ecmwf":    "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
+    # Direct identifier lookups — preferred path
+    id_map = {
+        "hrdps":  "https://api.open-meteo.com/data/cmc_gem_hrdps_continental/static/meta.json",
+        "ecmwf":  "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
+        "gfs":    "https://api.open-meteo.com/data/ncep_gfs025/static/meta.json",
+        "icon":   "https://api.open-meteo.com/data/dwd_icon/static/meta.json",
+        "nam":    "https://api.open-meteo.com/data/ncep_nam_conus/static/meta.json",
+        "hrrr":   "https://api.open-meteo.com/data/ncep_hrrr_conus/static/meta.json",
+        "icon-eu": "https://api.open-meteo.com/data/dwd_icon_eu/static/meta.json",
     }
 
     meta_url = None
-    for key, url in meta_map.items():
-        if key in model_url:
-            meta_url = url
-            break
+    if model_id:
+        meta_url = id_map.get(model_id.lower())
+
+    if meta_url is None:
+        # Fallback to URL substring matching (legacy behavior, may give wrong
+        # answer for HRRR/NAM since they share the v1/gfs prefix)
+        substring_map = {
+            "v1/gem":      id_map["hrdps"],
+            "v1/forecast": id_map["ecmwf"],
+            "v1/gfs":      id_map["gfs"],
+            "v1/ecmwf":    id_map["ecmwf"],
+            "v1/dwd-icon": id_map["icon"],
+        }
+        for key, url in substring_map.items():
+            if key in model_url:
+                meta_url = url
+                break
 
     if meta_url is None:
         return {}
