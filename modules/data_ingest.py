@@ -124,8 +124,13 @@ def fetch_mission_data(lat, lon, model_url):
             f"geopotential_height_{p}hPa,wind_speed_{p}hPa,wind_direction_{p}hPa"
         )
 
+    # If the endpoint URL already contains a query string (e.g. CONUS-specific
+    # endpoints like "...?models=ncep_nam_conus" or "...?models=ncep_hrrr_conus"),
+    # we must use "&" to append our parameters, not "?". Failing to handle this
+    # produces a malformed URL with two "?" characters and Open-Meteo returns 400.
+    sep = "&" if "?" in model_url else "?"
     url = (
-        f"{model_url}?latitude={lat}&longitude={lon}"
+        f"{model_url}{sep}latitude={lat}&longitude={lon}"
         f"&hourly={hourly_vars}&elevation=nan&timezone=UTC"
     )
 
