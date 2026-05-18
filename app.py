@@ -16,7 +16,8 @@ from supabase import create_client, Client
 # Import Vector Check Modules
 from modules.data_ingest    import get_aviation_weather, fetch_mission_data, get_model_run_info
 from modules.hazard_logic   import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
-from modules.visualizations import plot_convective_profile, plot_compact_sounding
+from modules.visualizations import plot_convective_profile
+from modules.sounding import extract_high_res_profile, render_sounding_plotly
 from modules.telemetry      import log_action
 from modules.astronomy      import get_astronomical_data
 from modules.space_weather  import get_kp_index
@@ -2741,9 +2742,10 @@ st.divider()
 
 
 # =============================================================================
-# THREE-PANEL VERTICAL PROFILE TREND
-# Past hour, current hour, future hour — side by side so the operator can
-# see how the column is evolving in time.
+# THREE-PANEL INTERACTIVE VERTICAL PROFILE TREND
+# Past hour, current hour, future hour — side by side. Each panel is a
+# high-resolution interactive Skew-T with its own parcel-lift slider so the
+# operator can analyze CAPE/CIN for parcels lifted from any level.
 # =============================================================================
 
 st.subheader("Vertical Profile Trend")
@@ -2760,17 +2762,12 @@ def _extract_sfc_at(idx_v):
         rh_p = int(rh_v) if rh_v is not None else 0
         td_c = calc_td(t_c, rh_p)
         p_h = float(p_v) if p_v is not None else 1013.25
-        # Wind speed conversion to kt — Open-Meteo serves either m/s or km/h
-        # depending on the wind_speed_unit query parameter; k_conv handles both.
         ws_kt = (float(ws_v) if ws_v is not None else 0.0) * k_conv
         wd_deg = float(wd_v) if wd_v is not None else 0.0
         return t_c, td_c, p_h, ws_kt, wd_deg
     except Exception:
         return None
 
-# Build three panels. If there isn't a past or future hour available within the
-# loaded forecast window we fall back to clamping at the boundaries — better
-# than refusing to render anything.
 _max_idx = len(h.get('time', [])) - 1
 _idx_past = max(0, forecast_idx - 1)
 _idx_now  = forecast_idx
@@ -2782,7 +2779,6 @@ _panel_specs = [
     (_idx_fut,  "T + 1 h",     "#9CA3AF"),
 ]
 
-# Time labels — give the operator absolute timestamps for context
 def _time_label(idx_v):
     try:
         t_iso = h['time'][idx_v]
@@ -2793,40 +2789,112 @@ def _time_label(idx_v):
 
 _sounding_cols = st.columns(3)
 _any_rendered = False
-for _col, (_pidx, _ptitle, _pcolor) in zip(_sounding_cols, _panel_specs):
+
+for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_cols, _panel_specs)):
     with _col:
         _sfc = _extract_sfc_at(_pidx)
         if _sfc is None:
-            _col.warning(f"{_ptitle}: surface data unavailable.")
+            st.warning(f"{_ptitle}: surface data unavailable.")
             continue
         _t, _td, _p, _ws, _wd = _sfc
-        _fig = plot_compact_sounding(
-            h, _pidx, _t, _td, _p,
+
+        # Build the high-resolution profile for this hour
+        _profile = extract_high_res_profile(h, _pidx, _t, _td, _p)
+        if _profile is None:
+            st.warning(f"{_ptitle}: insufficient pressure-level data.")
+            continue
+
+        # Inject the surface wind into the profile (index 0)
+        _profile["wind_kt"][0] = _ws
+        _profile["wind_dir"][0] = _wd
+
+        # Pressure bounds for the parcel-lift slider — clamp to this profile's
+        # actual data range so the operator can't lift from a non-existent level
+        _p_levels = _profile["pressures"]
+        _p_sfc = float(_p_levels.max())
+        _p_min_data = float(_p_levels.min())
+        # Slider range: from the surface up to ~500 hPa (operational lifting band)
+        _slider_top = max(500.0, _p_min_data)
+
+        # Per-panel parcel-lift slider
+        _lift_p = st.slider(
+            "Lift parcel from (hPa)",
+            min_value=int(_slider_top),
+            max_value=int(_p_sfc),
+            value=int(_p_sfc),          # default: surface parcel
+            step=5,
+            key=f"sounding_lift_{_panel_idx}",
+            help="Drag to lift a parcel from a different pressure level and "
+                 "see how CAPE / CIN change.",
+        )
+
+        # Render the interactive Plotly sounding
+        _fig, _diag = render_sounding_plotly(
+            _profile,
+            parcel_lift_p=float(_lift_p),
             title=f"{_ptitle} \u2014 {_time_label(_pidx)}",
             panel_color=_pcolor,
-            sfc_wind_kt=_ws,
-            sfc_wind_dir=_wd,
             sfc_elevation_ft=sfc_elevation,
         )
-        if _fig is None:
-            _col.warning(f"{_ptitle}: insufficient pressure-level data.")
+        st.plotly_chart(_fig, use_container_width=True,
+                        config={"displayModeBar": False},
+                        key=f"sounding_chart_{_panel_idx}")
+        _any_rendered = True
+
+        # Diagnostics box below the chart
+        _cape = _diag["cape"]
+        _cin = _diag["cin"]
+        _lcl_ft = _diag["lcl_ft"]
+        _lfc = _diag["lfc_hpa"]
+        _el = _diag["el_hpa"]
+
+        # CAPE color band — operational thresholds
+        if _cape >= 2500:
+            _cape_clr = "#ff6b4a"
+        elif _cape >= 1000:
+            _cape_clr = "#E58E26"
+        elif _cape > 0:
+            _cape_clr = "#4ade80"
         else:
-            st.pyplot(_fig)
-            _any_rendered = True
+            _cape_clr = "#6B7280"
+
+        _lfc_str = f"{_lfc:.0f} hPa" if _lfc else "\u2014"
+        _el_str = f"{_el:.0f} hPa" if _el else "\u2014"
+
+        st.markdown(
+            f'<div style="background:#161A1F;border-left:2px solid {_pcolor};'
+            f'padding:7px 10px;margin-top:4px;border-radius:0 3px 3px 0;'
+            f'font-size:0.72rem;line-height:1.6;">'
+            f'<span style="color:#6B7280;">CAPE</span> '
+            f'<span style="color:{_cape_clr};font-weight:600;">{_cape:.0f} J/kg</span> &nbsp;'
+            f'<span style="color:#6B7280;">CIN</span> '
+            f'<span style="color:#60a5fa;font-weight:600;">{_cin:.0f} J/kg</span><br>'
+            f'<span style="color:#6B7280;">LCL</span> '
+            f'<span style="color:#D1D5DB;">{_lcl_ft:,.0f} ft</span> &nbsp;'
+            f'<span style="color:#6B7280;">LFC</span> '
+            f'<span style="color:#D1D5DB;">{_lfc_str}</span> &nbsp;'
+            f'<span style="color:#6B7280;">EL</span> '
+            f'<span style="color:#D1D5DB;">{_el_str}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 if _any_rendered:
     st.markdown(
-        '<div style="font-size:0.7rem;color:#6B7280;line-height:1.5;margin-top:6px;">'
-        'Skew-T with dry adiabats (warm diagonals), moist adiabats (dotted), '
-        'and the freezing isotherm (cyan dashed). '
-        '<span style="color:#ff4b4b;">red</span> = temperature, '
-        '<span style="color:#2abf2a;">green</span> = dewpoint. '
-        'Shaded gray bands mark layers where T\u2212Td \u2264 2\u00b0C (saturation/cloud). '
-        'Wind barbs show speed and direction at standard pressure levels. '
-        'Compare panels left-to-right to read how the column is evolving.'
+        '<div style="font-size:0.7rem;color:#6B7280;line-height:1.5;margin-top:10px;">'
+        'High-resolution Skew-T \u2014 every model pressure level is plotted. '
+        '<span style="color:#ff4b4b;">Red</span> = temperature, '
+        '<span style="color:#2abf2a;">green</span> = dewpoint, '
+        '<span style="color:#ef4444;">red dashed</span> = lifted parcel. '
+        'Dry adiabats (warm diagonals), moist adiabats (dotted green), '
+        'freezing isotherm (cyan dashed). Gray bands = saturated layers (T\u2212Td \u2264 2\u00b0C). '
+        'Red shading = CAPE (positive buoyancy), blue = CIN (negative buoyancy). '
+        'Drag each panel\'s slider to lift a parcel from a different level. '
+        'Wind barbs and ASL altitude are on the right.'
         '</div>',
         unsafe_allow_html=True,
     )
+
 
 st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
 
