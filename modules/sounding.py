@@ -733,9 +733,9 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     alt_labels = [f"{int(_p_to_ft_asl(p)):,} ft" for p in p_ticks]
 
     fig.update_layout(
-        title=dict(text=title, font=dict(color=panel_color, size=13)),
-        height=540,
-        margin=dict(l=42, r=70, t=40, b=36),
+        title=dict(text=title, font=dict(color=panel_color, size=12)),
+        height=480,
+        margin=dict(l=38, r=56, t=36, b=32),
         plot_bgcolor="#1B1E23",
         paper_bgcolor="#1B1E23",
         xaxis=dict(
@@ -746,20 +746,24 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         ),
         yaxis=dict(
             type="log",
+            # Reversed pressure axis: specify the range in log10 units ordered
+            # high-pressure-first. The ordering alone produces the reversal —
+            # do NOT also set autorange, which conflicts with an explicit range
+            # and collapses the plot area to zero height.
             range=[math.log10(P_BOTTOM), math.log10(P_TOP)],
             tickvals=p_ticks,
             ticktext=[str(p) for p in p_ticks],
             tickfont=dict(color="#8E949E", size=9),
             title=dict(text="hPa", font=dict(color="#A0A4AB", size=9)),
             showgrid=False, zeroline=False, fixedrange=True,
-            autorange="reversed",
         ),
         showlegend=False,
         hovermode="closest",
         dragmode=False,
     )
 
-    # Secondary y-axis (ASL feet) on the right
+    # Secondary y-axis (ASL feet) on the right — same reversed-range approach,
+    # no autorange.
     fig.update_layout(
         yaxis2=dict(
             type="log",
@@ -770,7 +774,6 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
             overlaying="y",
             side="right",
             showgrid=False,
-            autorange="reversed",
         ),
     )
 
