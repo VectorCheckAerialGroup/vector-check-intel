@@ -2813,20 +2813,32 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
         _p_levels = _profile["pressures"]
         _p_sfc = float(_p_levels.max())
         _p_min_data = float(_p_levels.min())
-        # Slider range: from the surface up to ~500 hPa (operational lifting band)
         _slider_top = max(500.0, _p_min_data)
 
-        # Per-panel parcel-lift slider
-        _lift_p = st.slider(
-            "Lift parcel from (hPa)",
-            min_value=int(_slider_top),
-            max_value=int(_p_sfc),
-            value=int(_p_sfc),          # default: surface parcel
-            step=5,
-            key=f"sounding_lift_{_panel_idx}",
-            help="Drag to lift a parcel from a different pressure level and "
-                 "see how CAPE / CIN change.",
+        # Parcel analysis is opt-in. Default OFF — the sounding renders cleanly
+        # as just the environmental profile + wind barbs unless the operator
+        # explicitly enables parcel lifting for convective analysis.
+        _show_parcel = st.checkbox(
+            "Lift parcel (CAPE/CIN)",
+            value=False,
+            key=f"sounding_parcel_on_{_panel_idx}",
+            help="Enable to compute and draw a lifted parcel trajectory, "
+                 "CAPE/CIN shading, and convective diagnostics.",
         )
+
+        # Only show the slider when parcel analysis is enabled
+        _lift_p = _p_sfc
+        if _show_parcel:
+            _lift_p = st.slider(
+                "Lift parcel from (hPa)",
+                min_value=int(_slider_top),
+                max_value=int(_p_sfc),
+                value=int(_p_sfc),
+                step=5,
+                key=f"sounding_lift_{_panel_idx}",
+                help="Drag to lift a parcel from a different pressure level "
+                     "and see how CAPE / CIN change.",
+            )
 
         # Render the interactive Plotly sounding
         _fig, _diag = render_sounding_plotly(
@@ -2835,62 +2847,64 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
             title=f"{_ptitle} \u2014 {_time_label(_pidx)}",
             panel_color=_pcolor,
             sfc_elevation_ft=sfc_elevation,
+            show_parcel=_show_parcel,
         )
         st.plotly_chart(_fig, use_container_width=True,
                         config={"displayModeBar": False},
                         key=f"sounding_chart_{_panel_idx}")
         _any_rendered = True
 
-        # Diagnostics box below the chart
-        _cape = _diag["cape"]
-        _cin = _diag["cin"]
-        _lcl_ft = _diag["lcl_ft"]
-        _lfc = _diag["lfc_hpa"]
-        _el = _diag["el_hpa"]
+        # Diagnostics box — only when parcel analysis is enabled
+        if _show_parcel and _diag:
+            _cape = _diag["cape"]
+            _cin = _diag["cin"]
+            _lcl_ft = _diag["lcl_ft"]
+            _lfc = _diag["lfc_hpa"]
+            _el = _diag["el_hpa"]
 
-        # CAPE color band — operational thresholds
-        if _cape >= 2500:
-            _cape_clr = "#ff6b4a"
-        elif _cape >= 1000:
-            _cape_clr = "#E58E26"
-        elif _cape > 0:
-            _cape_clr = "#4ade80"
-        else:
-            _cape_clr = "#6B7280"
+            # CAPE color band — operational thresholds
+            if _cape >= 2500:
+                _cape_clr = "#ff6b4a"
+            elif _cape >= 1000:
+                _cape_clr = "#E58E26"
+            elif _cape > 0:
+                _cape_clr = "#4ade80"
+            else:
+                _cape_clr = "#6B7280"
 
-        _lfc_str = f"{_lfc:.0f} hPa" if _lfc else "\u2014"
-        _el_str = f"{_el:.0f} hPa" if _el else "\u2014"
+            _lfc_str = f"{_lfc:.0f} hPa" if _lfc else "\u2014"
+            _el_str = f"{_el:.0f} hPa" if _el else "\u2014"
 
-        st.markdown(
-            f'<div style="background:#161A1F;border-left:2px solid {_pcolor};'
-            f'padding:7px 10px;margin-top:4px;border-radius:0 3px 3px 0;'
-            f'font-size:0.72rem;line-height:1.6;">'
-            f'<span style="color:#6B7280;">CAPE</span> '
-            f'<span style="color:{_cape_clr};font-weight:600;">{_cape:.0f} J/kg</span> &nbsp;'
-            f'<span style="color:#6B7280;">CIN</span> '
-            f'<span style="color:#60a5fa;font-weight:600;">{_cin:.0f} J/kg</span><br>'
-            f'<span style="color:#6B7280;">LCL</span> '
-            f'<span style="color:#D1D5DB;">{_lcl_ft:,.0f} ft</span> &nbsp;'
-            f'<span style="color:#6B7280;">LFC</span> '
-            f'<span style="color:#D1D5DB;">{_lfc_str}</span> &nbsp;'
-            f'<span style="color:#6B7280;">EL</span> '
-            f'<span style="color:#D1D5DB;">{_el_str}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                f'<div style="background:#161A1F;border-left:2px solid {_pcolor};'
+                f'padding:7px 10px;margin-top:4px;border-radius:0 3px 3px 0;'
+                f'font-size:0.72rem;line-height:1.6;">'
+                f'<span style="color:#6B7280;">CAPE</span> '
+                f'<span style="color:{_cape_clr};font-weight:600;">{_cape:.0f} J/kg</span> &nbsp;'
+                f'<span style="color:#6B7280;">CIN</span> '
+                f'<span style="color:#60a5fa;font-weight:600;">{_cin:.0f} J/kg</span><br>'
+                f'<span style="color:#6B7280;">LCL</span> '
+                f'<span style="color:#D1D5DB;">{_lcl_ft:,.0f} ft</span> &nbsp;'
+                f'<span style="color:#6B7280;">LFC</span> '
+                f'<span style="color:#D1D5DB;">{_lfc_str}</span> &nbsp;'
+                f'<span style="color:#6B7280;">EL</span> '
+                f'<span style="color:#D1D5DB;">{_el_str}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
 if _any_rendered:
     st.markdown(
         '<div style="font-size:0.7rem;color:#6B7280;line-height:1.5;margin-top:10px;">'
         'High-resolution Skew-T \u2014 every model pressure level is plotted. '
         '<span style="color:#ff4b4b;">Red</span> = temperature, '
-        '<span style="color:#2abf2a;">green</span> = dewpoint, '
-        '<span style="color:#ef4444;">red dashed</span> = lifted parcel. '
+        '<span style="color:#2abf2a;">green</span> = dewpoint. '
         'Dry adiabats (warm diagonals), moist adiabats (dotted green), '
         'freezing isotherm (cyan dashed). Gray bands = saturated layers (T\u2212Td \u2264 2\u00b0C). '
-        'Red shading = CAPE (positive buoyancy), blue = CIN (negative buoyancy). '
-        'Drag each panel\'s slider to lift a parcel from a different level. '
-        'Wind barbs and ASL altitude are on the right.'
+        'Wind barbs and ASL altitude on the right. '
+        'Enable the <b>Lift parcel (CAPE/CIN)</b> checkbox per panel to add '
+        'parcel-lifting analysis \u2014 dashed parcel trace, red CAPE / blue CIN '
+        'shading, and convective diagnostics (LCL, LFC, EL).'
         '</div>',
         unsafe_allow_html=True,
     )
