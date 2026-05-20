@@ -426,19 +426,25 @@ def skew_x(temp_C, pressure_hPa):
 def render_sounding_plotly(profile: dict, parcel_lift_p: float,
                             title: str = "", panel_color: str = "#D1D5DB",
                             sfc_elevation_ft: float = 0.0,
-                            x_range: tuple = (-40, 40)) -> tuple:
+                            x_range: tuple = (-40, 40),
+                            show_parcel: bool = False) -> tuple:
     """Renders the interactive Skew-T as a Plotly figure.
 
     Args:
         profile:           output of extract_high_res_profile
         parcel_lift_p:     pressure level (hPa) from which to lift the parcel
+                            (only used when show_parcel is True)
         title:             panel title text
         panel_color:       title color (amber for current hour)
         sfc_elevation_ft:  station elevation (ft) for right-axis labels
         x_range:           (min, max) temperature axis range
+        show_parcel:       if True, compute and draw the lifted parcel,
+                            CAPE/CIN shading, and LCL/LFC/EL markers.
+                            Defaults to False — parcel analysis is opt-in.
 
     Returns:
-        (figure, diagnostics_dict)
+        (figure, diagnostics_dict). diagnostics_dict is empty when
+        show_parcel is False.
     """
     pressures = profile["pressures"]
     temps = profile["temps"]
@@ -447,23 +453,27 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     wind_kt_list = profile["wind_kt"]
     wind_dir_list = profile["wind_dir"]
 
-    # ----- Compute the parcel from the requested level -----
-    # Find environmental T, Td at the requested lift pressure (interpolated)
+    # Sort the profile for interpolation utilities below (used by both the
+    # saturation shading and, if enabled, the parcel lift)
     order = np.argsort(-pressures)
     p_sorted = pressures[order]
     t_sorted = temps[order]
     td_sorted = dewpts[order]
-    # Interp expects ascending x — reverse
     log_p_asc = np.log(p_sorted[::-1])
     t_asc = t_sorted[::-1]
     td_asc = td_sorted[::-1]
 
-    target_lnp = math.log(parcel_lift_p)
-    T_lift = float(np.interp(target_lnp, log_p_asc, t_asc))
-    Td_lift = float(np.interp(target_lnp, log_p_asc, td_asc))
-
-    parcel = lift_parcel(parcel_lift_p, T_lift, Td_lift, P_top_hPa=P_TOP)
-    cape_cin = compute_cape_cin(parcel, pressures, temps)
+    # ----- Compute the parcel from the requested level (opt-in) -----
+    parcel = None
+    cape_cin = None
+    T_lift = None
+    Td_lift = None
+    if show_parcel:
+        target_lnp = math.log(parcel_lift_p)
+        T_lift = float(np.interp(target_lnp, log_p_asc, t_asc))
+        Td_lift = float(np.interp(target_lnp, log_p_asc, td_asc))
+        parcel = lift_parcel(parcel_lift_p, T_lift, Td_lift, P_top_hPa=P_TOP)
+        cape_cin = compute_cape_cin(parcel, pressures, temps)
 
     # ----- Build figure -----
     fig = go.Figure()
@@ -553,43 +563,44 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
             line=dict(width=0), hoverinfo="skip", showlegend=False,
         ))
 
-    # CAPE / CIN shading along the parcel trace
-    parcel_p = parcel["pressures"]
-    parcel_T = parcel["parcel_T"]
-    T_env_at_p = cape_cin["T_env_at_parcel_p"]
-    dT = cape_cin["dT_K"]
+    # CAPE / CIN shading along the parcel trace — only when parcel is shown
+    if show_parcel and parcel is not None:
+        parcel_p = parcel["pressures"]
+        parcel_T = parcel["parcel_T"]
+        T_env_at_p = cape_cin["T_env_at_parcel_p"]
+        dT = cape_cin["dT_K"]
 
-    cape_x = skew_x(parcel_T, parcel_p)
-    env_x = skew_x(T_env_at_p, parcel_p)
+        cape_x = skew_x(parcel_T, parcel_p)
+        env_x = skew_x(T_env_at_p, parcel_p)
 
-    # Walk segments where dT > 0 (CAPE) and dT < 0 (CIN) and build polygons
-    def _shade_buoyancy(positive: bool):
-        target = (dT > 0) if positive else (dT < 0)
-        color = ("rgba(239, 68, 68, 0.25)" if positive
-                 else "rgba(59, 130, 246, 0.20)")
-        in_seg = False
-        seg_start = 0
-        for i, m in enumerate(target):
-            if m and not in_seg:
-                seg_start = i; in_seg = True
-            elif not m and in_seg:
-                xs = np.concatenate([cape_x[seg_start:i], env_x[seg_start:i][::-1]])
-                ys = np.concatenate([parcel_p[seg_start:i], parcel_p[seg_start:i][::-1]])
+        # Walk segments where dT > 0 (CAPE) and dT < 0 (CIN) and build polygons
+        def _shade_buoyancy(positive: bool):
+            target = (dT > 0) if positive else (dT < 0)
+            color = ("rgba(239, 68, 68, 0.25)" if positive
+                     else "rgba(59, 130, 246, 0.20)")
+            in_seg = False
+            seg_start = 0
+            for i, m in enumerate(target):
+                if m and not in_seg:
+                    seg_start = i; in_seg = True
+                elif not m and in_seg:
+                    xs = np.concatenate([cape_x[seg_start:i], env_x[seg_start:i][::-1]])
+                    ys = np.concatenate([parcel_p[seg_start:i], parcel_p[seg_start:i][::-1]])
+                    fig.add_trace(go.Scatter(
+                        x=xs, y=ys, fill="toself", fillcolor=color,
+                        line=dict(width=0), hoverinfo="skip", showlegend=False,
+                    ))
+                    in_seg = False
+            if in_seg:
+                xs = np.concatenate([cape_x[seg_start:], env_x[seg_start:][::-1]])
+                ys = np.concatenate([parcel_p[seg_start:], parcel_p[seg_start:][::-1]])
                 fig.add_trace(go.Scatter(
                     x=xs, y=ys, fill="toself", fillcolor=color,
                     line=dict(width=0), hoverinfo="skip", showlegend=False,
                 ))
-                in_seg = False
-        if in_seg:
-            xs = np.concatenate([cape_x[seg_start:], env_x[seg_start:][::-1]])
-            ys = np.concatenate([parcel_p[seg_start:], parcel_p[seg_start:][::-1]])
-            fig.add_trace(go.Scatter(
-                x=xs, y=ys, fill="toself", fillcolor=color,
-                line=dict(width=0), hoverinfo="skip", showlegend=False,
-            ))
 
-    _shade_buoyancy(True)
-    _shade_buoyancy(False)
+        _shade_buoyancy(True)
+        _shade_buoyancy(False)
 
     # Environmental T (red) — with hover showing each data point
     hover_text = []
@@ -621,85 +632,92 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         hoverinfo="skip", showlegend=False,
     ))
 
-    # Lifted parcel trace (red dashed)
-    fig.add_trace(go.Scatter(
-        x=skew_x(parcel["parcel_T"], parcel["pressures"]),
-        y=parcel["pressures"],
-        mode="lines", name="Parcel",
-        line=dict(color="#ef4444", width=2.0, dash="dash"),
-        hovertemplate=("<b>Lifted Parcel</b><br>"
-                       "%{y:.0f} hPa<br>"
-                       "T = %{customdata:.1f}°C<extra></extra>"),
-        customdata=parcel["parcel_T"],
-        showlegend=False,
-    ))
-
-    # LCL marker
-    lcl_x = skew_x(parcel["T_lcl"], parcel["P_lcl"])
-    fig.add_trace(go.Scatter(
-        x=[lcl_x], y=[parcel["P_lcl"]],
-        mode="markers+text",
-        marker=dict(size=10, color="#fbbf24", symbol="circle-open",
-                    line=dict(width=2)),
-        text=["LCL"], textposition="middle right",
-        textfont=dict(color="#fbbf24", size=10),
-        hovertemplate=f"<b>LCL</b><br>{parcel['P_lcl']:.0f} hPa<br>{parcel['T_lcl']:.1f}°C<extra></extra>",
-        showlegend=False,
-    ))
-
-    # LFC and EL markers if present
-    if cape_cin["lfc"]:
-        # Get T_parcel at LFC pressure
-        T_lfc = float(np.interp(math.log(cape_cin["lfc"]),
-                                np.log(parcel["pressures"][::-1]),
-                                parcel["parcel_T"][::-1]))
+    # Lifted parcel trace, LCL, LFC, EL markers — only when parcel analysis is on
+    if show_parcel and parcel is not None:
+        # Lifted parcel trace (red dashed)
         fig.add_trace(go.Scatter(
-            x=[skew_x(T_lfc, cape_cin["lfc"])], y=[cape_cin["lfc"]],
-            mode="markers+text",
-            marker=dict(size=10, color="#a78bfa", symbol="diamond-open",
-                        line=dict(width=2)),
-            text=["LFC"], textposition="middle right",
-            textfont=dict(color="#a78bfa", size=10),
-            hovertemplate=f"<b>LFC</b><br>{cape_cin['lfc']:.0f} hPa<extra></extra>",
+            x=skew_x(parcel["parcel_T"], parcel["pressures"]),
+            y=parcel["pressures"],
+            mode="lines", name="Parcel",
+            line=dict(color="#ef4444", width=2.0, dash="dash"),
+            hovertemplate=("<b>Lifted Parcel</b><br>"
+                           "%{y:.0f} hPa<br>"
+                           "T = %{customdata:.1f}°C<extra></extra>"),
+            customdata=parcel["parcel_T"],
             showlegend=False,
         ))
 
-    if cape_cin["el"]:
-        T_el = float(np.interp(math.log(cape_cin["el"]),
-                               np.log(parcel["pressures"][::-1]),
-                               parcel["parcel_T"][::-1]))
+        # LCL marker
+        lcl_x = skew_x(parcel["T_lcl"], parcel["P_lcl"])
         fig.add_trace(go.Scatter(
-            x=[skew_x(T_el, cape_cin["el"])], y=[cape_cin["el"]],
+            x=[lcl_x], y=[parcel["P_lcl"]],
             mode="markers+text",
-            marker=dict(size=10, color="#06b6d4", symbol="diamond-open",
+            marker=dict(size=10, color="#fbbf24", symbol="circle-open",
                         line=dict(width=2)),
-            text=["EL"], textposition="middle right",
-            textfont=dict(color="#06b6d4", size=10),
-            hovertemplate=f"<b>EL</b><br>{cape_cin['el']:.0f} hPa<extra></extra>",
+            text=["LCL"], textposition="middle right",
+            textfont=dict(color="#fbbf24", size=10),
+            hovertemplate=f"<b>LCL</b><br>{parcel['P_lcl']:.0f} hPa<br>{parcel['T_lcl']:.1f}°C<extra></extra>",
             showlegend=False,
         ))
 
-    # Wind barbs on the right side of the data area. Drawn as short directional
-    # shafts (pointing the direction the wind is coming FROM) with the speed in
-    # knots as a small label. To avoid clutter with ~30 levels, we draw a barb
-    # at most every ~40 hPa.
-    barb_x_data = x_range[1] - 3
+        # LFC marker
+        if cape_cin["lfc"]:
+            T_lfc = float(np.interp(math.log(cape_cin["lfc"]),
+                                    np.log(parcel["pressures"][::-1]),
+                                    parcel["parcel_T"][::-1]))
+            fig.add_trace(go.Scatter(
+                x=[skew_x(T_lfc, cape_cin["lfc"])], y=[cape_cin["lfc"]],
+                mode="markers+text",
+                marker=dict(size=10, color="#a78bfa", symbol="diamond-open",
+                            line=dict(width=2)),
+                text=["LFC"], textposition="middle right",
+                textfont=dict(color="#a78bfa", size=10),
+                hovertemplate=f"<b>LFC</b><br>{cape_cin['lfc']:.0f} hPa<extra></extra>",
+                showlegend=False,
+            ))
+
+        # EL marker
+        if cape_cin["el"]:
+            T_el = float(np.interp(math.log(cape_cin["el"]),
+                                   np.log(parcel["pressures"][::-1]),
+                                   parcel["parcel_T"][::-1]))
+            fig.add_trace(go.Scatter(
+                x=[skew_x(T_el, cape_cin["el"])], y=[cape_cin["el"]],
+                mode="markers+text",
+                marker=dict(size=10, color="#06b6d4", symbol="diamond-open",
+                            line=dict(width=2)),
+                text=["EL"], textposition="middle right",
+                textfont=dict(color="#06b6d4", size=10),
+                hovertemplate=f"<b>EL</b><br>{cape_cin['el']:.0f} hPa<extra></extra>",
+                showlegend=False,
+            ))
+
+    # Wind barbs in the right margin. Drawn as short directional lines
+    # pointing the direction the wind is coming FROM, with the speed in knots
+    # as a small label. Decluttered to roughly every 40 hPa.
+    #
+    # Plotly annotations don't accept `axref="paper"`, so we render the shafts
+    # as Scatter line traces using the secondary y-axis (yaxis2) with x in
+    # paper-fraction space via the `xref` trick: we use a separate xaxis that
+    # spans 0->1 in paper space. Simpler: use the existing x-axis but compute
+    # the right-edge data x from the x_range, plus a tiny shaft offset.
     _last_barb_p = None
+    barb_x_data = x_range[1] - 4   # ~4°C inside the right edge
+    shaft_dx = 2.5                 # shaft length in °C (data units)
+
     for p, ws, wd in zip(pressures, wind_kt_list, wind_dir_list):
         if ws is None or wd is None:
             continue
-        # Declutter: skip if within 40 hPa of the previous barb (except always
-        # draw the surface barb, which is the first entry)
         if _last_barb_p is not None and abs(_last_barb_p - p) < 40 and p != pressures[0]:
             continue
         _last_barb_p = p
 
-        # Shaft points toward where the wind comes FROM. In skewed chart space
-        # we only use the shaft for a directional cue; magnitude is the label.
         rad = math.radians(wd)
-        shaft_len = 2.6
-        tail_dx = math.sin(rad) * shaft_len
-        # Color-code the shaft by speed band for quick reading
+        # The shaft tail offset: positive sin means wind FROM the east, so the
+        # tail extends to the east (right) of the anchor.
+        tail_dx = math.sin(rad) * shaft_dx
+        tail_dy_logp = math.cos(rad) * 0.025   # tiny vertical offset for direction cue
+
         if ws >= 35:
             _barb_color = "#ff6b4a"
         elif ws >= 20:
@@ -707,17 +725,28 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         else:
             _barb_color = "#94a3b8"
 
+        # Shaft as a 2-point Scatter line. y values use multiplicative offset
+        # because the y-axis is logarithmic.
+        p_tail = p * (10 ** tail_dy_logp)
+        fig.add_trace(go.Scatter(
+            x=[barb_x_data + tail_dx, barb_x_data],
+            y=[p_tail, p],
+            mode="lines",
+            line=dict(color=_barb_color, width=1.6),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        # Anchor dot at the barb head for clarity
+        fig.add_trace(go.Scatter(
+            x=[barb_x_data], y=[p],
+            mode="markers",
+            marker=dict(size=3, color=_barb_color),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+        # Speed label to the right of the barb
         fig.add_annotation(
-            x=barb_x_data, y=p,
-            ax=barb_x_data + tail_dx, ay=p,
-            xref="x", yref="y", axref="x", ayref="y",
-            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.3,
-            arrowcolor=_barb_color,
-            text="", standoff=0,
-        )
-        # Speed label just right of the barb
-        fig.add_annotation(
-            x=barb_x_data + 3.2, y=p,
+            x=barb_x_data + 3.5, y=p,
             xref="x", yref="y",
             showarrow=False,
             text=f"{ws:.0f}",
@@ -735,7 +764,7 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     fig.update_layout(
         title=dict(text=title, font=dict(color=panel_color, size=12)),
         height=480,
-        margin=dict(l=38, r=56, t=36, b=32),
+        margin=dict(l=38, r=64, t=36, b=32),
         plot_bgcolor="#1B1E23",
         paper_bgcolor="#1B1E23",
         xaxis=dict(
@@ -789,15 +818,18 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         showlegend=False,
     ))
 
-    diagnostics = {
-        "cape": cape_cin["cape"],
-        "cin": cape_cin["cin"],
-        "lcl_hpa": parcel["P_lcl"],
-        "lcl_ft": _p_to_ft_asl(parcel["P_lcl"]),
-        "lfc_hpa": cape_cin["lfc"],
-        "el_hpa": cape_cin["el"],
-        "lift_from_p": parcel_lift_p,
-        "lift_from_t": T_lift,
-        "lift_from_td": Td_lift,
-    }
+    if show_parcel and parcel is not None:
+        diagnostics = {
+            "cape": cape_cin["cape"],
+            "cin": cape_cin["cin"],
+            "lcl_hpa": parcel["P_lcl"],
+            "lcl_ft": _p_to_ft_asl(parcel["P_lcl"]),
+            "lfc_hpa": cape_cin["lfc"],
+            "el_hpa": cape_cin["el"],
+            "lift_from_p": parcel_lift_p,
+            "lift_from_t": T_lift,
+            "lift_from_td": Td_lift,
+        }
+    else:
+        diagnostics = {}
     return fig, diagnostics
