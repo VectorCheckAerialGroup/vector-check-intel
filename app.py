@@ -2231,6 +2231,34 @@ else:
                 f'<span style="background:#1E2530;border:1px solid #2A3038;'
                 f'border-radius:3px;padding:3px 9px;color:#D1D5DB;">{_madis_label}</span>'
             )
+        else:
+            # MADIS returned nothing — show a status chip so the operator knows
+            # the integration is being attempted but failing/empty (rather than
+            # silently displaying just the METAR count).
+            _mstat = _sc.get("mesonet_status", {}) or {}
+            if _mstat.get("using_demo"):
+                _madis_status_chip = (
+                    '<span style="background:#2A1F1B;border:1px solid #7C2D12;'
+                    'border-radius:3px;padding:3px 9px;color:#fb923c;" '
+                    'title="The Synoptic demotoken is rate-limited and often '
+                    'returns empty payloads. Register at synopticdata.com for '
+                    'a free token and add it to SECRETS_TOML.">'
+                    'MADIS: demotoken (limited)</span>'
+                )
+            elif _mstat.get("http_error"):
+                _madis_status_chip = (
+                    f'<span style="background:#2A1F1B;border:1px solid #7C2D12;'
+                    f'border-radius:3px;padding:3px 9px;color:#fb923c;" '
+                    f'title="{_mstat.get("message","")}">'
+                    f'MADIS: HTTP {_mstat["http_error"]}</span>'
+                )
+            else:
+                _madis_status_chip = (
+                    '<span style="background:#1E2530;border:1px solid #2A3038;'
+                    'border-radius:3px;padding:3px 9px;color:#6B7280;">'
+                    'MADIS: 0 stations in range</span>'
+                )
+            _src_chips.append(_madis_status_chip)
         if _kestrel_n > 0:
             _src_chips.append(
                 f'<span style="background:#1E2530;border:1px solid #2A3038;'
