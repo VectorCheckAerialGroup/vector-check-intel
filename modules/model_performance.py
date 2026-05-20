@@ -167,9 +167,13 @@ def fetch_metar_history(icao: str, hours: int = 24) -> list:
     if not icao or icao == "NONE":
         return []
 
+    # The aviationweather.gov API was modernized in September 2025. The
+    # legacy `hoursBeforeNow` parameter still works as an alias but the
+    # canonical name is `hours`. Using `hours` ensures we get the full
+    # trailing-N-hour history rather than just the most-recent obs.
     url = (
         f"https://aviationweather.gov/api/data/metar"
-        f"?ids={icao}&format=json&hoursBeforeNow={hours}"
+        f"?ids={icao}&format=json&hours={hours}"
     )
     return _fetch_and_parse_metar(url)
 
@@ -199,10 +203,11 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
     max_lon = lon + deg_lon
 
     # --- Phase 1: discover stations in the bbox ---
+    # Note: post-Sept 2025 API uses `hours=N` (was `hoursBeforeNow=N`).
     bbox_url = (
         f"https://aviationweather.gov/api/data/metar"
         f"?bbox={min_lat:.4f},{min_lon:.4f},{max_lat:.4f},{max_lon:.4f}"
-        f"&format=json&hoursBeforeNow=2"   # only need recent ping for discovery
+        f"&format=json&hours=2"   # only need recent ping for discovery
     )
     discovery = _fetch_and_parse_metar(bbox_url, want_station_id=True)
 
@@ -238,7 +243,7 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
     for sid in station_list:
         sid_url = (
             f"https://aviationweather.gov/api/data/metar"
-            f"?ids={sid}&format=json&hoursBeforeNow={hours}"
+            f"?ids={sid}&format=json&hours={hours}"
         )
         sid_obs = _fetch_and_parse_metar(sid_url, want_station_id=True)
         for o in sid_obs:
@@ -422,27 +427,32 @@ def fetch_mesonet_history(
     radius_km: float = 75.0,
     hours: int = 24,
     token: str = None,
-) -> list:
+) -> tuple:
     """Fetches surface obs from MADIS-aggregated networks via Synoptic Data.
 
-    Returns a list of observation dicts in the same shape as fetch_metar_history,
-    with extra fields:
-        station_id  (str)         — Synoptic STID
-        network     (str)         — provider network code/name
-        qc_flag     (str|None)    — Synoptic QC outcome ("PASS"/"FAIL"/None)
-        elevation_m (float|None)  — station elevation if known
-        source      ("MESONET"|"CWOP")  — distinguishes professional from citizen
+    Returns a tuple (observations, status):
+        observations: list of obs dicts (same shape as fetch_metar_history)
+            with extra fields station_id, network, qc_flag, elevation_m, source.
+        status: dict with keys:
+            ok           — bool, True if fetch succeeded with data
+            message      — human-readable status / error string
+            using_demo   — True if demotoken was used (rate-limited)
+            http_error   — HTTP status code on failure, else None
+            api_status   — Synoptic's own response status if returned
 
     All QC tiers are returned; the caller decides how to filter for display/scoring.
-
-    Args:
-        lat, lon:    centre point
-        radius_km:   search radius in kilometres
-        hours:       trailing window
-        token:       Synoptic API token (falls back to demotoken)
     """
     tok = token or SYNOPTIC_TOKEN
+    using_demo = (tok == "demotoken")
     radius_mi = radius_km * KM_TO_MILES
+
+    status = {
+        "ok": False,
+        "message": "",
+        "using_demo": using_demo,
+        "http_error": None,
+        "api_status": None,
+    }
 
     # Variables mirror the METAR scorecard set so the merged truth set is uniform
     vars_csv = (
@@ -469,13 +479,49 @@ def fetch_mesonet_history(
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        status["http_error"] = e.code
+        if e.code == 401:
+            status["message"] = ("Synoptic API rejected the token (HTTP 401). "
+                                 "If using demotoken, register at "
+                                 "synopticdata.com for a free public token "
+                                 "and add it to SECRETS_TOML as [synoptic] token = \"...\".")
+        elif e.code == 429:
+            status["message"] = ("Synoptic API rate limit hit (HTTP 429). "
+                                 "The demotoken has very tight limits; a registered "
+                                 "free token allows higher request volumes.")
+        else:
+            status["message"] = f"Synoptic API returned HTTP {e.code}."
+        logger.warning("Synoptic fetch failed: %s", status["message"])
+        return [], status
     except Exception as e:
-        logger.warning("Synoptic mesonet fetch failed: %s", e)
-        return []
+        status["message"] = f"Synoptic API unreachable: {e}"
+        logger.warning("Synoptic fetch failed: %s", e)
+        return [], status
+
+    # Check Synoptic's own response status code — it returns 200 even on errors
+    # and signals success via a SUMMARY block inside the payload.
+    summary = payload.get("SUMMARY", {}) or {}
+    api_response_code = summary.get("RESPONSE_CODE")
+    api_message = summary.get("RESPONSE_MESSAGE", "")
+    status["api_status"] = api_response_code
+
+    if api_response_code is not None and api_response_code != 1:
+        # 1 = OK, 2 = zero results found, anything else = error
+        status["message"] = f"Synoptic API: {api_message} (code {api_response_code})"
+        logger.warning("Synoptic API error: %s", status["message"])
+        return [], status
 
     stations = payload.get("STATION", [])
     if not stations:
-        return []
+        if using_demo:
+            status["message"] = ("Synoptic returned zero stations. The demotoken "
+                                 "often returns empty payloads outside specific test "
+                                 "regions. Register for a free token at "
+                                 "synopticdata.com and add it to SECRETS_TOML.")
+        else:
+            status["message"] = f"No mesonet stations found within {radius_km:.0f} km."
+        return [], status
 
     observations = []
 
@@ -574,7 +620,9 @@ def fetch_mesonet_history(
             logger.debug("Mesonet station %s parse failed: %s", stn.get("STID"), e)
             continue
 
-    return observations
+    status["ok"] = True
+    status["message"] = f"{len(observations)} obs from {len(stations)} stations."
+    return observations, status
 
 
 # =============================================================================
@@ -964,7 +1012,7 @@ def compute_performance_scorecard(
     metar_obs, metar_station_ids = fetch_metars_in_radius(
         lat, lon, radius_km=mesonet_radius_km, hours=24,
     )
-    mesonet_obs = fetch_mesonet_history(
+    mesonet_obs, mesonet_status = fetch_mesonet_history(
         lat, lon,
         radius_km=mesonet_radius_km,
         hours=24,
@@ -994,6 +1042,7 @@ def compute_performance_scorecard(
             "mesonet_count": 0,
             "cwop_count": 0,
             "mesonet_stations": [],
+            "mesonet_status": mesonet_status,
             "kestrel_count": 0,
             "has_data": False,
             "message": "No surface observations available in the last 24 hours within the search radius.",
@@ -1079,6 +1128,7 @@ def compute_performance_scorecard(
         "mesonet_count": len(mesonet_obs),
         "cwop_count": cwop_count,
         "mesonet_stations": sorted(mesonet_station_ids),
+        "mesonet_status": mesonet_status,
         "kestrel_count": len(kestrel_obs),
         "window_start_utc": window_start,
         "window_end_utc": window_end,
