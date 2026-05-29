@@ -1,6 +1,11 @@
 import urllib.request
 import json
 from datetime import datetime, timezone
+import logging
+
+from modules.http_client import fetch_json, fetch_text, HttpFetchError
+
+logger = logging.getLogger("arms.data_ingest")
 
 
 def get_model_run_info(model_url: str, model_id: str = None) -> dict:
@@ -55,10 +60,12 @@ def get_model_run_info(model_url: str, model_id: str = None) -> dict:
         return {}
 
     try:
-        req = urllib.request.Request(meta_url, headers={'User-Agent': 'VectorCheck-App/2.1'})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            meta = json.loads(response.read().decode('utf-8'))
+        meta = fetch_json(meta_url, timeout=5, retries=2)
+    except HttpFetchError as e:
+        logger.info("Run-info fetch failed: %s", e)
+        return {}
 
+    try:
         ts = meta.get("last_run_initialisation_time")
         if ts is None:
             return {}
@@ -73,26 +80,33 @@ def get_model_run_info(model_url: str, model_id: str = None) -> dict:
             "run_datetime_utc": run_dt,
             "age_hours": age_hours,
         }
-    except Exception:
+    except (ValueError, TypeError, KeyError) as e:
+        logger.warning("Run-info parse failed: %s", e)
         return {}
 
 
 def get_aviation_weather(icao):
-    """Fetches real-time METAR and TAF for the specified ICAO code."""
+    """Fetches real-time METAR and TAF for the specified ICAO code.
+
+    Returns a (metar, taf) tuple with "NIL" sentinels on failure. Each fetch
+    is independently retried; a failure of one doesn't block the other.
+    """
+    metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw"
+    taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
+
     try:
-        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw"
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            metar = response.read().decode('utf-8').strip()
+        metar = fetch_text(metar_url, timeout=5, retries=2).strip()
+    except HttpFetchError as e:
+        logger.info("METAR fetch failed for %s: %s", icao, e)
+        metar = ""
 
-        url_taf = f"https://aviationweather.gov/api/data/taf?ids={icao}&format=raw"
-        req_taf = urllib.request.Request(url_taf, headers={'User-Agent': 'VectorCheck-App/2.0'})
-        with urllib.request.urlopen(req_taf, timeout=5) as response_taf:
-            taf = response_taf.read().decode('utf-8').strip()
+    try:
+        taf = fetch_text(taf_url, timeout=5, retries=2).strip()
+    except HttpFetchError as e:
+        logger.info("TAF fetch failed for %s: %s", icao, e)
+        taf = ""
 
-        return metar if metar else "NIL", taf if taf else "NIL"
-    except Exception:
-        return "NIL", "NIL"
+    return metar if metar else "NIL", taf if taf else "NIL"
 
 
 def fetch_mission_data(lat, lon, model_url):
@@ -124,19 +138,19 @@ def fetch_mission_data(lat, lon, model_url):
             f"geopotential_height_{p}hPa,wind_speed_{p}hPa,wind_direction_{p}hPa"
         )
 
-    # If the endpoint URL already contains a query string (e.g. CONUS-specific
-    # endpoints like "...?models=ncep_nam_conus" or "...?models=ncep_hrrr_conus"),
-    # we must use "&" to append our parameters, not "?". Failing to handle this
-    # produces a malformed URL with two "?" characters and Open-Meteo returns 400.
+    # Explicit wind_speed_unit=kn — Open-Meteo serves all wind variables in
+    # knots directly, eliminating the silent-conversion failure mode where
+    # an unexpected unit (km/h, m/s, mph) gets treated as the wrong unit.
+    # The detection logic at app.py is retained as a safety net.
     sep = "&" if "?" in model_url else "?"
     url = (
         f"{model_url}{sep}latitude={lat}&longitude={lon}"
         f"&hourly={hourly_vars}&elevation=nan&timezone=UTC"
+        f"&wind_speed_unit=kn"
     )
 
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'VectorCheck-App/2.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception as e:
+        return fetch_json(url, timeout=15, retries=2)
+    except HttpFetchError as e:
+        logger.warning("Mission data fetch failed: %s", e)
         return {"error": True, "message": str(e)}
