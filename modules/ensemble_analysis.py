@@ -30,29 +30,89 @@ logger = logging.getLogger("arms.ensemble")
 
 from modules.open_meteo_endpoints import build_url as _om_url
 
+
+def _mm_credentials_present() -> bool:
+    """Lazy check for Meteomatics credentials. Returns False if module
+    can't be imported or credentials missing."""
+    try:
+        from modules.meteomatics_provider import has_credentials
+        return has_credentials()
+    except ImportError:
+        return False
+
+
+# =============================================================================
+# MODEL ROUTING TABLE
+# =============================================================================
+# Each model has a SOURCE PREFERENCE: Meteomatics when it carries the model
+# AND we have credentials, otherwise Open-Meteo.
+#
+# Each entry is (source, target):
+#   source = "meteomatics" → target is the Meteomatics model id (e.g. "mix")
+#   source = "open-meteo"  → target is the full Open-Meteo URL
+#
+# Verified against the live Meteomatics API on 2026-05-29 (vectorcheck account):
+#   Available: mix, ecmwf-ifs, ecmwf-aifs, ncep-gfs, ncep-hrrr
+#   NOT available on this subscription: dwd-icon, dwd-icon-eu
+#   Never available (Meteomatics doesn't carry): HRDPS, NAM, ACCESS-G
+
+def _build_model_routes() -> dict:
+    """Rebuilds the routing table. Called once at import; if Meteomatics
+    credentials are added later they take effect on next dashboard restart."""
+    mm = _mm_credentials_present()
+    routes = {}
+
+    # Meteomatics MIX — proprietary blend, only available from Meteomatics
+    if mm:
+        routes["MIX"] = ("meteomatics", "mix")
+
+    # ECMWF AIFS — AI-driven model, only available from Meteomatics
+    if mm:
+        routes["AIFS"] = ("meteomatics", "ecmwf-aifs")
+
+    # ECMWF IFS — prefer Meteomatics (bias-corrected, higher cadence),
+    # fall back to Open-Meteo's raw ECMWF
+    routes["ECMWF"] = ("meteomatics", "ecmwf-ifs") if mm else ("open-meteo", _om_url("ecmwf"))
+
+    # GFS — prefer Meteomatics, fall back to Open-Meteo
+    routes["GFS"] = ("meteomatics", "ncep-gfs") if mm else ("open-meteo", _om_url("gfs"))
+
+    # HRRR — prefer Meteomatics, fall back to Open-Meteo (CONUS-only model
+    # but the routing decision is location-agnostic; coverage gating still
+    # happens at the dashboard level via _is_conus_coverage)
+    routes["HRRR"] = ("meteomatics", "ncep-hrrr") if mm else ("open-meteo", _om_url("gfs?models=ncep_hrrr_conus"))
+
+    # ICON Global — Open-Meteo only (vectorcheck subscription doesn't include
+    # DWD ICON via Meteomatics)
+    routes["ICON"] = ("open-meteo", _om_url("dwd-icon"))
+
+    # HRDPS — Open-Meteo only (Meteomatics doesn't carry Canadian regional)
+    routes["HRDPS"] = ("open-meteo", _om_url("gem"))
+
+    # NAM CONUS — Open-Meteo only
+    routes["NAM"] = ("open-meteo", _om_url("gfs?models=ncep_nam_conus"))
+
+    return routes
+
+
+MODEL_ROUTES = _build_model_routes()
+
+# Backward-compat for any external code that still imports MODEL_ENDPOINTS.
+# Resolves to the URL portion of routes that go through Open-Meteo (for the
+# meteomatics:// scheme tag) so legacy callers can still construct fetches.
 MODEL_ENDPOINTS = {
-    "HRDPS": _om_url("gem"),
-    "GFS":   _om_url("gfs"),
-    "ECMWF": _om_url("ecmwf"),
-    "ICON":  _om_url("dwd-icon"),
-    # CONUS-only NCEP mesoscale models served via Open-Meteo's /v1/gfs endpoint.
-    # The &models= parameter targets the specific NWP system; outside CONUS
-    # these endpoints fall back to GFS-13km, which would duplicate our GFS
-    # member, so we gate inclusion on CONUS coverage.
-    "HRRR":  _om_url("gfs?models=ncep_hrrr_conus"),
-    "NAM":   _om_url("gfs?models=ncep_nam_conus"),
+    name: (target if source == "open-meteo" else f"meteomatics://{target}")
+    for name, (source, target) in MODEL_ROUTES.items()
 }
 
 # Regional high-resolution model swap-ins when outside primary coverage.
 # These replace HRDPS in the ensemble when the query point is outside Canada.
 REGIONAL_MODELS = {
-    # Europe — DWD ICON-EU and Meteo-France ARPEGE-Europe are both accurate at regional scale
-    # (~7 km). We use ICON-EU because it's the most-cited skilful model for Europe.
+    # Europe — DWD ICON-EU (~7 km)
     "icon_eu":   _om_url("dwd-icon"),
-    # Pacific / Australia — BOM ACCESS-G at 12 km, global coverage with Australia focus
+    # Pacific / Australia — BOM ACCESS-G at 12 km
     "access_g":  _om_url("bom"),
-    # Generic global best-match — Open-Meteo auto-selects the highest-resolution
-    # model available for the location. This is the universal fallback.
+    # Generic global best-match
     "best":      _om_url("forecast"),
 }
 
@@ -269,45 +329,129 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
     return mf
 
 
+def _fetch_model_meteomatics(lat: float, lon: float, model: str = "mix",
+                              display_name: str = "MM-MIX") -> "ModelForecast":
+    """Fetches one Meteomatics model and returns a ModelForecast.
+
+    Used to add Meteomatics MIX (and optionally other Meteomatics models) as
+    additional ensemble members alongside the raw Open-Meteo models. The
+    quota cost is roughly 1 batch x 10 quota units per call.
+
+    Returns an invalid ModelForecast on any failure (silently — caller sees
+    valid=False and skips it from the ensemble).
+    """
+    mf = ModelForecast(name=display_name)
+    try:
+        from modules.meteomatics_provider import (
+            fetch_meteomatics_forecast,
+            has_credentials,
+        )
+    except ImportError:
+        return mf
+    if not has_credentials():
+        return mf
+
+    # 96h forecast horizon to match Open-Meteo's forecast_days=4
+    result = fetch_meteomatics_forecast(lat, lon, model=model, hours_ahead=96)
+    if result.get("error"):
+        logger.warning("Meteomatics ensemble fetch failed for %s: %s",
+                       model, result.get("message"))
+        return mf
+
+    h = result.get("hourly")
+    if not h or "time" not in h:
+        return mf
+
+    def _truncate(key: str) -> list:
+        """Take the first 72 hours and pad with None for any missing values."""
+        raw = h.get(key) or []
+        out = []
+        for v in raw[:72]:
+            if v is None:
+                out.append(None)
+            else:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    out.append(None)
+        return out
+
+    mf.times = h["time"][:72]
+    # Meteomatics is requested in knots already (:kn), no scaling needed
+    mf.wind_kt = _truncate("wind_speed_10m")
+    mf.wind_dir = _truncate("wind_direction_10m")
+    mf.gust_kt = _truncate("wind_gusts_10m")
+    mf.temp_c = _truncate("temperature_2m")
+    mf.rh = _truncate("relative_humidity_2m")
+    mf.pressure_hpa = _truncate("surface_pressure")
+    mf.precip_prob = _truncate("precipitation_probability")
+    mf.wx_code = _truncate("weather_code")
+    mf.valid = len(mf.wind_kt) >= 24
+    return mf
+
+
 def fetch_all_models(lat: float, lon: float) -> list:
     """Fetches the active ensemble for this location. Returns list of valid
     ModelForecast objects.
 
-    Ensemble composition:
-      - 1 regional high-res model (HRDPS / ICON-EU / ACCESS-G / Best Match)
-      - 3 global models (GFS, ECMWF, ICON)
-      - 2 additional CONUS-specific models (NAM, HRRR) if site is in CONUS
+    Each model uses its best available source — Meteomatics where the
+    subscription includes it (better bias correction, higher cadence),
+    Open-Meteo otherwise. Source routing is declared in MODEL_ROUTES.
 
-    For Canadian sites the typical ensemble size is 4. For CONUS sites it
-    grows to 5-6 (HRDPS over the northern CONUS strip + HRRR/NAM).
+    Ensemble composition (typical CONUS site with Meteomatics credentials):
+      - 1 regional high-res (HRDPS or regional swap)
+      - 3 global models (ECMWF, GFS, ICON)
+      - 2 CONUS mesoscale (HRRR, NAM) when in CONUS
+      - MIX (Meteomatics-only proprietary blend)
+      - AIFS (Meteomatics-only AI-driven forecast)
+
+    Sites in Canada outside CONUS get ~5 models; CONUS sites with Meteomatics
+    get ~8.
     """
     regional_name, regional_url = _select_regional_model(lat, lon)
 
-    active_endpoints = {
-        regional_name: regional_url,
-        "GFS":   MODEL_ENDPOINTS["GFS"],
-        "ECMWF": MODEL_ENDPOINTS["ECMWF"],
-        "ICON":  MODEL_ENDPOINTS["ICON"],
-    }
+    # Build the active model list. Use MODEL_ROUTES wherever possible to get
+    # the best source automatically. Regional model is handled separately
+    # since it depends on the query location.
+    active_routes: dict = {}
 
-    # Add CONUS-specific high-res mesoscale models if the site is in CONUS.
-    # NAM 3km has a longer forecast horizon (60h) than HRRR (48h) but lower
-    # update cadence (4×/day vs hourly).
+    # Regional — use the same routing if it matches a known model name,
+    # else treat as a raw Open-Meteo URL
+    if regional_name in MODEL_ROUTES:
+        active_routes[regional_name] = MODEL_ROUTES[regional_name]
+    else:
+        # Regional swap (icon_eu, access_g, best) — Open-Meteo only
+        active_routes[regional_name] = ("open-meteo", regional_url)
+
+    # Global models — always include
+    for name in ("ECMWF", "GFS", "ICON"):
+        if name in MODEL_ROUTES and name != regional_name:
+            active_routes[name] = MODEL_ROUTES[name]
+
+    # CONUS mesoscale models — only when in CONUS coverage
     if _is_conus_coverage(lat, lon):
-        active_endpoints["NAM"] = MODEL_ENDPOINTS["NAM"]
-        active_endpoints["HRRR"] = MODEL_ENDPOINTS["HRRR"]
+        for name in ("HRRR", "NAM"):
+            if name in MODEL_ROUTES and name != regional_name:
+                active_routes[name] = MODEL_ROUTES[name]
 
-    # Parallel fetch — each model is an independent network call, so
-    # ThreadPoolExecutor cuts wall-clock time from ~Σ(per-model latency) to
-    # ~max(per-model latency). On a CONUS site with 6 active endpoints and
-    # ~3s typical response time, this is 18s → 3s.
+    # Meteomatics-only models (MIX, AIFS) — include when credentials exist
+    for name in ("MIX", "AIFS"):
+        if name in MODEL_ROUTES:
+            active_routes[name] = MODEL_ROUTES[name]
+
+    # Parallel fetch dispatcher — each model routes to its source's fetcher
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    def _dispatch(name: str, source: str, target: str) -> "ModelForecast":
+        if source == "meteomatics":
+            return _fetch_model_meteomatics(lat, lon, model=target, display_name=name)
+        return _fetch_model(name, target, lat, lon)
+
     results = []
-    with ThreadPoolExecutor(max_workers=len(active_endpoints)) as ex:
+    with ThreadPoolExecutor(max_workers=max(2, len(active_routes))) as ex:
         futures = {
-            ex.submit(_fetch_model, name, url, lat, lon): name
-            for name, url in active_endpoints.items()
+            ex.submit(_dispatch, name, source, target): name
+            for name, (source, target) in active_routes.items()
         }
         for fut in as_completed(futures):
             try:
