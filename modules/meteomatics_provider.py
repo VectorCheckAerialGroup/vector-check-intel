@@ -241,6 +241,199 @@ def fetch_meteomatics_elevation(lat: float, lon: float) -> float:
 
 
 # =============================================================================
+# STATION-KEYED FETCHES (mm-mos forecasts + mix-obs observations)
+# =============================================================================
+# Both endpoints are keyed by station ID (e.g. "metar_CYBN") rather than by
+# lat/lon. The dispatcher resolves coordinates to the nearest ICAO and passes
+# the formatted station_id here.
+
+# Surface parameter list for MOS and station obs — matches the 8 surface vars
+# the ensemble + scorecard scoring uses. Fits in one batch (under the 10-param
+# cap), so each call costs 1 quota unit's worth of parameter-locations.
+_STATION_PARAMS_8 = [
+    "t_2m:C", "relative_humidity_2m:p",
+    "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
+    "sfc_pressure:hPa", "msl_pressure:hPa", "weather_symbol_1h:idx",
+]
+
+# Observation-side: METAR-style stations don't always report sfc_pressure
+# under that exact name (some report only msl_pressure). We keep both in the
+# request and let the response say what's available.
+
+
+def fetch_meteomatics_mos(station_id: str, hours_ahead: int = 96) -> dict:
+    """Fetches MOS (Model Output Statistics) forecast for a single station.
+
+    MOS is a statistical post-processing that ties NWP output to historical
+    observations at the station — typically 10-30% better than raw NWP for
+    surface variables at recurrent stations. Updated every 30 minutes,
+    15-day lead, 1-hour resolution.
+
+    Args:
+        station_id:  Meteomatics station identifier — typically formatted as
+                     "metar_<icao>" (e.g. "metar_CYBN") or "wmo_<id>".
+        hours_ahead: forecast horizon. Default 96h to match ensemble.
+
+    Returns:
+        Open-Meteo-shaped dict with "hourly", "hourly_units", "_provider",
+        "_model" keys. Or {"error": True, "message": ...} on failure.
+        Returns a soft-fail (error=True) when the station has no MOS
+        coverage — the dispatcher treats that as model-out-of-coverage and
+        the dashboard shows it as UNAVAILABLE.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": True, "message": "Meteomatics credentials missing",
+                "_provider": "meteomatics-mos"}
+
+    if not station_id or not isinstance(station_id, str):
+        return {"error": True, "message": "Invalid station_id",
+                "_provider": "meteomatics-mos"}
+
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    end = now + timedelta(hours=hours_ahead)
+    validdate = f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
+
+    param_str = ",".join(_STATION_PARAMS_8)
+    url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
+           f"/json?source=mm-mos")
+    try:
+        payload = fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=2,
+                              basic_auth=creds)
+    except HttpFetchError as e:
+        msg = e.message
+        # 404 here means "this station has no MOS forecast available" — soft
+        # failure, not an error. Same shape returned so callers can detect.
+        if e.status == 404:
+            msg = f"No MOS forecast available for station {station_id}"
+        elif e.status == 401:
+            msg = "Meteomatics authentication failed"
+        elif e.status == 402:
+            msg = "Meteomatics quota exceeded"
+        return {"error": True, "message": msg, "status": e.status,
+                "_provider": "meteomatics-mos"}
+
+    # Translate to Open-Meteo shape using the same translator the forecast
+    # path uses. Need the om-name list for the 8 station params.
+    om_names_for_station = [
+        "temperature_2m", "relative_humidity_2m",
+        "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
+        "surface_pressure", "msl_pressure", "weather_code",
+    ]
+    try:
+        translated = _translate_to_open_meteo_shape(payload, om_names_for_station)
+    except Exception as e:
+        logger.exception("MOS translation failed")
+        return {"error": True, "message": f"MOS response translation failed: {e}",
+                "_provider": "meteomatics-mos"}
+
+    translated["_provider"] = "meteomatics-mos"
+    translated["_model"] = "mm-mos"
+    translated["_station_id"] = station_id
+    translated["_run_info"] = _extract_run_info(payload)
+    return translated
+
+
+def fetch_meteomatics_station_obs(station_id: str, hours_back: int = 24) -> list:
+    """Fetches the past N hours of station observations via mix-obs.
+
+    Used as a fallback for the scorecard's METAR ground-truth when
+    AviationWeather.gov returns nothing (non-airport sites, outside CONUS,
+    or coverage gaps).
+
+    Args:
+        station_id:  Meteomatics station identifier (e.g. "metar_CYBN")
+        hours_back:  how far back to fetch. Default 24h.
+
+    Returns:
+        List of observation dicts matching the scorecard's METAR shape:
+            {"time": datetime, "wind_kt": float|None, "wind_dir": float|None,
+             "gust_kt": float|None, "temp_c": float|None,
+             "pressure_hpa": float|None, "station_id": str}
+        Empty list on any failure.
+    """
+    creds = _get_credentials()
+    if creds is None or not station_id:
+        return []
+
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(hours=hours_back)
+    validdate = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}--{now.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
+
+    # Use on_invalid=fill_with_invalid so missing observation hours come back
+    # as -999 rather than failing the whole request. We translate -999 → None
+    # in the parsing below.
+    param_str = ",".join(_STATION_PARAMS_8)
+    url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
+           f"/json?source=mix-obs&on_invalid=fill_with_invalid")
+    try:
+        payload = fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=2,
+                              basic_auth=creds)
+    except HttpFetchError as e:
+        logger.info("mix-obs fetch failed for %s: %s", station_id, e)
+        return []
+
+    # Build per-timestamp observation dicts. Meteomatics returns one block per
+    # parameter, each with the same time grid.
+    by_param: dict = {}
+    times_iso: list = []
+    for block in (payload.get("data") or []):
+        coords = block.get("coordinates") or []
+        if not coords:
+            continue
+        dates = coords[0].get("dates") or []
+        if not dates:
+            continue
+        by_param[block.get("parameter")] = dates
+        if not times_iso:
+            times_iso = [d["date"] for d in dates]
+
+    if not times_iso:
+        return []
+
+    def _val(mm_key: str, idx: int):
+        """Pulls a value at index idx for parameter mm_key. Returns None on
+        sentinel (-999), missing, or unparseable."""
+        dates = by_param.get(mm_key)
+        if not dates or idx >= len(dates):
+            return None
+        v = dates[idx].get("value")
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        # Meteomatics sentinel for missing data
+        if f <= -998.0:
+            return None
+        return f
+
+    obs_list = []
+    for i, t_str in enumerate(times_iso):
+        try:
+            t = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        # Use surface pressure if reported, else fall back to MSL pressure.
+        # The scorecard's MAE comparator expects pressure in hPa.
+        sfc_p = _val("sfc_pressure:hPa", i)
+        if sfc_p is None:
+            sfc_p = _val("msl_pressure:hPa", i)
+        obs_list.append({
+            "time":          t,
+            "station_id":    station_id,
+            "wind_kt":       _val("wind_speed_10m:kn", i),
+            "wind_dir":      _val("wind_dir_10m:d", i),
+            "gust_kt":       _val("wind_gusts_10m_1h:kn", i),
+            "temp_c":        _val("t_2m:C", i),
+            "pressure_hpa":  sfc_p,
+            "_source":       "meteomatics-obs",
+        })
+    return obs_list
+
+
+# =============================================================================
 # FETCH (with subscription-aware batching)
 # =============================================================================
 # Meteomatics trial subscriptions cap requests at 10 parameters each, so we
