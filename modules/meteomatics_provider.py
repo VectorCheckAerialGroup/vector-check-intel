@@ -109,23 +109,51 @@ def _build_param_list() -> list[tuple[str, str]]:
 # (MIX), not on raw NWP models. Requesting these against ecmwf-ifs, ncep-gfs,
 # ncep-hrrr, or ecmwf-aifs causes a 404 that kills the whole batched request
 # (Meteomatics has all-or-nothing semantics). Filter these out for raw models.
-_BLEND_ONLY_PARAMS = {
-    "weather_symbol_1h:idx",   # WMO weather code, derived
-    "visibility:m",            # diagnostic field, not in raw model output
-    "pbl_height:m",            # boundary layer height, derived
-    "freezing_level:m",        # derived from temperature profile
-    "prob_precip_1h:p",        # probabilistic, requires ensemble
-    "cape:Jkg",                # NOT blend-only — kept here as reminder; AVAILABLE on ECMWF/GFS, NOT on AIFS
+
+# Per-model unsupported PRESSURE LEVELS (mapped empirically via the diagnostic
+# page on 2026-05-29 against the vectorcheck subscription). The provider's
+# blocklist auto-generates the 5 per-level parameter names (t/rh/gh/ws/wd)
+# from this so we only have to maintain the level set per model.
+_MODEL_MISSING_PRESSURE_LEVELS = {
+    "ecmwf-ifs":  [975],
+    "ecmwf-aifs": [800, 900, 950, 975],
+    "ncep-gfs":   [400, 600, 975],
+    "ncep-hrrr":  [975],
+    # "mix" has all levels — intentionally omitted
 }
 
-# Per-model overrides — if a model has its own specific incompatibility,
-# add it here. Discovered empirically from the 2026-05-29 diagnostic.
-_MODEL_PARAM_BLOCKLIST = {
+# Per-model unsupported SURFACE / DERIVED parameters. These are products that
+# require a bias-corrected blend or extra post-processing that raw models
+# don't carry. Discovered via the diagnostic page on 2026-05-29.
+_MODEL_MISSING_SURFACE_PARAMS = {
     "ecmwf-ifs":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
-    "ecmwf-aifs": {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p", "cape:Jkg"},
+    "ecmwf-aifs": {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p",
+                   "cape:Jkg", "freezing_level:m"},
     "ncep-gfs":   {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
     "ncep-hrrr":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
-    # "mix" is intentionally omitted — it supports everything
+    # "mix" supports everything — intentionally omitted
+}
+
+
+def _build_blocklist_for_model(model: str) -> set:
+    """Computes the full set of unsupported Meteomatics parameter names for
+    a given model. Combines surface gaps (from _MODEL_MISSING_SURFACE_PARAMS)
+    with the auto-generated pressure-level set (from _MODEL_MISSING_PRESSURE_LEVELS).
+    """
+    block = set(_MODEL_MISSING_SURFACE_PARAMS.get(model, set()))
+    for level in _MODEL_MISSING_PRESSURE_LEVELS.get(model, []):
+        block.add(f"t_{level}hPa:C")
+        block.add(f"relative_humidity_{level}hPa:p")
+        block.add(f"gh_{level}hPa:m")
+        block.add(f"wind_speed_{level}hPa:kn")
+        block.add(f"wind_dir_{level}hPa:d")
+    return block
+
+
+# Pre-compute blocklists once at module load — they don't change per request.
+_MODEL_PARAM_BLOCKLIST = {
+    model: _build_blocklist_for_model(model)
+    for model in ("ecmwf-ifs", "ecmwf-aifs", "ncep-gfs", "ncep-hrrr")
 }
 
 
