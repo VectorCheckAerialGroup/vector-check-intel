@@ -93,13 +93,13 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
         f"&hourly={_PERF_VARS}"
         f"&past_days=1&forecast_days=1"
         f"&timezone=UTC"
+        f"&wind_speed_unit=kn"
     )
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        data = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2)
+    except _HttpFetchError as e:
         logger.warning("Model history fetch failed for %s: %s", model_name, e)
         return None
 
@@ -126,6 +126,13 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
     if not kept_indices:
         return None
 
+    # Robust wind-unit detection — same pattern as ensemble_analysis fetcher.
+    _wu = data.get("hourly_units", {}).get("wind_speed_10m", "kn").lower()
+    if "km/h" in _wu:   _wind_scale = 0.539957
+    elif "m/s" in _wu:  _wind_scale = 1.943844
+    elif "mph" in _wu:  _wind_scale = 0.868976
+    else:               _wind_scale = 1.0
+
     def _pick(key, scale=1.0):
         raw = h.get(key, [])
         out = []
@@ -141,9 +148,9 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
 
     return {
         "times": [times_iso[i] for i in kept_indices],
-        "wind_kt": _pick("wind_speed_10m", KMH_TO_KT),
+        "wind_kt": _pick("wind_speed_10m", _wind_scale),
         "wind_dir": _pick("wind_direction_10m"),
-        "gust_kt": _pick("wind_gusts_10m", KMH_TO_KT),
+        "gust_kt": _pick("wind_gusts_10m", _wind_scale),
         "temp_c": _pick("temperature_2m"),
         "pressure_hpa": _pick("surface_pressure"),
         "rh": _pick("relative_humidity_2m"),
@@ -257,10 +264,9 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
 def _fetch_and_parse_metar(url: str, want_station_id: bool = False) -> list:
     """Shared METAR JSON parse logic for single-ICAO and bbox queries."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        data = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2)
+    except _HttpFetchError as e:
         logger.warning("METAR fetch failed: %s", e)
         return []
 
@@ -476,27 +482,24 @@ def fetch_mesonet_history(
     url = f"{SYNOPTIC_TIMESERIES_URL}?{qs}"
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        status["http_error"] = e.code
-        if e.code == 401:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        payload = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2)
+    except _HttpFetchError as e:
+        status["http_error"] = e.status
+        if e.status == 401:
             status["message"] = ("Synoptic API rejected the token (HTTP 401). "
                                  "If using demotoken, register at "
                                  "synopticdata.com for a free public token "
                                  "and add it to SECRETS_TOML as [synoptic] token = \"...\".")
-        elif e.code == 429:
+        elif e.status == 429:
             status["message"] = ("Synoptic API rate limit hit (HTTP 429). "
                                  "The demotoken has very tight limits; a registered "
                                  "free token allows higher request volumes.")
+        elif e.status is not None:
+            status["message"] = f"Synoptic API returned HTTP {e.status}."
         else:
-            status["message"] = f"Synoptic API returned HTTP {e.code}."
+            status["message"] = f"Synoptic API unreachable: {e.message}"
         logger.warning("Synoptic fetch failed: %s", status["message"])
-        return [], status
-    except Exception as e:
-        status["message"] = f"Synoptic API unreachable: {e}"
-        logger.warning("Synoptic fetch failed: %s", e)
         return [], status
 
     # Check Synoptic's own response status code — it returns 200 even on errors
@@ -1080,6 +1083,29 @@ def compute_performance_scorecard(
             "rolling": None,
         }
 
+    # Phase 1: fetch all model histories in parallel. The fetches are the
+    # I/O bottleneck (4-6 × ~3s each → ~15-20s serial). The downstream MAE
+    # computation is fast and stays serial.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    in_coverage_models = [
+        (name, url) for name, url, in_coverage in all_candidate_models if in_coverage
+    ]
+    histories: dict = {}
+    if in_coverage_models:
+        with ThreadPoolExecutor(max_workers=len(in_coverage_models)) as ex:
+            futures = {
+                ex.submit(_fetch_model_history, name, url, lat, lon): name
+                for name, url in in_coverage_models
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    histories[name] = fut.result()
+                except Exception as e:
+                    logger.warning("Model-history worker crashed for %s: %s", name, e)
+                    histories[name] = None
+
     model_results = []
     for name, url, in_coverage in all_candidate_models:
         if not in_coverage:
@@ -1090,7 +1116,7 @@ def compute_performance_scorecard(
             model_results.append(_empty_record(name, "OUT_OF_COVERAGE"))
             continue
 
-        history = _fetch_model_history(name, url, lat, lon)
+        history = histories.get(name)
         if history is None:
             model_results.append(_empty_record(name, "UNAVAILABLE"))
             continue
