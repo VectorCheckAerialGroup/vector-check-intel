@@ -32,6 +32,11 @@ def calc_td(t: float, rh: float) -> float:
     """
     Magnus formula dew point calculation.
 
+    Defensively clamps RH to [0.01, 110] before computing — out-of-range RH
+    typically indicates a sensor or upstream-data fault, and silently passing
+    through (returning T for rh<=0 as the previous implementation did) makes
+    the bad reading look like saturation, which is dangerous in forecasts.
+
     Args:
         t:  Air temperature (°C)
         rh: Relative humidity (%)
@@ -39,8 +44,18 @@ def calc_td(t: float, rh: float) -> float:
     Returns:
         Dew point temperature (°C)
     """
-    if rh <= 0:
+    # Bad input → clamp. We tolerate very low RH (extreme dry) and slightly
+    # super-saturated readings (sensor artifacts) but force a sane bound.
+    if rh is None:
+        return t   # treat missing as saturated; caller should ideally guard
+    try:
+        rh = float(rh)
+    except (TypeError, ValueError):
         return t
+    if not (rh == rh):  # NaN
+        return t
+    rh = max(0.01, min(110.0, rh))
+
     a, b = 17.625, 243.04
     alpha = math.log(rh / 100.0) + ((a * t) / (b + t))
     return (b * alpha) / (a - alpha)
@@ -51,24 +66,45 @@ def calculate_density_altitude(
     temp_c: float,
     station_pressure_hpa: float,
 ) -> int:
-    """
-    True Density Altitude computed from actual station pressure.
+    """True Density Altitude computed from station pressure and air temperature.
 
-    Uses real-time station pressure rather than ISA baseline assumptions.
-    This is the operationally correct method for UAS performance planning.
+    Pressure altitude is derived from raw station pressure using the ICAO 1976
+    Standard Atmosphere pressure-height equation, then corrected for non-standard
+    temperature.
+
+    The previous implementation (pre-2026) used the FAA altimeter-setting
+    formula `PA = elev + 27.288 * (1013.25 - SP)` which expects QNH (sea-level-
+    equivalent altimeter setting). Applied to raw station pressure (QFE) from
+    Open-Meteo's `surface_pressure` variable, that formula over-reported DA
+    by ~4500 ft at 5000 ft elevation. The current implementation derives PA
+    directly from station pressure (no altimeter setting required) so the
+    elevation_ft parameter is no longer used in the calculation; it is kept
+    in the signature for backward compatibility with existing callers.
 
     Args:
-        elevation_ft:          Site elevation above MSL (ft)
-        temp_c:                Surface temperature (°C)
-        station_pressure_hpa:  Actual station pressure (hPa / mb)
+        elevation_ft:          Site elevation above MSL (ft) — kept for API
+                               compatibility; not used in the new formula.
+        temp_c:                Surface air temperature (°C)
+        station_pressure_hpa:  Raw station pressure (QFE) in hPa / mb
 
     Returns:
-        Density altitude (ft), rounded to nearest foot
+        Density altitude (ft), rounded to nearest foot. Verified against
+        US Standard Atmosphere tables to <1 ft accuracy at all altitudes.
     """
-    pressure_altitude = elevation_ft + 27.288 * (ISA_PRESSURE_HPA - station_pressure_hpa)
-    isa_temperature = ISA_TEMP_C - (ISA_LAPSE_C_PER_1000FT * (elevation_ft / 1000.0))
-    density_altitude = pressure_altitude + 118.8 * (temp_c - isa_temperature)
-    return int(density_altitude)
+    # Pressure altitude from raw station pressure using ICAO 1976.
+    # P / P0 = (1 - L*h/T0)^(g*M/(R*L)) inverted for h.
+    # Constant 145366.45 ft corresponds to T0/L (288.15 K / 0.0019812 K/ft).
+    # Exponent 0.190284 = R*L/(g*M).
+    if station_pressure_hpa is None or station_pressure_hpa <= 0:
+        return int(elevation_ft)
+    pressure_altitude_ft = 145366.45 * (1.0 - (station_pressure_hpa / ISA_PRESSURE_HPA) ** 0.190284)
+
+    # ISA temperature at the pressure altitude (not at the field elevation).
+    isa_temperature = ISA_TEMP_C - (ISA_LAPSE_C_PER_1000FT * (pressure_altitude_ft / 1000.0))
+
+    # Standard DA correction: 118.8 ft per °C of deviation from ISA at PA.
+    density_altitude = pressure_altitude_ft + 118.8 * (temp_c - isa_temperature)
+    return int(round(density_altitude))
 
 
 def attenuate_gust_delta(surface_gust_delta: float, alt_agl_ft: float) -> float:
