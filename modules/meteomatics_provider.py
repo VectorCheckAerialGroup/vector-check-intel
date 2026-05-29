@@ -196,6 +196,51 @@ def has_credentials() -> bool:
 
 
 # =============================================================================
+# ELEVATION (one-shot per lat/lon, cached forever)
+# =============================================================================
+# Module-level cache keyed by (lat, lon) rounded to 2 decimal places (~1.1 km).
+# Elevation never changes for a given coordinate so we keep it forever and
+# never invalidate.
+_ELEVATION_CACHE: dict = {}
+
+
+def fetch_meteomatics_elevation(lat: float, lon: float) -> float:
+    """Returns ground elevation in metres at (lat, lon) using Meteomatics'
+    `elevation:m` parameter. Costs 1 quota unit per unique location.
+    Cached at module level so each (lat, lon) is only queried once per
+    process lifetime.
+
+    Returns 0.0 on any failure — defensive callers handle that as sea level.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return 0.0
+    key = (round(lat, 2), round(lon, 2))
+    if key in _ELEVATION_CACHE:
+        return _ELEVATION_CACHE[key]
+
+    # elevation:m is time-invariant — use a single arbitrary timestamp.
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    timestamp = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+    url = f"{METEOMATICS_BASE}/{timestamp}/elevation:m/{lat:.4f},{lon:.4f}/json"
+    try:
+        payload = fetch_json(url, timeout=5, retries=1, basic_auth=creds)
+        data = payload.get("data") or []
+        if data and data[0].get("coordinates"):
+            dates = data[0]["coordinates"][0].get("dates") or []
+            if dates:
+                val = dates[0].get("value")
+                if isinstance(val, (int, float)):
+                    elev = float(val)
+                    _ELEVATION_CACHE[key] = elev
+                    return elev
+    except HttpFetchError as e:
+        logger.info("Meteomatics elevation fetch failed for (%s, %s): %s", lat, lon, e)
+    _ELEVATION_CACHE[key] = 0.0
+    return 0.0
+
+
+# =============================================================================
 # FETCH (with subscription-aware batching)
 # =============================================================================
 # Meteomatics trial subscriptions cap requests at 10 parameters each, so we
@@ -490,13 +535,14 @@ def _translate_to_open_meteo_shape(payload: dict, om_names: list[str]) -> dict:
         else:
             hourly_units[om_name] = ""
 
-    # Elevation is not returned by Meteomatics in this endpoint — defer to
-    # caller's geographic lookup (the dashboard uses Open-Meteo's elevation
-    # for the active site anyway via its own static computation).
+    # Elevation: Meteomatics' timeseries endpoint doesn't include station
+    # elevation. Rather than returning None (which trips downstream code
+    # that does `data.get('elevation', 0) * ...`), we omit the key entirely
+    # so callers' `.get('elevation', 0)` defaults work. Open-Meteo's free
+    # elevation endpoint is hit separately by the data_ingest dispatcher.
     return {
         "hourly": hourly,
         "hourly_units": hourly_units,
-        "elevation": None,    # caller resolves separately
     }
 
 
