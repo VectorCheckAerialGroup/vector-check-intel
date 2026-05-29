@@ -28,17 +28,19 @@ logger = logging.getLogger("arms.ensemble")
 # CONFIGURATION
 # =============================================================================
 
+from modules.open_meteo_endpoints import build_url as _om_url
+
 MODEL_ENDPOINTS = {
-    "HRDPS": "https://api.open-meteo.com/v1/gem",
-    "GFS":   "https://api.open-meteo.com/v1/gfs",
-    "ECMWF": "https://api.open-meteo.com/v1/ecmwf",
-    "ICON":  "https://api.open-meteo.com/v1/dwd-icon",
+    "HRDPS": _om_url("gem"),
+    "GFS":   _om_url("gfs"),
+    "ECMWF": _om_url("ecmwf"),
+    "ICON":  _om_url("dwd-icon"),
     # CONUS-only NCEP mesoscale models served via Open-Meteo's /v1/gfs endpoint.
     # The &models= parameter targets the specific NWP system; outside CONUS
     # these endpoints fall back to GFS-13km, which would duplicate our GFS
     # member, so we gate inclusion on CONUS coverage.
-    "HRRR":  "https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus",
-    "NAM":   "https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus",
+    "HRRR":  _om_url("gfs?models=ncep_hrrr_conus"),
+    "NAM":   _om_url("gfs?models=ncep_nam_conus"),
 }
 
 # Regional high-resolution model swap-ins when outside primary coverage.
@@ -46,12 +48,12 @@ MODEL_ENDPOINTS = {
 REGIONAL_MODELS = {
     # Europe — DWD ICON-EU and Meteo-France ARPEGE-Europe are both accurate at regional scale
     # (~7 km). We use ICON-EU because it's the most-cited skilful model for Europe.
-    "icon_eu":   "https://api.open-meteo.com/v1/dwd-icon",
+    "icon_eu":   _om_url("dwd-icon"),
     # Pacific / Australia — BOM ACCESS-G at 12 km, global coverage with Australia focus
-    "access_g":  "https://api.open-meteo.com/v1/bom",
+    "access_g":  _om_url("bom"),
     # Generic global best-match — Open-Meteo auto-selects the highest-resolution
     # model available for the location. This is the universal fallback.
-    "best":      "https://api.open-meteo.com/v1/forecast",
+    "best":      _om_url("forecast"),
 }
 
 
