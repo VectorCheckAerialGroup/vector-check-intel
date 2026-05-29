@@ -406,7 +406,7 @@ def extract_high_res_profile(h: dict, idx: int,
 
 P_BOTTOM = 1050.0
 P_TOP = 100.0
-SKEW_C_PER_DECADE = 35.0
+SKEW_C_PER_DECADE = 50.0
 
 
 def skew_x(temp_C, pressure_hPa):
@@ -422,7 +422,7 @@ def skew_x(temp_C, pressure_hPa):
 def render_sounding_plotly(profile: dict, parcel_lift_p: float,
                             title: str = "", panel_color: str = "#D1D5DB",
                             sfc_elevation_ft: float = 0.0,
-                            x_range: tuple = (-40, 40),
+                            x_range: tuple = (-40, 30),
                             show_parcel: bool = False) -> tuple:
     """Renders the interactive Skew-T as a Plotly figure.
 
@@ -723,7 +723,7 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     #   1 paper-y unit = H px
     # So paper-y has H/W times as many pixels per unit. To make a unit-length
     # vector visually equal on screen, scale y components by W/H.
-    ASPECT_W_OVER_H = 340.0 / 410.0   # ~0.83
+    ASPECT_W_OVER_H = 340.0 / 360.0   # ~0.94 — near-square panel
 
     LOGP_SCALE = math.log10(P_BOTTOM / P_TOP)   # ~1.022
 
@@ -868,7 +868,7 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
 
     fig.update_layout(
         title=dict(text=title, font=dict(color=panel_color, size=12)),
-        height=430,
+        height=380,
         margin=dict(l=38, r=60, t=34, b=30),
         plot_bgcolor="#1B1E23",
         paper_bgcolor="#1B1E23",
