@@ -219,12 +219,27 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
     end = now + timedelta(hours=6)
     validdate = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
 
-    # 8 scorecard-essential parameters. One batch.
+    # 6 scorecard-essential parameters. The MAE scoring against METAR uses
+    # wind speed/dir/gust, temperature, RH, and pressure — nothing else.
+    # Earlier versions included visibility:m and weather_symbol_1h:idx but
+    # those are not available on raw NWP models (ecmwf-ifs, ncep-gfs,
+    # ncep-hrrr, ecmwf-aifs) — only on the MIX bias-corrected blend. Since
+    # Meteomatics returns 404 for the whole request when any single param
+    # is unavailable, including those broke every model except MIX. They're
+    # not used in scoring anyway, so they're gone.
     mm_params = [
         "t_2m:C", "relative_humidity_2m:p",
         "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
-        "sfc_pressure:hPa", "visibility:m", "weather_symbol_1h:idx",
+        "sfc_pressure:hPa",
     ]
+    # Additionally filter against the per-model blocklist (in case future
+    # additions to mm_params accidentally include a blend-only param).
+    try:
+        from modules.meteomatics_provider import _MODEL_PARAM_BLOCKLIST
+        block = _MODEL_PARAM_BLOCKLIST.get(METEOMATICS_MODELS[model], set())
+        mm_params = [p for p in mm_params if p not in block]
+    except (ImportError, KeyError):
+        pass
     param_str = ",".join(mm_params)
     model_id = METEOMATICS_MODELS[model]
     url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
