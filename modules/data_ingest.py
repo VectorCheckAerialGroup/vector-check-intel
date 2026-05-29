@@ -154,3 +154,132 @@ def fetch_mission_data(lat, lon, model_url):
     except HttpFetchError as e:
         logger.warning("Mission data fetch failed: %s", e)
         return {"error": True, "message": str(e)}
+
+
+# =============================================================================
+# PROVIDER DISPATCH / FAILOVER
+# =============================================================================
+# This is the multi-provider routing layer. Each model in the dashboard has
+# a primary provider (typically Meteomatics) and an optional secondary
+# (typically Open-Meteo). When the primary fails, we transparently fall
+# back to the secondary and surface a structured status the caller can use
+# to display an alert banner.
+#
+# The routing table itself lives in app.py — this module just executes a
+# given route. That keeps the model-name → provider mapping with the UI
+# concerns and keeps this module's contract focused on "given a route,
+# fetch the data."
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class ProviderRoute:
+    """A forecast routing instruction.
+
+    Attributes:
+        primary:           ("meteomatics", model_id) or ("open-meteo", url)
+        fallback:          optional same-shape tuple for failover
+        model_label:       human-readable model name (e.g. "ECMWF IFS")
+                           used for status messages.
+    """
+    primary: tuple                       # (provider_name, target)
+    fallback: Optional[tuple] = None
+    model_label: str = ""
+
+
+@dataclass
+class ProviderFetchResult:
+    """Result of a forecast fetch attempt with metadata about which provider
+    actually served the data.
+
+    Attributes:
+        data:               the forecast payload (Open-Meteo shape) or empty dict
+        served_by:          "meteomatics" / "open-meteo" / None on total failure
+        ok:                 True if at least one provider succeeded
+        attempted:          list of (provider, status) tuples in order tried
+        primary_failed:     True if the primary provider failed (even if fallback succeeded)
+        primary_error:      error message from primary if it failed, else None
+    """
+    data: dict = field(default_factory=dict)
+    served_by: Optional[str] = None
+    ok: bool = False
+    attempted: list = field(default_factory=list)
+    primary_failed: bool = False
+    primary_error: Optional[str] = None
+
+
+def _fetch_one(provider: str, target: str, lat: float, lon: float) -> dict:
+    """Fetches forecast data from one provider. Returns the standard payload
+    shape (with "_provider" key set) or an error dict.
+    """
+    if provider == "open-meteo":
+        result = fetch_mission_data(lat, lon, target)
+        # fetch_mission_data uses the legacy "error" key; preserve that
+        if isinstance(result, dict) and not result.get("error"):
+            result["_provider"] = "open-meteo"
+        return result
+
+    if provider == "meteomatics":
+        # Lazy import to avoid hard dependency in places that don't use it
+        from modules.meteomatics_provider import fetch_meteomatics_forecast
+        return fetch_meteomatics_forecast(lat, lon, model=target)
+
+    return {
+        "error": True,
+        "message": f"Unknown provider: {provider}",
+        "_provider": provider,
+    }
+
+
+def fetch_forecast_with_fallback(route: ProviderRoute, lat: float, lon: float) -> ProviderFetchResult:
+    """Executes a forecast fetch with provider failover.
+
+    Tries the primary provider first. On failure, falls back to the secondary
+    if one is defined. Records which provider actually served the data and
+    whether the primary failed (so callers can show appropriate alerting).
+    """
+    result = ProviderFetchResult()
+
+    # --- Primary attempt ---
+    primary_provider, primary_target = route.primary
+    data = _fetch_one(primary_provider, primary_target, lat, lon)
+    if not data.get("error"):
+        result.data = data
+        result.served_by = primary_provider
+        result.ok = True
+        result.attempted.append((primary_provider, "ok"))
+        return result
+
+    # Primary failed
+    result.primary_failed = True
+    result.primary_error = data.get("message", "unknown error")
+    result.attempted.append((primary_provider, result.primary_error))
+    logger.warning(
+        "Primary provider %s failed for %s: %s",
+        primary_provider, route.model_label, result.primary_error,
+    )
+
+    # --- Fallback attempt ---
+    if route.fallback is None:
+        result.data = data       # carry error through so caller sees the message
+        return result
+
+    fb_provider, fb_target = route.fallback
+    fb_data = _fetch_one(fb_provider, fb_target, lat, lon)
+    if not fb_data.get("error"):
+        result.data = fb_data
+        result.served_by = fb_provider
+        result.ok = True
+        result.attempted.append((fb_provider, "ok-fallback"))
+        return result
+
+    # Both failed
+    result.attempted.append((fb_provider, fb_data.get("message", "unknown")))
+    result.data = fb_data     # surface the fallback error too
+    logger.error(
+        "Both providers failed for %s: primary=%s, fallback=%s",
+        route.model_label, primary_provider, fb_provider,
+    )
+    return result
