@@ -123,39 +123,32 @@ def _lcl_pressure(T_C: float, Td_C: float, P_hPa: float) -> tuple:
 def lift_parcel(P0_hPa: float, T0_C: float, Td0_C: float,
                 P_top_hPa: float = 100.0,
                 dP_hPa: float = 5.0) -> dict:
-    """Lifts a parcel from (P0, T0, Td0) to P_top.
+    """Lifts a SATURATED parcel from (P0, T0) upward following the moist
+    (pseudo) adiabat.
 
-    Returns dict with arrays of pressures, parcel temperatures, and the
-    diagnostic levels.
+    Operational assumption: the parcel is assumed to be already saturated
+    at the lift level (immediate condensation). This skips the dry adiabatic
+    stage and starts the moist adiabat from P0 directly — appropriate for
+    "lifted saturated parcel" analysis used in convective potential and
+    elevated-source applications.
+
+    Td0_C is preserved in the return dict for reference but is not used in
+    the ascent (saturation is assumed).
+
+    Returns dict with:
+        pressures   — np.ndarray, descending from P0 to P_top
+        parcel_T    — np.ndarray, moist-adiabat temperatures (°C)
+        P_start     — original lift pressure
+        T_start     — original lift temperature
+        Td_start    — original lift dewpoint (for reference)
+        P_lcl       — set to P0 (parcel is saturated at lift level by assumption)
+        T_lcl       — set to T0
     """
-    # Stage 1: dry adiabat from P0 up to LCL
-    P_lcl, T_lcl = _lcl_pressure(T0_C, Td0_C, P0_hPa)
-    theta = _potential_temperature(T0_C, P0_hPa)
+    pressures = [P0_hPa]
+    parcel_T = [T0_C]
 
-    pressures = []
-    parcel_T = []
-
-    # Build dense pressure grid from P0 down to P_top
-    # Stage 1: dry adiabat from P0 up to (but not past) the LCL
-    p = P0_hPa
-    while p >= P_top_hPa:
-        if p >= P_lcl:
-            # Dry adiabat segment — append pressure and temperature together
-            pressures.append(p)
-            parcel_T.append(_dry_adiabat_temp(theta, p))
-        else:
-            # We have crossed the LCL — stop the dry segment here
-            break
-        p -= dP_hPa
-
-    # Stage 2: moist adiabat from LCL down to P_top
-    # Insert the exact LCL point for a clean kink (only if not already there)
-    if not pressures or pressures[-1] > P_lcl:
-        pressures.append(P_lcl)
-        parcel_T.append(T_lcl)
-
-    T_current = T_lcl
-    p_current = P_lcl
+    T_current = T0_C
+    p_current = P0_hPa
     while p_current > P_top_hPa:
         dp = -dP_hPa
         dT = _moist_adiabat_step(T_current, p_current, dp)
@@ -169,8 +162,11 @@ def lift_parcel(P0_hPa: float, T0_C: float, Td0_C: float,
     return {
         "pressures": np.array(pressures),
         "parcel_T": np.array(parcel_T),
-        "P_lcl": P_lcl,
-        "T_lcl": T_lcl,
+        # For the saturated-parcel theory the parcel is condensing at the lift
+        # level itself, so P_lcl == P0. Kept in the return dict for API stability
+        # with the rest of the module.
+        "P_lcl": P0_hPa,
+        "T_lcl": T0_C,
         "P_start": P0_hPa,
         "T_start": T0_C,
         "Td_start": Td0_C,
@@ -647,16 +643,19 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
             showlegend=False,
         ))
 
-        # LCL marker
-        lcl_x = skew_x(parcel["T_lcl"], parcel["P_lcl"])
+        # Lift-level marker (the level from which the saturated parcel was
+        # lifted; for the saturated-parcel theory this is the operational
+        # reference, not an LCL since condensation is assumed at this level).
+        lift_x = skew_x(parcel["T_lcl"], parcel["P_lcl"])
         fig.add_trace(go.Scatter(
-            x=[lcl_x], y=[parcel["P_lcl"]],
+            x=[lift_x], y=[parcel["P_lcl"]],
             mode="markers+text",
             marker=dict(size=10, color="#fbbf24", symbol="circle-open",
                         line=dict(width=2)),
-            text=["LCL"], textposition="middle right",
+            text=["Lift"], textposition="middle right",
             textfont=dict(color="#fbbf24", size=10),
-            hovertemplate=f"<b>LCL</b><br>{parcel['P_lcl']:.0f} hPa<br>{parcel['T_lcl']:.1f}°C<extra></extra>",
+            hovertemplate=f"<b>Lift Level</b><br>{parcel['P_lcl']:.0f} hPa<br>"
+                          f"{parcel['T_lcl']:.1f}°C (saturated)<extra></extra>",
             showlegend=False,
         ))
 
@@ -692,67 +691,185 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
                 showlegend=False,
             ))
 
-    # Wind barbs in the right margin. Drawn as short directional lines
-    # pointing the direction the wind is coming FROM, with the speed in knots
-    # as a small label. Decluttered to roughly every 40 hPa.
+    # =========================================================================
+    # AVIATION-STANDARD WIND BARBS
     #
-    # Plotly annotations don't accept `axref="paper"`, so we render the shafts
-    # as Scatter line traces using the secondary y-axis (yaxis2) with x in
-    # paper-fraction space via the `xref` trick: we use a separate xaxis that
-    # spans 0->1 in paper space. Simpler: use the existing x-axis but compute
-    # the right-edge data x from the x_range, plus a tiny shaft offset.
-    _last_barb_p = None
-    barb_x_data = x_range[1] - 4   # ~4°C inside the right edge
-    shaft_dx = 2.5                 # shaft length in °C (data units)
+    # Each barb is a glyph consisting of:
+    #   - a staff pointing in the direction the wind is coming FROM
+    #   - half-barb (small tick) = 5 kt
+    #   - full barb (longer tick) = 10 kt
+    #   - pennant (filled triangle) = 50 kt
+    #   - circle around the station for calm (< 3 kt)
+    # Speed is rounded to nearest 5 kt then decomposed into pennants/full/half.
+    #
+    # Implementation notes:
+    #   - We render in paper x-coords + data y-coords using Plotly Shapes
+    #     (which accept this hybrid; annotations cannot). That gives screen-
+    #     space-consistent barb geometry regardless of chart aspect ratio.
+    #   - Pennants are drawn as filled triangle shapes via SVG path strings.
+    # =========================================================================
+    BARB_COL_X    = 0.94        # paper-fraction x for the barb anchor column
+    STAFF_LEN     = 0.055       # staff length, paper-fraction units (~25 px tall)
+    BARB_LEN      = 0.032       # half/full barb tick length, paper x units
+    BARB_GAP      = 0.10        # spacing between successive barbs (as fraction of staff)
+    SHAPE_COLOR   = "#cbd5e1"   # standard color for all barbs (no speed-banding)
+    SHAPE_WIDTH   = 1.3
 
+    # Vertical aspect correction. The Plotly figure is roughly 480 px tall and
+    # the data area within paper-y [0,1] is ~410 px. Paper-x spans whatever the
+    # column width gives us (~340 px after margins for 3-column layout). So one
+    # unit of paper-x ~= 340 px, one unit of paper-y ~= 410 px. The ratio is
+    # close enough to 1:1 that a tick rendered with equal Δx and Δy is roughly
+    # square on screen. We bias slightly to keep barbs visually upright.
+
+    # For y in log-pressure space we use multiplicative offsets (factor of 10**Δlog).
+    # 1 unit of paper-y corresponds to log(P_BOTTOM/P_TOP) = log(1050/100) ≈ 1.02
+    # decades of log-pressure. So Δpaper_y of 0.01 ≈ 0.0102 decades.
+    LOGP_SCALE = math.log10(P_BOTTOM / P_TOP)   # ~1.022
+
+    def _paper_dy_to_logp_factor(dpaper_y):
+        """Convert a paper-y offset to a log-P multiplicative factor.
+        Positive dpaper_y means visually upward on the chart, which is toward
+        LOWER pressure (top of chart). On the reversed log axis, lower P maps
+        to higher paper-y, so dpaper_y > 0 -> multiply P by 10**(-dpaper_y * LOGP_SCALE)."""
+        return 10 ** (-dpaper_y * LOGP_SCALE)
+
+    def _add_segment(x0, y0, x1, y1, color=SHAPE_COLOR, width=SHAPE_WIDTH):
+        """Add a straight line segment shape with hybrid paper-x / data-y refs."""
+        fig.add_shape(
+            type="line",
+            xref="paper", yref="y",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            line=dict(color=color, width=width),
+            layer="above",
+        )
+
+    def _add_pennant(x0, y0, x_along_dx, x_along_dy, x_perp_dx, x_perp_dy):
+        """Add a filled triangle pennant. The pennant base sits on the staff
+        and the tip extends perpendicular to the staff."""
+        # Three points: base-start, base-end (along staff), tip (perpendicular)
+        base1_x, base1_y = x0, y0
+        base2_x = x0 + x_along_dx * 0.55   # narrower than full barb to look like a flag
+        base2_y = y0 * _paper_dy_to_logp_factor(x_along_dy * 0.55)
+        tip_x   = x0 + x_perp_dx
+        tip_y   = y0 * _paper_dy_to_logp_factor(x_perp_dy)
+        # SVG path
+        path = (f"M {base1_x},{base1_y} L {base2_x},{base2_y} L {tip_x},{tip_y} Z")
+        fig.add_shape(
+            type="path",
+            xref="paper", yref="y",
+            path=path,
+            fillcolor=SHAPE_COLOR,
+            line=dict(color=SHAPE_COLOR, width=0.8),
+            layer="above",
+        )
+
+    def _draw_barb_glyph(p_lvl, speed_kt, wind_dir_deg):
+        """Draw one full aviation-standard wind barb at pressure p_lvl."""
+        # Calm wind: open circle, no staff
+        if speed_kt < 3:
+            fig.add_shape(
+                type="circle",
+                xref="paper", yref="y",
+                x0=BARB_COL_X - 0.012,
+                x1=BARB_COL_X + 0.012,
+                y0=p_lvl * _paper_dy_to_logp_factor(-0.012),
+                y1=p_lvl * _paper_dy_to_logp_factor(0.012),
+                line=dict(color=SHAPE_COLOR, width=1.2),
+                layer="above",
+            )
+            return
+
+        # Round speed to nearest 5 kt and decompose into pennants/full/half
+        spd_rounded = int(round(speed_kt / 5.0) * 5)
+        pennants = spd_rounded // 50
+        remainder = spd_rounded - pennants * 50
+        full_barbs = remainder // 10
+        half_barbs = (remainder % 10) // 5
+
+        # Staff direction unit vector: the staff points TOWARD where the wind
+        # is FROM. wd is in meteorological degrees (north=0, east=90, FROM).
+        # In paper coordinates, +x = east on screen, +y = up on screen (which
+        # is toward lower pressure on our reversed log axis).
+        rad = math.radians(wind_dir_deg)
+        ux = math.sin(rad)    # +x component of "from" direction (paper-x)
+        uy = math.cos(rad)    # +y component of "from" direction (paper-y up)
+
+        # Staff endpoints
+        staff_tail_x = BARB_COL_X + ux * STAFF_LEN
+        staff_tail_dpy = uy * STAFF_LEN
+        staff_tail_y = p_lvl * _paper_dy_to_logp_factor(staff_tail_dpy)
+        _add_segment(BARB_COL_X, p_lvl, staff_tail_x, staff_tail_y)
+
+        # Perpendicular direction for barb ticks. By convention, barbs hang on
+        # the LEFT side of the staff (when looking from anchor toward tail in
+        # northern hemisphere). The left-perpendicular of (ux, uy) is (-uy, ux).
+        # We negate to get the right-hand perpendicular for visual consistency
+        # with most aviation chart conventions.
+        perp_x = -uy
+        perp_y = ux
+
+        # Barbs are placed starting from the staff TAIL (away from the data
+        # point) and walk inward toward the anchor.
+        n_total = pennants + full_barbs + half_barbs
+        if n_total == 0:
+            return
+
+        # Compute positions of each barb along the staff
+        # Position 0 = at the tail, position 1 = closer to anchor
+        gap_step = STAFF_LEN * BARB_GAP
+
+        # We'll place pennants first (at the outermost positions), then full
+        # barbs, then a half-barb if any.
+        positions = []
+        # Track outward distance from anchor along the staff
+        dist_from_anchor = STAFF_LEN
+        for _ in range(pennants):
+            positions.append(("pennant", dist_from_anchor))
+            dist_from_anchor -= gap_step
+            dist_from_anchor -= STAFF_LEN * 0.10   # pennants take a bit more space
+        for _ in range(full_barbs):
+            positions.append(("full", dist_from_anchor))
+            dist_from_anchor -= gap_step
+        for _ in range(half_barbs):
+            positions.append(("half", dist_from_anchor))
+            dist_from_anchor -= gap_step
+
+        for kind, d in positions:
+            base_x = BARB_COL_X + ux * d
+            base_dpy = uy * d
+            base_y = p_lvl * _paper_dy_to_logp_factor(base_dpy)
+
+            if kind == "pennant":
+                # Filled triangle: base of staff length along staff direction,
+                # tip out perpendicular to staff.
+                _add_pennant(
+                    base_x, base_y,
+                    x_along_dx=ux * STAFF_LEN * 0.30,
+                    x_along_dy=uy * STAFF_LEN * 0.30,
+                    x_perp_dx=perp_x * BARB_LEN,
+                    x_perp_dy=perp_y * BARB_LEN,
+                )
+            elif kind == "full":
+                tip_x = base_x + perp_x * BARB_LEN
+                tip_dpy = perp_y * BARB_LEN
+                tip_y = base_y * _paper_dy_to_logp_factor(tip_dpy)
+                _add_segment(base_x, base_y, tip_x, tip_y)
+            elif kind == "half":
+                tip_x = base_x + perp_x * BARB_LEN * 0.55
+                tip_dpy = perp_y * BARB_LEN * 0.55
+                tip_y = base_y * _paper_dy_to_logp_factor(tip_dpy)
+                _add_segment(base_x, base_y, tip_x, tip_y)
+
+    # Decluttered barb pass — every ~40 hPa
+    _last_barb_p = None
     for p, ws, wd in zip(pressures, wind_kt_list, wind_dir_list):
         if ws is None or wd is None:
             continue
         if _last_barb_p is not None and abs(_last_barb_p - p) < 40 and p != pressures[0]:
             continue
         _last_barb_p = p
-
-        rad = math.radians(wd)
-        # The shaft tail offset: positive sin means wind FROM the east, so the
-        # tail extends to the east (right) of the anchor.
-        tail_dx = math.sin(rad) * shaft_dx
-        tail_dy_logp = math.cos(rad) * 0.025   # tiny vertical offset for direction cue
-
-        if ws >= 35:
-            _barb_color = "#ff6b4a"
-        elif ws >= 20:
-            _barb_color = "#E58E26"
-        else:
-            _barb_color = "#94a3b8"
-
-        # Shaft as a 2-point Scatter line. y values use multiplicative offset
-        # because the y-axis is logarithmic.
-        p_tail = p * (10 ** tail_dy_logp)
-        fig.add_trace(go.Scatter(
-            x=[barb_x_data + tail_dx, barb_x_data],
-            y=[p_tail, p],
-            mode="lines",
-            line=dict(color=_barb_color, width=1.6),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
-        # Anchor dot at the barb head for clarity
-        fig.add_trace(go.Scatter(
-            x=[barb_x_data], y=[p],
-            mode="markers",
-            marker=dict(size=3, color=_barb_color),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
-        # Speed label to the right of the barb
-        fig.add_annotation(
-            x=barb_x_data + 3.5, y=p,
-            xref="x", yref="y",
-            showarrow=False,
-            text=f"{ws:.0f}",
-            font=dict(size=8, color=_barb_color),
-            xanchor="left", yanchor="middle",
-        )
+        _draw_barb_glyph(p, ws, wd)
 
     # Layout
     # Compute ASL ticks from pressure ticks using US Standard Atmosphere
