@@ -624,25 +624,74 @@ def get_nearest_icao_station(user_lat: float, user_lon: float) -> dict:
 
 
 @st.cache_data(ttl=900)
-def fetch_weather_payload(fetch_lat: float, fetch_lon: float, fetch_model: str,
-                          fetch_model_id: str = "") -> dict:
-    """Fetches the forecast payload AND its run-cycle metadata in one cached call.
+def fetch_weather_payload(fetch_lat: float, fetch_lon: float, model_label: str) -> dict:
+    """Fetches the forecast payload via the provider routing layer with failover.
 
-    The two were previously cached separately (15-min forecast TTL, 30-min run-info
-    TTL) and could desynchronize after a new NWP cycle published — the dashboard
-    would label fresh forecast data with a stale run cycle, or vice versa.
-    Combining them guarantees the displayed run-cycle label always describes the
-    forecast data that's actually on screen.
+    Args:
+        fetch_lat, fetch_lon: site coordinates
+        model_label: display name of the model (key into _all_models registry)
 
-    Returns the original payload dict augmented with a "_run_info" key carrying
-    the cycle metadata, or just the payload on failure to fetch metadata.
+    Returns:
+        dict containing the forecast data in Open-Meteo response shape, plus:
+          "_run_info":      run-cycle metadata (cycle, age_hours, etc.)
+          "_served_by":     "meteomatics" or "open-meteo" — which provider actually served
+          "_primary_failed": True if the primary provider failed (even if fallback succeeded)
+          "_primary_error":  error message from primary (None if it succeeded)
+        On total failure both providers errored — caller sees the standard
+        {"error": True, "message": ...} shape.
     """
-    payload = fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
-    if isinstance(payload, dict):
+    from modules.data_ingest import fetch_forecast_with_fallback
+
+    entry = _all_models.get(model_label)
+    if entry is None:
+        return {"error": True, "message": f"Unknown model: {model_label}"}
+    route, run_id, _in_coverage = entry
+
+    result = fetch_forecast_with_fallback(route, fetch_lat, fetch_lon)
+    if not result.ok:
+        # Surface the most informative error to the caller. Prefer the primary
+        # error message since that's the one the operator selected.
+        msg = result.primary_error or "All providers failed"
+        return {
+            "error": True,
+            "message": msg,
+            "_served_by": None,
+            "_primary_failed": True,
+            "_primary_error": result.primary_error,
+        }
+
+    payload = result.data
+    if not isinstance(payload, dict):
+        return {"error": True, "message": "Provider returned non-dict payload"}
+
+    # Augment payload with routing metadata
+    payload["_served_by"] = result.served_by
+    payload["_primary_failed"] = result.primary_failed
+    payload["_primary_error"] = result.primary_error
+
+    # Attach run info — if the payload already carries it (Meteomatics provider
+    # sets it from dateGenerated), use that; else fetch from the run-info
+    # endpoint (Open-Meteo path).
+    if not payload.get("_run_info"):
         try:
-            payload["_run_info"] = get_model_run_info(fetch_model, model_id=fetch_model_id) or {}
+            # Determine which URL to use for run-info lookup. For Meteomatics
+            # the dateGenerated has already been parsed by the provider; if
+            # missing we leave _run_info empty rather than hitting Open-Meteo's
+            # metadata endpoint with a model that doesn't match.
+            if result.served_by == "open-meteo":
+                # Run-info expects an Open-Meteo URL
+                om_target = route.primary[1] if route.primary[0] == "open-meteo" else (
+                    route.fallback[1] if route.fallback and route.fallback[0] == "open-meteo" else None
+                )
+                if om_target:
+                    payload["_run_info"] = get_model_run_info(om_target, model_id=run_id) or {}
+                else:
+                    payload["_run_info"] = {}
+            else:
+                payload["_run_info"] = payload.get("_run_info") or {}
         except Exception:
             payload["_run_info"] = {}
+
     return payload
 
 
@@ -979,32 +1028,167 @@ terrain_env = st.sidebar.selectbox("Terrain Environment:", options=["Land", "Wat
 _HRDPS_BOUNDS = (40.0, 75.0, -145.0, -50.0)    # Canada + northern US strip
 _HRRR_NAM_BOUNDS = (21.0, 50.0, -134.0, -60.0) # CONUS
 _ICONEU_BOUNDS = (29.0, 71.0, -23.0, 45.0)     # Europe
+_GLOBAL_BOUNDS = (-90.0, 90.0, -180.0, 180.0)  # everywhere
 
 def _in_bounds(b):
     return (b[0] <= lat <= b[1]) and (b[2] <= lon <= b[3])
 
-# Each entry: display label -> (endpoint url, model_id for run-info, in_coverage)
-_all_models = {
-    "HRDPS (Canada 2.5km)":   ("https://api.open-meteo.com/v1/gem",                              "hrdps",  _in_bounds(_HRDPS_BOUNDS)),
-    "ECMWF (Global 9km)":     ("https://api.open-meteo.com/v1/ecmwf",                            "ecmwf",  True),  # global
-    "GFS (Global 13km)":      ("https://api.open-meteo.com/v1/gfs",                              "gfs",    True),  # global
-    "ICON (Global 13km)":     ("https://api.open-meteo.com/v1/dwd-icon",                         "icon",   True),  # global
-    "ICON-EU (Europe 7km)":   ("https://api.open-meteo.com/v1/dwd-icon",                         "icon-eu", _in_bounds(_ICONEU_BOUNDS)),
-    "NAM 3km (CONUS)":        ("https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus",        "nam",    _in_bounds(_HRRR_NAM_BOUNDS)),
-    "HRRR 3km (CONUS)":       ("https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus",       "hrrr",   _in_bounds(_HRRR_NAM_BOUNDS)),
-}
+
+# =============================================================================
+# PROVIDER ROUTING REGISTRY
+# =============================================================================
+# Each model declares (primary_provider, target) and an optional fallback.
+# Provider names: "meteomatics" or "open-meteo".
+# Target for meteomatics: the model id (e.g. "mix", "ecmwf-ifs").
+# Target for open-meteo: the full URL endpoint.
+#
+# Availability of each Meteomatics model was verified against the live API
+# (see /pages/99_Meteomatics_Check.py verification log, 2026-05-29):
+#   mix, ecmwf-ifs, ecmwf-aifs, ncep-gfs, ncep-hrrr → reachable
+#   dwd-icon → NOT available on this subscription → ICON Global routes via
+#              Open-Meteo only.
+# Models that have no Meteomatics equivalent (HRDPS, NAM, ACCESS-G) stay
+# Open-Meteo-primary with no fallback.
+
+from modules.data_ingest import ProviderRoute
+from modules.meteomatics_provider import has_credentials as _has_mm_credentials
+
+_MM_AVAILABLE = _has_mm_credentials()    # config-time check; doesn't hit the API
+
+# Display label → (ProviderRoute, run_info_id, in_coverage)
+_all_models: dict[str, tuple] = {}
+
+
+def _register_model(label: str, primary: tuple, fallback: tuple | None,
+                    run_id: str, in_coverage: bool) -> None:
+    """Adds a model to the routing registry. Primary providers using
+    Meteomatics are silently re-routed to the fallback if Meteomatics
+    credentials aren't configured."""
+    if primary[0] == "meteomatics" and not _MM_AVAILABLE:
+        # Demote: if no Meteomatics credentials and there's a fallback, use it
+        # as the primary; if no fallback either, the model is unavailable.
+        if fallback is None:
+            in_coverage = False
+            primary = ("meteomatics", primary[1])    # keep so we error sensibly
+        else:
+            primary, fallback = fallback, None
+    _all_models[label] = (
+        ProviderRoute(primary=primary, fallback=fallback, model_label=label),
+        run_id,
+        in_coverage,
+    )
+
+
+# Meteomatics MIX — Meteomatics-only, no fallback (proprietary blend)
+_register_model(
+    "Meteomatics MIX",
+    primary=("meteomatics", "mix"),
+    fallback=None,
+    run_id="mix",
+    in_coverage=_MM_AVAILABLE,
+)
+
+# ECMWF IFS — Meteomatics primary, Open-Meteo fallback
+_register_model(
+    "ECMWF IFS (Global 9km)",
+    primary=("meteomatics", "ecmwf-ifs"),
+    fallback=("open-meteo", "https://api.open-meteo.com/v1/ecmwf"),
+    run_id="ecmwf",
+    in_coverage=True,
+)
+
+# ECMWF AIFS — Meteomatics only (AI model, no Open-Meteo equivalent)
+_register_model(
+    "ECMWF AIFS (AI model)",
+    primary=("meteomatics", "ecmwf-aifs"),
+    fallback=None,
+    run_id="ecmwf-aifs",
+    in_coverage=_MM_AVAILABLE,
+)
+
+# GFS — Meteomatics primary, Open-Meteo fallback
+_register_model(
+    "GFS (Global 13km)",
+    primary=("meteomatics", "ncep-gfs"),
+    fallback=("open-meteo", "https://api.open-meteo.com/v1/gfs"),
+    run_id="gfs",
+    in_coverage=True,
+)
+
+# HRDPS — Open-Meteo only (Meteomatics doesn't carry it)
+_register_model(
+    "HRDPS (Canada 2.5km)",
+    primary=("open-meteo", "https://api.open-meteo.com/v1/gem"),
+    fallback=None,
+    run_id="hrdps",
+    in_coverage=_in_bounds(_HRDPS_BOUNDS),
+)
+
+# HRRR CONUS — Meteomatics primary, Open-Meteo fallback
+_register_model(
+    "HRRR (CONUS 3km)",
+    primary=("meteomatics", "ncep-hrrr"),
+    fallback=("open-meteo", "https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus"),
+    run_id="hrrr",
+    in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
+)
+
+# NAM CONUS — Open-Meteo only (Meteomatics doesn't carry it)
+_register_model(
+    "NAM (CONUS 3km)",
+    primary=("open-meteo", "https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus"),
+    fallback=None,
+    run_id="nam",
+    in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
+)
+
+# ICON Global — Open-Meteo only (DWD ICON not in current Meteomatics subscription)
+_register_model(
+    "ICON (Global 13km)",
+    primary=("open-meteo", "https://api.open-meteo.com/v1/dwd-icon"),
+    fallback=None,
+    run_id="icon",
+    in_coverage=True,
+)
+
+# ICON-EU — Open-Meteo only (regional Europe)
+_register_model(
+    "ICON-EU (Europe 7km)",
+    primary=("open-meteo", "https://api.open-meteo.com/v1/dwd-icon"),
+    fallback=None,
+    run_id="icon-eu",
+    in_coverage=_in_bounds(_ICONEU_BOUNDS),
+)
 
 # Build dropdown of in-coverage models
-_in_coverage = [name for name, (_url, _id, ok) in _all_models.items() if ok]
-_out_of_coverage = [name for name, (_url, _id, ok) in _all_models.items() if not ok]
+_in_coverage_models = [name for name, (_route, _id, ok) in _all_models.items() if ok]
+_out_of_coverage = [name for name, (_route, _id, ok) in _all_models.items() if not ok]
 
-# Default ordering — surface the highest-resolution in-coverage model first
-_priority = ["HRDPS (Canada 2.5km)", "HRRR 3km (CONUS)", "NAM 3km (CONUS)",
-             "ICON-EU (Europe 7km)", "ECMWF (Global 9km)", "GFS (Global 13km)",
-             "ICON (Global 13km)"]
-_model_options = sorted(_in_coverage, key=lambda n: _priority.index(n) if n in _priority else 99)
+# Priority ordering — Meteomatics MIX surfaces first as the operational default;
+# then highest-resolution regional models, then global models.
+_priority = [
+    "Meteomatics MIX",                  # default first-load (best 0-24h)
+    "HRDPS (Canada 2.5km)",             # Canada regional
+    "HRRR (CONUS 3km)",                 # CONUS rapid update
+    "NAM (CONUS 3km)",                  # CONUS longer horizon
+    "ICON-EU (Europe 7km)",             # Europe regional
+    "ECMWF IFS (Global 9km)",           # global high-quality
+    "ECMWF AIFS (AI model)",            # global AI
+    "GFS (Global 13km)",                # global American
+    "ICON (Global 13km)",               # global German
+]
+_model_options = sorted(_in_coverage_models,
+                        key=lambda n: _priority.index(n) if n in _priority else 99)
 
-model_choice = st.sidebar.selectbox("Forecast Model:", options=_model_options)
+# Default = Meteomatics MIX when available, otherwise the first in-coverage model
+_default_model = "Meteomatics MIX" if "Meteomatics MIX" in _model_options else (_model_options[0] if _model_options else None)
+_default_idx = _model_options.index(_default_model) if _default_model in _model_options else 0
+
+model_choice = st.sidebar.selectbox(
+    "Forecast Model:",
+    options=_model_options,
+    index=_default_idx,
+)
 
 # Show what's NOT available so the operator understands the gap
 if _out_of_coverage:
@@ -1041,32 +1225,135 @@ def log_refresh_callback():
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 
-# Resolve selected model into endpoint + identifier for run-cycle lookup
-_selected_url, _selected_id, _ = _all_models[model_choice]
-model_api_map = {model_choice: _selected_url}
+# Fetch the forecast via the provider routing layer. The model registry
+# resolves the primary/fallback providers internally based on model_choice.
+data = fetch_weather_payload(lat, lon, model_choice)
 
-data = fetch_weather_payload(lat, lon, model_api_map[model_choice], _selected_id)
+# -----------------------------------------------------------------------------
+# PROVIDER HEALTH TRACKING
+# -----------------------------------------------------------------------------
+# Track Meteomatics health across the session so a failure that triggered
+# fallback to Open-Meteo earlier in this session remains visible even after
+# the operator switches to a model that's Open-Meteo-only (and thus wouldn't
+# naturally surface a Meteomatics error).
+if "_mm_health" not in st.session_state:
+    st.session_state["_mm_health"] = {
+        "last_failure_at": None,    # UTC datetime of most recent Meteomatics failure
+        "last_failure_msg": None,
+        "last_success_at": None,    # UTC datetime of most recent successful Meteomatics call
+        "failed_models": set(),     # set of model labels where Meteomatics failed during this session
+    }
+
+_health = st.session_state["_mm_health"]
+
+# Update health state based on this fetch result. Only meaningful when the
+# selected model actually has Meteomatics as primary — otherwise this fetch
+# tells us nothing about Meteomatics' state.
+_selected_entry = _all_models.get(model_choice)
+if _selected_entry is not None:
+    _selected_route, _, _ = _selected_entry
+    _selected_primary_is_mm = _selected_route.primary[0] == "meteomatics"
+    if _selected_primary_is_mm and isinstance(data, dict):
+        if data.get("_primary_failed"):
+            _health["last_failure_at"] = datetime.now(timezone.utc)
+            _health["last_failure_msg"] = data.get("_primary_error") or "unknown error"
+            _health["failed_models"].add(model_choice)
+        elif data.get("_served_by") == "meteomatics":
+            _health["last_success_at"] = datetime.now(timezone.utc)
+            # If we just had a successful Meteomatics call, clear the model from
+            # the failed set — failover is no longer "active" for this model.
+            _health["failed_models"].discard(model_choice)
+
+# Provider chip — shown in sidebar under model dropdown, summarizing what
+# actually served the current selection.
+if isinstance(data, dict) and data.get("_served_by"):
+    _provider = data["_served_by"]
+    if data.get("_primary_failed"):
+        # Failover scenario — amber chip
+        _chip_color = "#D97706"
+        _chip_text = f"via {_provider} (failover)"
+        _chip_title = (data.get("_primary_error") or "").replace('"', "'")
+    else:
+        # Primary served cleanly — slate chip
+        _chip_color = "#6B7280"
+        _chip_text = f"via {_provider}"
+        _chip_title = "Primary provider served this forecast."
+    st.sidebar.markdown(
+        f"<div style='font-size: 0.78rem; color: {_chip_color}; "
+        f"margin-top: -8px; margin-bottom: 10px;' title=\"{_chip_title}\">"
+        f"&#x2937; {_chip_text}</div>",
+        unsafe_allow_html=True,
+    )
 
 if icao != "NONE": metar_raw, taf_raw = fetch_metar_taf(icao)
 else:              metar_raw, taf_raw = "NIL", "NIL"
 
 st.title("Atmospheric Risk Management")
 st.caption(f"Vector Check Aerial Group Inc. - SYSTEM ACTIVE | OPERATOR: {st.session_state.get('active_operator', 'UNKNOWN')}")
+
+# -----------------------------------------------------------------------------
+# METEOMATICS FAILURE BANNER
+# -----------------------------------------------------------------------------
+# Persistent amber banner shown when Meteomatics has failed during this
+# session. Stays visible until the next successful Meteomatics fetch clears
+# the failed_models set.
+if _health["failed_models"] and _health["last_failure_at"] is not None:
+    _failed_list = ", ".join(sorted(_health["failed_models"]))
+    _failure_time_str = _health["last_failure_at"].strftime("%H:%M UTC")
+    _last_success_str = (_health["last_success_at"].strftime("%H:%M UTC")
+                         if _health["last_success_at"] else "never this session")
+    st.warning(
+        f"⚠ **Meteomatics unavailable since {_failure_time_str}.** "
+        f"Failover active for: {_failed_list}.",
+        icon="⚠️",
+    )
+    with st.expander("Show Meteomatics failure details"):
+        st.markdown(f"**Last Meteomatics error:** `{_health['last_failure_msg']}`")
+        st.markdown(f"**First detected:** {_failure_time_str}")
+        st.markdown(f"**Last successful Meteomatics fetch:** {_last_success_str}")
+        st.caption(
+            "Affected models have automatically failed over to Open-Meteo "
+            "where a fallback is configured. Models without an Open-Meteo "
+            "fallback (Meteomatics MIX, ECMWF AIFS) are temporarily unavailable. "
+            "The banner clears automatically when the next Meteomatics call succeeds."
+        )
+
 st.divider()
 
 if data is None:
     st.error("⚠️ CRITICAL: Atmospheric Data API Offline.")
     st.stop()
-elif "error" in data:
+elif "error" in data and data["error"]:
     _err_msg = data.get('message', 'Unknown Error')
     st.error(f"⚠️ CRITICAL API REJECTION: {_err_msg}")
-    st.caption(
-        f"Model **{model_choice}** failed to return data for these coordinates. "
-        "This may be due to (1) a temporary outage in that model's data feed, "
-        "(2) the location falling outside the model's resolved grid, or "
-        "(3) a specific variable being unsupported by this model. "
-        "Try selecting a different model from the sidebar (e.g. ECMWF or GFS as a stable fallback)."
-    )
+    _route_for_msg = _all_models.get(model_choice, (None, None, None))[0]
+    _has_fallback = _route_for_msg is not None and _route_for_msg.fallback is not None
+    if data.get("_primary_failed") and _has_fallback:
+        # Both providers failed
+        st.caption(
+            f"Model **{model_choice}** failed to return data from both its primary "
+            "provider and the configured fallback. This usually indicates a wider "
+            "outage across multiple weather data services rather than a problem "
+            "with a single provider. Try selecting a different model from the "
+            "sidebar — models routed through different providers will be unaffected."
+        )
+    elif data.get("_primary_failed"):
+        # No fallback configured — Meteomatics-only model failed
+        st.caption(
+            f"Model **{model_choice}** is served exclusively by Meteomatics and "
+            "has no Open-Meteo fallback. Meteomatics returned an error for this "
+            "request. Try a different model (e.g. ECMWF IFS or GFS) which can "
+            "fail over to Open-Meteo."
+        )
+    else:
+        # Generic / Open-Meteo-primary failure
+        st.caption(
+            f"Model **{model_choice}** failed to return data for these coordinates. "
+            "This may be due to (1) a temporary outage in that model's data feed, "
+            "(2) the location falling outside the model's resolved grid, or "
+            "(3) a specific variable being unsupported by this model. "
+            "Try selecting a different model from the sidebar (e.g. ECMWF or GFS as a stable fallback)."
+        )
     st.stop()
 elif "hourly" not in data:
     st.error("⚠️ CRITICAL: Malformed data payload received from server.")
