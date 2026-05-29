@@ -354,6 +354,61 @@ for model_id, supported in supported_per_model.items():
 
 banner("REAL END")
 
+
+# -----------------------------------------------------------------------------
+# TEST 10 — Call the live fetch_meteomatics_forecast() function directly.
+# This bypasses URL construction in this diagnostic and exercises the EXACT
+# code path the dashboard uses. If this fails but our raw URL tests succeed,
+# the deployed module doesn't have the blocklist applied.
+# -----------------------------------------------------------------------------
+banner("TEST 10 — Live production fetch_meteomatics_forecast (the actual dashboard path)")
+
+try:
+    import sys
+    sys.path.insert(0, "/app")
+    # Force fresh import to pick up any reload
+    import importlib
+    import modules.meteomatics_provider as mp
+    importlib.reload(mp)
+
+    # Verify the blocklist is even defined in the deployed module
+    has_blocklist = hasattr(mp, "_MODEL_PARAM_BLOCKLIST")
+    emit(f"Deployed module has _MODEL_PARAM_BLOCKLIST: {has_blocklist}")
+    if has_blocklist:
+        bl = mp._MODEL_PARAM_BLOCKLIST
+        emit(f"Blocklist models: {list(bl.keys())}")
+        for m in ["ecmwf-ifs", "ecmwf-aifs", "ncep-gfs", "ncep-hrrr"]:
+            emit(f"  {m}: {len(bl.get(m, set()))} blocked params")
+            # Show the 975 hPa entries to prove pressure levels are included
+            sample = sorted([p for p in bl.get(m, set()) if "975" in p])
+            emit(f"    975 hPa entries: {sample}")
+
+    has_filter = hasattr(mp, "_filter_params_for_model")
+    emit(f"Deployed module has _filter_params_for_model: {has_filter}")
+
+    emit("")
+    emit("Now calling the live function for each model:")
+    emit("")
+    for model in ["mix", "ecmwf-ifs", "ecmwf-aifs", "ncep-gfs", "ncep-hrrr"]:
+        try:
+            result = mp.fetch_meteomatics_forecast(PRIMARY_LAT, PRIMARY_LON,
+                                                    model=model, hours_ahead=24)
+            if result.get("error"):
+                emit(f"  {model:14s} -> ERROR: {result.get('message','')[:200]}")
+            else:
+                hourly = result.get("hourly") or {}
+                n_times = len(hourly.get("time", []))
+                batches_info = result.get("_batches", {})
+                emit(f"  {model:14s} -> OK ({n_times}h, {batches_info.get('count','?')} batches, {batches_info.get('elapsed_ms','?')}ms)")
+        except Exception as e:
+            emit(f"  {model:14s} -> EXCEPTION: {type(e).__name__}: {e}")
+except Exception as e:
+    import traceback
+    emit(f"Setup failed: {e}")
+    emit(traceback.format_exc()[:600])
+
+banner("END TEST 10")
+
 output_text = "\n".join(out_lines)
 st.text_area("Output:", value=output_text, height=600)
 st.download_button(
