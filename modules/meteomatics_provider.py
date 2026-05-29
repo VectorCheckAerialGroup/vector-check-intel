@@ -105,6 +105,39 @@ def _build_param_list() -> list[tuple[str, str]]:
     return pairs
 
 
+# Parameters that are only available on Meteomatics' bias-corrected blend
+# (MIX), not on raw NWP models. Requesting these against ecmwf-ifs, ncep-gfs,
+# ncep-hrrr, or ecmwf-aifs causes a 404 that kills the whole batched request
+# (Meteomatics has all-or-nothing semantics). Filter these out for raw models.
+_BLEND_ONLY_PARAMS = {
+    "weather_symbol_1h:idx",   # WMO weather code, derived
+    "visibility:m",            # diagnostic field, not in raw model output
+    "pbl_height:m",            # boundary layer height, derived
+    "freezing_level:m",        # derived from temperature profile
+    "prob_precip_1h:p",        # probabilistic, requires ensemble
+    "cape:Jkg",                # NOT blend-only — kept here as reminder; AVAILABLE on ECMWF/GFS, NOT on AIFS
+}
+
+# Per-model overrides — if a model has its own specific incompatibility,
+# add it here. Discovered empirically from the 2026-05-29 diagnostic.
+_MODEL_PARAM_BLOCKLIST = {
+    "ecmwf-ifs":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
+    "ecmwf-aifs": {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p", "cape:Jkg"},
+    "ncep-gfs":   {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
+    "ncep-hrrr":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
+    # "mix" is intentionally omitted — it supports everything
+}
+
+
+def _filter_params_for_model(pairs: list[tuple[str, str]], model: str) -> list[tuple[str, str]]:
+    """Removes parameter pairs whose Meteomatics name is in the blocklist
+    for the given model. Returns a new list; doesn't mutate the input."""
+    block = _MODEL_PARAM_BLOCKLIST.get(model, set())
+    if not block:
+        return pairs
+    return [(om, mm) for (om, mm) in pairs if mm not in block]
+
+
 # =============================================================================
 # WEATHER SYMBOL TRANSLATION
 # =============================================================================
@@ -538,12 +571,16 @@ def fetch_meteomatics_forecast(
     end = now + timedelta(hours=hours_ahead)
     validdate = f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
 
-    # Build parameter list and split into batches
-    pairs = _build_param_list()
+    # Build parameter list and split into batches. For non-MIX models, filter
+    # out parameters that the model doesn't support (blend-only derived
+    # parameters like weather_symbol_1h:idx and visibility:m). Meteomatics
+    # returns 404 for the whole request if any single param is unsupported,
+    # so we have to know in advance — see _MODEL_PARAM_BLOCKLIST.
+    model_id = METEOMATICS_MODELS[model]
+    pairs = _filter_params_for_model(_build_param_list(), model_id)
     om_names = [p[0] for p in pairs]
     mm_params_all = [p[1] for p in pairs]
     batches = _chunked(mm_params_all, METEOMATICS_BATCH_SIZE)
-    model_id = METEOMATICS_MODELS[model]
 
     # Fire all batches in parallel
     import time as _time
