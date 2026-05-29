@@ -307,6 +307,53 @@ if pairs:
 
 banner("END")
 
+
+# -----------------------------------------------------------------------------
+# TEST 9 — Per-pressure-level probe. Tests each (model, pressure level) pair
+# individually to find the complete supported set. Slow but definitive.
+# -----------------------------------------------------------------------------
+banner("TEST 9 — Probe each pressure level per model (slow, ~1 minute)")
+
+ALL_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
+raw_models = [
+    ("ecmwf-ifs",   "ECMWF IFS"),
+    ("ecmwf-aifs",  "ECMWF AIFS"),
+    ("ncep-gfs",    "NCEP GFS"),
+    ("ncep-hrrr",   "NCEP HRRR"),
+]
+
+emit("Probing temperature at each pressure level (one param per request)...")
+emit("")
+emit(f"{'Model':<20} {'Supported levels (hPa)':<70}")
+emit("-" * 90)
+
+supported_per_model = {}
+for model_id, label in raw_models:
+    supported = []
+    for level in ALL_LEVELS:
+        url = (f"https://api.meteomatics.com/{validdate_fwd}/t_{level}hPa:C"
+               f"/{PRIMARY_LAT},{PRIMARY_LON}/json?model={model_id}")
+        status, _, _, _ = fetch_mm(url, timeout=8)
+        if status == 200:
+            supported.append(level)
+    supported_per_model[model_id] = supported
+    missing = sorted(set(ALL_LEVELS) - set(supported))
+    emit(f"{label:<20} {str(supported):<70}")
+    emit(f"{'  missing →':<20} {missing}")
+    emit("")
+
+emit("")
+emit("Suggested _MODEL_PARAM_BLOCKLIST additions (paste into provider):")
+emit("")
+for model_id, supported in supported_per_model.items():
+    missing = sorted(set(ALL_LEVELS) - set(supported))
+    if missing:
+        emit(f"  # {model_id}: missing pressure levels {missing}")
+        for lvl in missing:
+            emit(f"  #   t_{lvl}hPa:C, relative_humidity_{lvl}hPa:p, gh_{lvl}hPa:m, wind_speed_{lvl}hPa:kn, wind_dir_{lvl}hPa:d")
+
+banner("REAL END")
+
 output_text = "\n".join(out_lines)
 st.text_area("Output:", value=output_text, height=600)
 st.download_button(
