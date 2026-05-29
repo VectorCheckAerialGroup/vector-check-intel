@@ -213,6 +213,30 @@ else:
     emit(f"Body: {body[:500].decode(errors='replace')}")
 
 
+# -----------------------------------------------------------------------------
+# TEST 7 — Historical fetch (matches scorecard's exact query)
+# -----------------------------------------------------------------------------
+banner("TEST 7 — Historical scorecard fetch (the actual failing path)")
+mm_params_8 = [
+    "t_2m:C", "relative_humidity_2m:p",
+    "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
+    "sfc_pressure:hPa", "visibility:m", "weather_symbol_1h:idx",
+]
+param_str = ",".join(mm_params_8)
+emit(f"8 params: {param_str}")
+emit("")
+for model_id, label in models_to_test:
+    url = (f"https://api.meteomatics.com/{validdate_back}/{param_str}"
+           f"/{PRIMARY_LAT},{PRIMARY_LON}/json?model={model_id}")
+    status, body, elapsed, _ = fetch_mm(url)
+    if status == 200:
+        emit(f"  {label:18s} ({model_id:14s}) -> {status} OK ({elapsed}ms)")
+    else:
+        snippet = body[:200].decode(errors='replace').replace("\n", " ")
+        emit(f"  {label:18s} ({model_id:14s}) -> {status} FAIL ({elapsed}ms)")
+        emit(f"    {snippet}")
+
+
 banner("DONE")
 emit("")
 emit("Diagnosis guide:")
