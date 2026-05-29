@@ -209,25 +209,34 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
     """Fetches one model's hourly forecast. Returns ModelForecast (valid=False on failure)."""
     mf = ModelForecast(name=name)
 
-    # If the endpoint URL already contains a query string (e.g. "?models=..."),
-    # use & to append our parameters; otherwise use ?
+    # Explicit wind_speed_unit=kn — see notes in data_ingest.py. Eliminates
+    # the silent-conversion failure mode for wind speeds.
     sep = "&" if "?" in url else "?"
     full_url = (
         f"{url}{sep}latitude={lat}&longitude={lon}"
         f"&hourly={_HOURLY_VARS}&timezone=UTC&forecast_days=4"
+        f"&wind_speed_unit=kn"
     )
 
     try:
-        req = urllib.request.Request(full_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        data = _fetch_json(full_url, timeout=REQUEST_TIMEOUT_S, retries=2)
+    except _HttpFetchError as e:
         logger.warning("Ensemble fetch failed for %s: %s", name, e)
         return mf
 
     h = data.get("hourly")
     if not h or "time" not in h:
         return mf
+
+    # Robust wind-unit detection from the response (in case Open-Meteo ignores
+    # the unit hint for a particular endpoint, or a future provider responds
+    # in its native unit despite the request).
+    _wu = data.get("hourly_units", {}).get("wind_speed_10m", "kn").lower()
+    if "km/h" in _wu:   _wind_scale = 0.539957
+    elif "m/s" in _wu:  _wind_scale = 1.943844
+    elif "mph" in _wu:  _wind_scale = 0.868976
+    else:               _wind_scale = 1.0
 
     n = len(h["time"])
     mf.times = h["time"][:72]
@@ -245,9 +254,9 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
                 out.append(None)
         return out
 
-    mf.wind_kt = _safe_list("wind_speed_10m", KMH_TO_KT)
+    mf.wind_kt = _safe_list("wind_speed_10m", _wind_scale)
     mf.wind_dir = _safe_list("wind_direction_10m")
-    mf.gust_kt = _safe_list("wind_gusts_10m", KMH_TO_KT)
+    mf.gust_kt = _safe_list("wind_gusts_10m", _wind_scale)
     mf.temp_c = _safe_list("temperature_2m")
     mf.rh = _safe_list("relative_humidity_2m")
     mf.pressure_hpa = _safe_list("surface_pressure")
@@ -286,11 +295,27 @@ def fetch_all_models(lat: float, lon: float) -> list:
         active_endpoints["NAM"] = MODEL_ENDPOINTS["NAM"]
         active_endpoints["HRRR"] = MODEL_ENDPOINTS["HRRR"]
 
+    # Parallel fetch — each model is an independent network call, so
+    # ThreadPoolExecutor cuts wall-clock time from ~Σ(per-model latency) to
+    # ~max(per-model latency). On a CONUS site with 6 active endpoints and
+    # ~3s typical response time, this is 18s → 3s.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     results = []
-    for name, url in active_endpoints.items():
-        mf = _fetch_model(name, url, lat, lon)
-        if mf.valid:
-            results.append(mf)
+    with ThreadPoolExecutor(max_workers=len(active_endpoints)) as ex:
+        futures = {
+            ex.submit(_fetch_model, name, url, lat, lon): name
+            for name, url in active_endpoints.items()
+        }
+        for fut in as_completed(futures):
+            try:
+                mf = fut.result()
+            except Exception as e:
+                logger.warning("Ensemble worker crashed for %s: %s",
+                               futures[fut], e)
+                continue
+            if mf.valid:
+                results.append(mf)
     return results
 
 
