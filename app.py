@@ -1004,7 +1004,52 @@ st.session_state['input_lat'] = lat
 st.session_state['input_lon'] = lon
 
 regional_name = get_location_name(lat, lon)
-st.sidebar.markdown(f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{regional_name}</div>", unsafe_allow_html=True)
+
+# Fetch site elevation for sidebar display. Cached at module level so this is
+# only a real call once per unique (lat, lon) per process lifetime. Prefers
+# Meteomatics' elevation:m if credentials exist (we're paying for it anyway),
+# falls back to Open-Meteo's free endpoint if not.
+@st.cache_data(ttl=86400)   # 24h cache — elevations don't change
+def _get_site_elevation_m(elev_lat: float, elev_lon: float) -> float:
+    try:
+        from modules.meteomatics_provider import (
+            has_credentials as _mm_has_creds,
+            fetch_meteomatics_elevation,
+        )
+        if _mm_has_creds():
+            elev = fetch_meteomatics_elevation(elev_lat, elev_lon)
+            if elev > 0:
+                return elev
+    except Exception:
+        pass
+    # Fallback — Open-Meteo's elevation endpoint. The paid customer endpoint
+    # is more reliable (no IP-based blocks) but the same path works on both.
+    try:
+        from modules.http_client import fetch_json
+        from modules.open_meteo_endpoints import base_url as _om_base, append_apikey
+        elev_url = append_apikey(f"{_om_base()}/v1/elevation?latitude={elev_lat}&longitude={elev_lon}")
+        payload = fetch_json(elev_url, timeout=5, retries=1)
+        elevs = payload.get("elevation") or []
+        if elevs and isinstance(elevs[0], (int, float)):
+            return float(elevs[0])
+    except Exception:
+        pass
+    return 0.0
+
+
+_site_elev_m = _get_site_elevation_m(lat, lon)
+_site_elev_ft = _site_elev_m * 3.28084
+
+# Build the regional display: "Belleville, Ontario · 76 m / 249 ft"
+if _site_elev_m > 0:
+    _region_display = f"{regional_name} \u00b7 {int(round(_site_elev_m))} m / {int(round(_site_elev_ft)):,} ft"
+else:
+    _region_display = regional_name
+
+st.sidebar.markdown(
+    f"<div style='color: #8E949E; font-size: 0.9rem; margin-top: -10px; margin-bottom: 20px;'>{_region_display}</div>",
+    unsafe_allow_html=True,
+)
 
 station_data = get_nearest_icao_station(lat, lon)
 icao     = station_data["icao"]
@@ -1052,8 +1097,10 @@ def _in_bounds(b):
 
 from modules.data_ingest import ProviderRoute
 from modules.meteomatics_provider import has_credentials as _has_mm_credentials
+from modules.open_meteo_endpoints import build_url as _om_url, has_paid_subscription as _om_paid
 
 _MM_AVAILABLE = _has_mm_credentials()    # config-time check; doesn't hit the API
+_OM_PAID = _om_paid()                    # paid Open-Meteo tier detection
 
 # Display label → (ProviderRoute, run_info_id, in_coverage)
 _all_models: dict[str, tuple] = {}
@@ -1092,7 +1139,7 @@ _register_model(
 _register_model(
     "ECMWF IFS (Global 9km)",
     primary=("meteomatics", "ecmwf-ifs"),
-    fallback=("open-meteo", "https://api.open-meteo.com/v1/ecmwf"),
+    fallback=("open-meteo", _om_url("ecmwf")),
     run_id="ecmwf",
     in_coverage=True,
 )
@@ -1110,7 +1157,7 @@ _register_model(
 _register_model(
     "GFS (Global 13km)",
     primary=("meteomatics", "ncep-gfs"),
-    fallback=("open-meteo", "https://api.open-meteo.com/v1/gfs"),
+    fallback=("open-meteo", _om_url("gfs")),
     run_id="gfs",
     in_coverage=True,
 )
@@ -1118,7 +1165,7 @@ _register_model(
 # HRDPS — Open-Meteo only (Meteomatics doesn't carry it)
 _register_model(
     "HRDPS (Canada 2.5km)",
-    primary=("open-meteo", "https://api.open-meteo.com/v1/gem"),
+    primary=("open-meteo", _om_url("gem")),
     fallback=None,
     run_id="hrdps",
     in_coverage=_in_bounds(_HRDPS_BOUNDS),
@@ -1128,7 +1175,7 @@ _register_model(
 _register_model(
     "HRRR (CONUS 3km)",
     primary=("meteomatics", "ncep-hrrr"),
-    fallback=("open-meteo", "https://api.open-meteo.com/v1/gfs?models=ncep_hrrr_conus"),
+    fallback=("open-meteo", _om_url("gfs?models=ncep_hrrr_conus")),
     run_id="hrrr",
     in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
 )
@@ -1136,7 +1183,7 @@ _register_model(
 # NAM CONUS — Open-Meteo only (Meteomatics doesn't carry it)
 _register_model(
     "NAM (CONUS 3km)",
-    primary=("open-meteo", "https://api.open-meteo.com/v1/gfs?models=ncep_nam_conus"),
+    primary=("open-meteo", _om_url("gfs?models=ncep_nam_conus")),
     fallback=None,
     run_id="nam",
     in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
@@ -1145,7 +1192,7 @@ _register_model(
 # ICON Global — Open-Meteo only (DWD ICON not in current Meteomatics subscription)
 _register_model(
     "ICON (Global 13km)",
-    primary=("open-meteo", "https://api.open-meteo.com/v1/dwd-icon"),
+    primary=("open-meteo", _om_url("dwd-icon")),
     fallback=None,
     run_id="icon",
     in_coverage=True,
@@ -1154,7 +1201,7 @@ _register_model(
 # ICON-EU — Open-Meteo only (regional Europe)
 _register_model(
     "ICON-EU (Europe 7km)",
-    primary=("open-meteo", "https://api.open-meteo.com/v1/dwd-icon"),
+    primary=("open-meteo", _om_url("dwd-icon")),
     fallback=None,
     run_id="icon-eu",
     in_coverage=_in_bounds(_ICONEU_BOUNDS),
@@ -1384,7 +1431,12 @@ else:
     k_conv = 1.0          # already knots
 is_kmh    = (k_conv == 0.539957)   # retained for backward compatibility with downstream
 raw_wind_unit  = "KT"
-sfc_elevation  = data.get('elevation', 0) * 3.28084
+# Defensive: providers may return None (vs absent) for elevation. Treat both
+# the same — `data.get("elevation", 0)` returns None when the key is present
+# but unset, which breaks the multiplication below. The data_ingest layer
+# normally backfills elevation from Open-Meteo's free endpoint, but if that
+# also fails (e.g. simultaneous outage), default to 0 m and continue.
+sfc_elevation  = (data.get('elevation') or 0) * 3.28084
 
 times_display = []
 for t_str in h["time"]:
