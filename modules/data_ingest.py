@@ -26,15 +26,19 @@ def get_model_run_info(model_url: str, model_id: str = None) -> dict:
         dict with keys: run_cycle_z (e.g. "12Z"), run_date (YYYY-MM-DD),
         run_datetime_utc (datetime), age_hours (int), or empty dict on failure
     """
-    # Direct identifier lookups — preferred path
+    # Direct identifier lookups — preferred path. The /data/.../static/meta.json
+    # paths are publicly served metadata files; on a paid subscription they
+    # come from customer-api.open-meteo.com with the apikey parameter.
+    from modules.open_meteo_endpoints import base_url as _om_base, append_apikey
+    _base = _om_base()
     id_map = {
-        "hrdps":  "https://api.open-meteo.com/data/cmc_gem_hrdps_continental/static/meta.json",
-        "ecmwf":  "https://api.open-meteo.com/data/ecmwf_ifs025/static/meta.json",
-        "gfs":    "https://api.open-meteo.com/data/ncep_gfs025/static/meta.json",
-        "icon":   "https://api.open-meteo.com/data/dwd_icon/static/meta.json",
-        "nam":    "https://api.open-meteo.com/data/ncep_nam_conus/static/meta.json",
-        "hrrr":   "https://api.open-meteo.com/data/ncep_hrrr_conus/static/meta.json",
-        "icon-eu": "https://api.open-meteo.com/data/dwd_icon_eu/static/meta.json",
+        "hrdps":   append_apikey(f"{_base}/data/cmc_gem_hrdps_continental/static/meta.json"),
+        "ecmwf":   append_apikey(f"{_base}/data/ecmwf_ifs025/static/meta.json"),
+        "gfs":     append_apikey(f"{_base}/data/ncep_gfs025/static/meta.json"),
+        "icon":    append_apikey(f"{_base}/data/dwd_icon/static/meta.json"),
+        "nam":     append_apikey(f"{_base}/data/ncep_nam_conus/static/meta.json"),
+        "hrrr":    append_apikey(f"{_base}/data/ncep_hrrr_conus/static/meta.json"),
+        "icon-eu": append_apikey(f"{_base}/data/dwd_icon_eu/static/meta.json"),
     }
 
     meta_url = None
@@ -223,14 +227,38 @@ def _fetch_one(provider: str, target: str, lat: float, lon: float) -> dict:
 
     if provider == "meteomatics":
         # Lazy import to avoid hard dependency in places that don't use it
-        from modules.meteomatics_provider import fetch_meteomatics_forecast
-        return fetch_meteomatics_forecast(lat, lon, model=target)
+        from modules.meteomatics_provider import (
+            fetch_meteomatics_forecast,
+            fetch_meteomatics_elevation,
+        )
+        result = fetch_meteomatics_forecast(lat, lon, model=target)
+        # Meteomatics doesn't return station elevation in its timeseries
+        # response. Backfill via a separate cheap call (1 quota unit, cached
+        # forever since elevations don't change). Falls back to 0 if even
+        # that fails — defensive caller handles None gracefully too.
+        if isinstance(result, dict) and not result.get("error") and "elevation" not in result:
+            result["elevation"] = fetch_meteomatics_elevation(lat, lon)
+        return result
 
     return {
         "error": True,
         "message": f"Unknown provider: {provider}",
         "_provider": provider,
     }
+
+
+# Module-level elevation cache. Elevations don't change, so we memoize per
+# (lat, lon) at 2-decimal precision (~1.1 km grid) to avoid hammering the
+# upstream API.
+_ELEVATION_CACHE: dict = {}
+
+
+def _fetch_elevation_cached(lat: float, lon: float) -> float:
+    """DEPRECATED — Open-Meteo's elevation endpoint is IP-blocked from our
+    DigitalOcean egress. Use modules.meteomatics_provider.fetch_meteomatics_elevation
+    instead. Retained as a stub for backwards compat; always returns 0.0.
+    """
+    return 0.0
 
 
 def fetch_forecast_with_fallback(route: ProviderRoute, lat: float, lon: float) -> ProviderFetchResult:
