@@ -2850,23 +2850,24 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
             "Lift parcel (CAPE/CIN)",
             value=False,
             key=f"sounding_parcel_on_{_panel_idx}",
-            help="Enable to compute and draw a lifted parcel trajectory, "
-                 "CAPE/CIN shading, and convective diagnostics.",
+            help="Enable to compute and draw a saturated lifted parcel "
+                 "(assumes immediate condensation), CAPE/CIN shading, and "
+                 "convective diagnostics.",
         )
 
-        # Only show the slider when parcel analysis is enabled
-        _lift_p = _p_sfc
-        if _show_parcel:
-            _lift_p = st.slider(
-                "Lift parcel from (hPa)",
-                min_value=int(_slider_top),
-                max_value=int(_p_sfc),
-                value=int(_p_sfc),
-                step=5,
-                key=f"sounding_lift_{_panel_idx}",
-                help="Drag to lift a parcel from a different pressure level "
-                     "and see how CAPE / CIN change.",
-            )
+        # Slider always present (disabled when parcel is off) to keep the
+        # panel layout vertically stable when toggling the checkbox.
+        _lift_p = st.slider(
+            "Lift parcel from (hPa)",
+            min_value=int(_slider_top),
+            max_value=int(_p_sfc),
+            value=int(_p_sfc),
+            step=5,
+            key=f"sounding_lift_{_panel_idx}",
+            disabled=(not _show_parcel),
+            help="Drag to lift a saturated parcel from a different pressure "
+                 "level and see how CAPE / CIN change. Enable the checkbox above.",
+        )
 
         # Render the interactive Plotly sounding
         _fig, _diag = render_sounding_plotly(
@@ -2882,15 +2883,15 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
                         key=f"sounding_chart_{_panel_idx}")
         _any_rendered = True
 
-        # Diagnostics box — only when parcel analysis is enabled
+        # Diagnostics box — always rendered at constant height. Real values
+        # when parcel is on; placeholder dashes when off. Keeps the column
+        # vertically stable when toggling the checkbox.
         if _show_parcel and _diag:
             _cape = _diag["cape"]
             _cin = _diag["cin"]
-            _lcl_ft = _diag["lcl_ft"]
             _lfc = _diag["lfc_hpa"]
             _el = _diag["el_hpa"]
 
-            # CAPE color band — operational thresholds
             if _cape >= 2500:
                 _cape_clr = "#ff6b4a"
             elif _cape >= 1000:
@@ -2906,17 +2907,24 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
             st.markdown(
                 f'<div style="background:#161A1F;border-left:2px solid {_pcolor};'
                 f'padding:7px 10px;margin-top:4px;border-radius:0 3px 3px 0;'
-                f'font-size:0.72rem;line-height:1.6;">'
+                f'font-size:0.72rem;line-height:1.6;min-height:42px;">'
                 f'<span style="color:#6B7280;">CAPE</span> '
                 f'<span style="color:{_cape_clr};font-weight:600;">{_cape:.0f} J/kg</span> &nbsp;'
                 f'<span style="color:#6B7280;">CIN</span> '
                 f'<span style="color:#60a5fa;font-weight:600;">{_cin:.0f} J/kg</span><br>'
-                f'<span style="color:#6B7280;">LCL</span> '
-                f'<span style="color:#D1D5DB;">{_lcl_ft:,.0f} ft</span> &nbsp;'
                 f'<span style="color:#6B7280;">LFC</span> '
                 f'<span style="color:#D1D5DB;">{_lfc_str}</span> &nbsp;'
                 f'<span style="color:#6B7280;">EL</span> '
                 f'<span style="color:#D1D5DB;">{_el_str}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div style="background:#161A1F;border-left:2px solid #2A3038;'
+                f'padding:7px 10px;margin-top:4px;border-radius:0 3px 3px 0;'
+                f'font-size:0.72rem;line-height:1.6;min-height:42px;color:#6B7280;">'
+                f'CAPE \u2014 &nbsp; CIN \u2014<br>LFC \u2014 &nbsp; EL \u2014'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2929,10 +2937,13 @@ if _any_rendered:
         '<span style="color:#2abf2a;">green</span> = dewpoint. '
         'Dry adiabats (warm diagonals), moist adiabats (dotted green), '
         'freezing isotherm (cyan dashed). Gray bands = saturated layers (T\u2212Td \u2264 2\u00b0C). '
-        'Wind barbs and ASL altitude on the right. '
-        'Enable the <b>Lift parcel (CAPE/CIN)</b> checkbox per panel to add '
-        'parcel-lifting analysis \u2014 dashed parcel trace, red CAPE / blue CIN '
-        'shading, and convective diagnostics (LCL, LFC, EL).'
+        'Wind barbs use aviation-standard glyphs (half-barb = 5 kt, full barb = 10 kt, '
+        'pennant = 50 kt, circle = calm) with the staff pointing in the direction '
+        'the wind is coming FROM. ASL altitude on the right. '
+        'Enable the <b>Lift parcel (CAPE/CIN)</b> checkbox per panel to compute '
+        'a saturated lifted parcel \u2014 the parcel is assumed saturated at the '
+        'lift level (immediate condensation) and follows the moist adiabat upward. '
+        'Red shading = CAPE (positive buoyancy), blue = CIN (negative buoyancy).'
         '</div>',
         unsafe_allow_html=True,
     )
