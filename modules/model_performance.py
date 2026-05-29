@@ -79,6 +79,118 @@ VIS_MAE_WARN_SM = 3.0
 # HISTORICAL FORECAST FETCH (Open-Meteo Previous Runs)
 # =============================================================================
 
+def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
+                                       display_name: str = "MIX") -> dict:
+    """Fetches 24h of historical Meteomatics forecast data for the scorecard.
+
+    Different from _fetch_model_history in two ways:
+      1. Uses Meteomatics' API (HTTP Basic Auth, different URL format) rather
+         than Open-Meteo
+      2. Only fetches the 8 surface variables the scorecard scores against —
+         that's a single 10-param batch (10 quota units) instead of the
+         95-param full ARMS request (100 units). Big quota saving since
+         pressure-level data isn't used in MAE scoring.
+
+    Returns the same dict shape as _fetch_model_history, or None on failure.
+    """
+    try:
+        from modules.meteomatics_provider import (
+            METEOMATICS_BASE, METEOMATICS_MODELS, _get_credentials,
+        )
+    except ImportError:
+        return None
+
+    creds = _get_credentials()
+    if creds is None or model not in METEOMATICS_MODELS:
+        return None
+
+    # Backward 24h + forward 6h to capture the past day of forecast data
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(hours=24)
+    end = now + timedelta(hours=6)
+    validdate = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
+
+    # 8 scorecard-essential parameters. One batch.
+    mm_params = [
+        "t_2m:C", "relative_humidity_2m:p",
+        "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
+        "sfc_pressure:hPa", "visibility:m", "weather_symbol_1h:idx",
+    ]
+    param_str = ",".join(mm_params)
+    model_id = METEOMATICS_MODELS[model]
+    url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
+
+    try:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        payload = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2, basic_auth=creds)
+    except _HttpFetchError as e:
+        logger.warning("Meteomatics history fetch failed for %s: %s", display_name, e)
+        return None
+
+    # Index Meteomatics response by parameter name
+    data_blocks = payload.get("data") or []
+    by_param: dict = {}
+    times_iso: list = []
+    for block in data_blocks:
+        coords = block.get("coordinates") or []
+        if not coords:
+            continue
+        dates = coords[0].get("dates") or []
+        if not dates:
+            continue
+        by_param[block.get("parameter")] = dates
+        if not times_iso:
+            # Normalize to Open-Meteo format ("YYYY-MM-DDTHH:MM", no Z, no seconds)
+            times_iso = [(d["date"][:-1] if d["date"].endswith("Z") else d["date"])[:16]
+                         for d in dates]
+
+    if not times_iso:
+        return None
+
+    # Keep only past hours (matching _fetch_model_history's filter)
+    kept_indices = []
+    now_filter = datetime.now(timezone.utc)
+    for i, t_str in enumerate(times_iso):
+        try:
+            t = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        age_hours = (now_filter - t).total_seconds() / 3600.0
+        if 0 <= age_hours <= 24:
+            kept_indices.append(i)
+
+    if not kept_indices:
+        return None
+
+    def _pick(mm_key: str, scale: float = 1.0) -> list:
+        dates = by_param.get(mm_key) or []
+        out = []
+        for idx in kept_indices:
+            if idx < len(dates):
+                val = dates[idx].get("value")
+                if val is None:
+                    out.append(None)
+                else:
+                    try:
+                        out.append(float(val) * scale)
+                    except (TypeError, ValueError):
+                        out.append(None)
+            else:
+                out.append(None)
+        return out
+
+    return {
+        "times": [times_iso[i] for i in kept_indices],
+        "wind_kt":      _pick("wind_speed_10m:kn"),
+        "wind_dir":     _pick("wind_dir_10m:d"),
+        "gust_kt":      _pick("wind_gusts_10m_1h:kn"),
+        "temp_c":       _pick("t_2m:C"),
+        "pressure_hpa": _pick("sfc_pressure:hPa"),
+        "rh":           _pick("relative_humidity_2m:p"),
+        "visibility_sm": _pick("visibility:m", 1.0 / 1609.344),
+    }
+
+
 def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: float) -> dict:
     """Fetches 24-hour historical forecast from one model.
 
@@ -1057,8 +1169,21 @@ def compute_performance_scorecard(
     regional_name, regional_url = _select_regional_model(lat, lon)
     in_conus = _is_conus_coverage(lat, lon)
 
+    # Check if Meteomatics credentials are present so we can include
+    # Meteomatics-only models (MIX, AIFS) in scoring.
+    try:
+        from modules.meteomatics_provider import has_credentials as _mm_has
+        _mm_in_scorecard = _mm_has()
+    except ImportError:
+        _mm_in_scorecard = False
+
+    # The scorecard model list. URLs starting with "meteomatics://" are
+    # dispatched to _fetch_model_history_meteomatics; everything else uses
+    # the Open-Meteo fetcher. MODEL_ENDPOINTS now returns the best-available
+    # source for each model name (Meteomatics where the subscription has it,
+    # Open-Meteo otherwise) via the source-aware routing in ensemble_analysis.
     all_candidate_models = [
-        # (display_name, endpoint_url, in_coverage)
+        # (display_name, endpoint_url_or_marker, in_coverage)
         (regional_name, regional_url, True),  # always in coverage by definition
         ("GFS",   MODEL_ENDPOINTS["GFS"],   True),
         ("ECMWF", MODEL_ENDPOINTS["ECMWF"], True),
@@ -1066,6 +1191,12 @@ def compute_performance_scorecard(
         ("NAM",   MODEL_ENDPOINTS["NAM"],   in_conus),
         ("HRRR",  MODEL_ENDPOINTS["HRRR"],  in_conus),
     ]
+    # Meteomatics-only models — surface only when credentials configured
+    if _mm_in_scorecard:
+        if "MIX" in MODEL_ENDPOINTS:
+            all_candidate_models.append(("MIX", MODEL_ENDPOINTS["MIX"], True))
+        if "AIFS" in MODEL_ENDPOINTS:
+            all_candidate_models.append(("AIFS", MODEL_ENDPOINTS["AIFS"], True))
 
     def _empty_record(name: str, status: str) -> dict:
         return {
@@ -1086,7 +1217,17 @@ def compute_performance_scorecard(
     # Phase 1: fetch all model histories in parallel. The fetches are the
     # I/O bottleneck (4-6 × ~3s each → ~15-20s serial). The downstream MAE
     # computation is fast and stays serial.
+    #
+    # Dispatch: URLs starting with "meteomatics://" route through the
+    # Meteomatics scorecard fetcher (different auth, different params).
+    # All other URLs go to the Open-Meteo path.
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _dispatch_history(name: str, url: str):
+        if url.startswith("meteomatics://"):
+            model_id = url.replace("meteomatics://", "")
+            return _fetch_model_history_meteomatics(model_id, lat, lon, display_name=name)
+        return _fetch_model_history(name, url, lat, lon)
 
     in_coverage_models = [
         (name, url) for name, url, in_coverage in all_candidate_models if in_coverage
@@ -1095,7 +1236,7 @@ def compute_performance_scorecard(
     if in_coverage_models:
         with ThreadPoolExecutor(max_workers=len(in_coverage_models)) as ex:
             futures = {
-                ex.submit(_fetch_model_history, name, url, lat, lon): name
+                ex.submit(_dispatch_history, name, url): name
                 for name, url in in_coverage_models
             }
             for fut in as_completed(futures):
