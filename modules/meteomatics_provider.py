@@ -83,7 +83,7 @@ _SURFACE_PARAMS = {
     "precipitation_probability":  "prob_precip_1h:p",
     "precipitation":              "precip_1h:mm",
     "cape":                       "cape:Jkg",
-    "boundary_layer_height":      "boundary_layer_height:m",
+    "boundary_layer_height":      "pbl_height:m",
     "surface_pressure":           "sfc_pressure:hPa",
     "snow_depth":                 "snow_depth:m",
 }
@@ -196,8 +196,57 @@ def has_credentials() -> bool:
 
 
 # =============================================================================
-# FETCH
+# FETCH (with subscription-aware batching)
 # =============================================================================
+# Meteomatics trial subscriptions cap requests at 10 parameters each, so we
+# split the 95-parameter ARMS request into 10 sub-requests of <=10 params,
+# fire them in parallel, and stitch the responses back into one Open-Meteo-
+# shaped dict. Commercial subscriptions allow much higher param counts; the
+# cap could be lifted by setting METEOMATICS_BATCH_SIZE higher and the rest
+# of the logic still works (one big batch instead of ten small ones).
+
+# Trial-tier hard cap on parameters per request. Verified empirically via the
+# diagnostic page on 2026-05-29: requests with 11+ parameters return HTTP 403
+# with body "Your subscription allows requests with maximal 10 parameters."
+METEOMATICS_BATCH_SIZE = 10
+
+
+def _chunked(items: list, n: int) -> list[list]:
+    """Splits `items` into chunks of size <= n."""
+    return [items[i:i + n] for i in range(0, len(items), n)]
+
+
+def _fetch_one_batch(
+    creds: tuple,
+    validdate: str,
+    lat: float,
+    lon: float,
+    model_id: str,
+    mm_params: list[str],
+) -> dict:
+    """Fetches one Meteomatics sub-request. Returns either the parsed JSON
+    payload or an error dict shaped like {"error": True, "message": ...}.
+
+    Internal use only. Multiple of these are fired in parallel by
+    fetch_meteomatics_forecast and merged into a single Open-Meteo-shaped
+    response.
+    """
+    param_str = ",".join(mm_params)
+    url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
+    try:
+        return fetch_json(
+            url,
+            timeout=DEFAULT_TIMEOUT_S,
+            retries=2,
+            basic_auth=creds,
+        )
+    except HttpFetchError as e:
+        return {
+            "_batch_error": True,
+            "message": e.message,
+            "status": e.status,
+        }
+
 
 def fetch_meteomatics_forecast(
     lat: float,
@@ -207,6 +256,11 @@ def fetch_meteomatics_forecast(
 ) -> dict:
     """Fetches a forecast from Meteomatics and returns it in Open-Meteo response shape.
 
+    Internally splits the 95-parameter request into batches of <=10 parameters
+    (subscription cap) and fires them in parallel via ThreadPoolExecutor. All
+    batches share the same validdate so their time grids are byte-identical
+    and can be merged trivially.
+
     Args:
         lat, lon:     site coordinates
         model:        Meteomatics model identifier (key from METEOMATICS_MODELS)
@@ -214,13 +268,16 @@ def fetch_meteomatics_forecast(
 
     Returns:
         dict with keys:
-            "hourly":     {"time": [...], "temperature_2m": [...], ...}
+            "hourly":       {"time": [...], "temperature_2m": [...], ...}
             "hourly_units": {"wind_speed_10m": "kn", "temperature_2m": "°C", ...}
-            "elevation":  station elevation in metres
-            "_run_info":  {run_cycle_z, run_date, age_hours} or {}
-            "_provider":  "meteomatics"
-            "_model":     the model id used
-        On failure returns {"error": True, "message": str, "_provider": "meteomatics"}.
+            "elevation":    None (caller resolves elevation separately)
+            "_run_info":    {run_cycle_z, run_date, age_hours} or {}
+            "_provider":    "meteomatics"
+            "_model":       the model id used
+            "_batches":     dict {"count": int, "elapsed_ms": int} for instrumentation
+        On any single-batch failure returns {"error": True, "message": str,
+        "_provider": "meteomatics"} — partial failures are treated as total
+        failures so the dashboard never renders with phantom-gap data.
     """
     creds = _get_credentials()
     if creds is None:
@@ -243,43 +300,74 @@ def fetch_meteomatics_forecast(
     end = now + timedelta(hours=hours_ahead)
     validdate = f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
 
-    # Build parameter list
+    # Build parameter list and split into batches
     pairs = _build_param_list()
     om_names = [p[0] for p in pairs]
-    mm_params = [p[1] for p in pairs]
+    mm_params_all = [p[1] for p in pairs]
+    batches = _chunked(mm_params_all, METEOMATICS_BATCH_SIZE)
+    model_id = METEOMATICS_MODELS[model]
 
-    # Construct URL. Meteomatics encodes parameters comma-separated in path.
-    param_str = ",".join(mm_params)
-    url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={METEOMATICS_MODELS[model]}"
+    # Fire all batches in parallel
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
 
-    try:
-        payload = fetch_json(
-            url,
-            timeout=DEFAULT_TIMEOUT_S,
-            retries=2,
-            basic_auth=creds,
-        )
-    except HttpFetchError as e:
-        msg = e.message
-        if e.status == 401:
-            msg = "Meteomatics authentication failed — credentials may be invalid or expired."
-        elif e.status == 402:
-            msg = "Meteomatics quota exceeded — daily parameter-locations budget hit."
-        elif e.status == 429:
-            msg = "Meteomatics rate limited — too many requests per minute."
-        elif e.status and 500 <= e.status < 600:
-            msg = f"Meteomatics server error (HTTP {e.status}) — service may be degraded."
-        logger.warning("Meteomatics fetch failed: %s", msg)
-        return {
-            "error": True,
-            "message": msg,
-            "status": e.status,
-            "_provider": "meteomatics",
-        }
+    t0 = _time.time()
+    with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+        futures = [
+            executor.submit(_fetch_one_batch, creds, validdate, lat, lon, model_id, batch)
+            for batch in batches
+        ]
+        results = [f.result() for f in futures]
+    elapsed_ms = int((_time.time() - t0) * 1000)
+
+    # If ANY batch failed, return a single error (no partial-success rendering).
+    # The first batch failure is the most informative; subsequent failures are
+    # often cascading downstream effects.
+    for r in results:
+        if r.get("_batch_error"):
+            msg = r.get("message") or "unknown error"
+            status = r.get("status")
+            if status == 401:
+                msg = "Meteomatics authentication failed — credentials may be invalid or expired."
+            elif status == 402:
+                msg = "Meteomatics quota exceeded — daily parameter-locations budget hit."
+            elif status == 403:
+                # Reword to be specific about the trial-cap case since that's
+                # the most likely 403 with batching in place.
+                msg = (f"Meteomatics rejected the request (HTTP 403): {msg}. "
+                       "Verify the subscription tier supports the requested data.")
+            elif status == 429:
+                msg = "Meteomatics rate limited — too many requests per minute."
+            elif status and 500 <= status < 600:
+                msg = f"Meteomatics server error (HTTP {status}) — service may be degraded."
+            logger.warning("Meteomatics batch failed: %s", msg)
+            return {
+                "error": True,
+                "message": msg,
+                "status": status,
+                "_provider": "meteomatics",
+            }
+
+    # Merge — every batch payload has the same time grid (same validdate),
+    # so we just collect all data[i] blocks from each into one big list and
+    # hand it to the existing translator unchanged.
+    merged_data: list = []
+    date_generated: Optional[str] = None
+    for r in results:
+        merged_data.extend(r.get("data") or [])
+        # Capture the dateGenerated from the first successful batch — they
+        # should all be within seconds of each other.
+        if date_generated is None:
+            date_generated = r.get("dateGenerated")
+
+    merged_payload = {
+        "data": merged_data,
+        "dateGenerated": date_generated,
+    }
 
     # Translate response shape
     try:
-        translated = _translate_to_open_meteo_shape(payload, om_names)
+        translated = _translate_to_open_meteo_shape(merged_payload, om_names)
     except Exception as e:
         logger.exception("Meteomatics translation failed")
         return {
@@ -291,7 +379,8 @@ def fetch_meteomatics_forecast(
     # Augment with metadata
     translated["_provider"] = "meteomatics"
     translated["_model"] = model
-    translated["_run_info"] = _extract_run_info(payload)
+    translated["_run_info"] = _extract_run_info(merged_payload)
+    translated["_batches"] = {"count": len(batches), "elapsed_ms": elapsed_ms}
     return translated
 
 
