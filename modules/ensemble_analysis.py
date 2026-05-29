@@ -92,6 +92,17 @@ def _build_model_routes() -> dict:
     # NAM CONUS — Open-Meteo only
     routes["NAM"] = ("open-meteo", _om_url("gfs?models=ncep_nam_conus"))
 
+    # Meteomatics MOS — Model Output Statistics, statistically-tuned per-station
+    # forecast using multiple linear regression against historical observations.
+    # Fundamentally different artifact than the gridded models above — it's a
+    # station-specific calibration that often outperforms raw NWP at recurrent
+    # locations like ICAO airports.
+    #
+    # The target field is just "mm-mos" — the dispatcher constructs the URL
+    # using ?source=mm-mos and a station_id (resolved from the nearest ICAO).
+    if mm:
+        routes["MOS"] = ("meteomatics-mos", "mm-mos")
+
     return routes
 
 
@@ -100,8 +111,23 @@ MODEL_ROUTES = _build_model_routes()
 # Backward-compat for any external code that still imports MODEL_ENDPOINTS.
 # Resolves to the URL portion of routes that go through Open-Meteo (for the
 # meteomatics:// scheme tag) so legacy callers can still construct fetches.
+def _route_to_endpoint(source: str, target: str) -> str:
+    """Encodes a (source, target) route into a single URL/marker string for
+    backward-compat with code that imported MODEL_ENDPOINTS. The model
+    performance scorecard reads this dict and dispatches based on scheme:
+        http(s)://...        → Open-Meteo fetcher
+        meteomatics://...    → Meteomatics forecast fetcher
+        meteomatics-mos://...→ Meteomatics MOS fetcher (station-keyed)
+    """
+    if source == "open-meteo":
+        return target
+    if source == "meteomatics-mos":
+        return f"meteomatics-mos://{target}"
+    return f"meteomatics://{target}"
+
+
 MODEL_ENDPOINTS = {
-    name: (target if source == "open-meteo" else f"meteomatics://{target}")
+    name: _route_to_endpoint(source, target)
     for name, (source, target) in MODEL_ROUTES.items()
 }
 
@@ -439,12 +465,25 @@ def fetch_all_models(lat: float, lon: float) -> list:
         if name in MODEL_ROUTES:
             active_routes[name] = MODEL_ROUTES[name]
 
+    # MOS — only include if we can find a nearby ICAO station to key it on.
+    # The lookup is cheap (one bbox call to AviationWeather.gov, cached at
+    # session-state level). If no station within ~50km, skip MOS for this
+    # site rather than guessing.
+    mos_station_id = None
+    if "MOS" in MODEL_ROUTES:
+        icao = _nearest_icao_for_mos(lat, lon)
+        if icao:
+            mos_station_id = f"metar_{icao}"
+            active_routes["MOS"] = MODEL_ROUTES["MOS"]
+
     # Parallel fetch dispatcher — each model routes to its source's fetcher
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _dispatch(name: str, source: str, target: str) -> "ModelForecast":
         if source == "meteomatics":
             return _fetch_model_meteomatics(lat, lon, model=target, display_name=name)
+        if source == "meteomatics-mos":
+            return _fetch_model_mos(mos_station_id, display_name=name)
         return _fetch_model(name, target, lat, lon)
 
     results = []
@@ -463,6 +502,112 @@ def fetch_all_models(lat: float, lon: float) -> list:
             if mf.valid:
                 results.append(mf)
     return results
+
+
+# =============================================================================
+# MOS support — ICAO resolver + ModelForecast adapter
+# =============================================================================
+# MOS is keyed by station ID, not lat/lon. We resolve nearest ICAO via
+# AviationWeather.gov's bbox query, cached at module level for the process
+# lifetime (ICAO locations don't change).
+
+_ICAO_CACHE: dict = {}
+
+
+def _nearest_icao_for_mos(lat: float, lon: float, max_distance_km: float = 50.0) -> str:
+    """Returns nearest ICAO airport code within max_distance_km, or empty
+    string if none found. Cached at module level by (lat, lon) at 1-decimal
+    precision (~11 km grid).
+    """
+    key = (round(lat, 1), round(lon, 1))
+    if key in _ICAO_CACHE:
+        return _ICAO_CACHE[key]
+
+    import math, urllib.request, json as _json
+    min_lat, max_lat = lat - 1.0, lat + 1.0
+    min_lon, max_lon = lon - 1.0, lon + 1.0
+    url = (f"https://aviationweather.gov/api/data/taf"
+           f"?bbox={min_lat},{min_lon},{max_lat},{max_lon}&format=json")
+    best_icao = ""
+    best_dist = float("inf")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "VectorCheck-ARMS/2.7"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        seen = set()
+        for taf in data:
+            icao_code = taf.get("icaoId")
+            if not icao_code or icao_code in seen:
+                continue
+            seen.add(icao_code)
+            try:
+                s_lat = float(taf.get("lat"))
+                s_lon = float(taf.get("lon"))
+            except (TypeError, ValueError):
+                continue
+            R = 6371.0
+            lat1, lat2 = math.radians(lat), math.radians(s_lat)
+            dlat = lat2 - lat1
+            dlon = math.radians(s_lon - lon)
+            a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+            d_km = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            if d_km <= max_distance_km and d_km < best_dist:
+                best_dist = d_km
+                best_icao = icao_code
+    except Exception as e:
+        logger.info("ICAO lookup failed for (%s, %s): %s", lat, lon, e)
+    _ICAO_CACHE[key] = best_icao
+    return best_icao
+
+
+def _fetch_model_mos(station_id: str, display_name: str = "MOS") -> "ModelForecast":
+    """Fetches MOS forecast for an ICAO station and returns it as a
+    ModelForecast for ensemble inclusion. Returns invalid ModelForecast on
+    any failure (station has no MOS coverage, credentials missing, etc).
+    """
+    mf = ModelForecast(name=display_name)
+    if not station_id:
+        return mf
+    try:
+        from modules.meteomatics_provider import fetch_meteomatics_mos
+    except ImportError:
+        return mf
+
+    result = fetch_meteomatics_mos(station_id, hours_ahead=96)
+    if result.get("error"):
+        logger.info("MOS unavailable for %s: %s", station_id, result.get("message"))
+        return mf
+
+    h = result.get("hourly")
+    if not h or "time" not in h:
+        return mf
+
+    def _truncate(key: str) -> list:
+        raw = h.get(key) or []
+        out = []
+        for v in raw[:72]:
+            if v is None:
+                out.append(None)
+            else:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    out.append(None)
+        return out
+
+    mf.times = h["time"][:72]
+    mf.wind_kt = _truncate("wind_speed_10m")
+    mf.wind_dir = _truncate("wind_direction_10m")
+    mf.gust_kt = _truncate("wind_gusts_10m")
+    mf.temp_c = _truncate("temperature_2m")
+    mf.rh = _truncate("relative_humidity_2m")
+    mf.pressure_hpa = _truncate("surface_pressure")
+    # MOS doesn't return precip_prob or wx_code on the same parameter list —
+    # fall back to None lists so downstream code doesn't choke.
+    mf.precip_prob = [None] * len(mf.times)
+    mf.wx_code = _truncate("weather_code")
+    mf.valid = len(mf.wind_kt) >= 24
+    return mf
 
 
 # =============================================================================
