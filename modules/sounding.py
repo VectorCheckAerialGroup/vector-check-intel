@@ -702,36 +702,33 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     #   - circle around the station for calm (< 3 kt)
     # Speed is rounded to nearest 5 kt then decomposed into pennants/full/half.
     #
-    # Implementation notes:
-    #   - We render in paper x-coords + data y-coords using Plotly Shapes
-    #     (which accept this hybrid; annotations cannot). That gives screen-
-    #     space-consistent barb geometry regardless of chart aspect ratio.
-    #   - Pennants are drawn as filled triangle shapes via SVG path strings.
+    # Geometry: barbs sit in a narrow right-margin column. STAFF_LEN and
+    # BARB_LEN are in paper-fraction units, calibrated to produce ~14 px
+    # staff / ~8 px tick at typical 3-column Streamlit panel widths (~340 px).
     # =========================================================================
-    BARB_COL_X    = 0.94        # paper-fraction x for the barb anchor column
-    STAFF_LEN     = 0.055       # staff length, paper-fraction units (~25 px tall)
-    BARB_LEN      = 0.032       # half/full barb tick length, paper x units
-    BARB_GAP      = 0.10        # spacing between successive barbs (as fraction of staff)
-    SHAPE_COLOR   = "#cbd5e1"   # standard color for all barbs (no speed-banding)
-    SHAPE_WIDTH   = 1.3
+    BARB_COL_X    = 0.945       # paper-fraction x for the barb anchor column
+    STAFF_LEN     = 0.040       # staff length, paper-fraction units
+    BARB_LEN      = 0.022       # barb tick length, paper x units
+    BARB_GAP      = 0.14        # spacing between successive barbs (as fraction of staff)
+    SHAPE_COLOR   = "#cbd5e1"
+    SHAPE_WIDTH   = 1.2
 
-    # Vertical aspect correction. The Plotly figure is roughly 480 px tall and
-    # the data area within paper-y [0,1] is ~410 px. Paper-x spans whatever the
-    # column width gives us (~340 px after margins for 3-column layout). So one
-    # unit of paper-x ~= 340 px, one unit of paper-y ~= 410 px. The ratio is
-    # close enough to 1:1 that a tick rendered with equal Δx and Δy is roughly
-    # square on screen. We bias slightly to keep barbs visually upright.
+    # Approximate panel aspect for screen-space barb geometry.
+    # At ~340 px wide and ~430 px tall plot area (3-column Streamlit layout
+    # with height=430 below), paper-x and paper-y don't span the same number
+    # of pixels. We compensate by scaling paper-y offsets in the barb glyph
+    # so the staff length and tick perpendiculars are visually equal lengths.
+    # If panel width is W px and panel height is H px:
+    #   1 paper-x unit = W px
+    #   1 paper-y unit = H px
+    # So paper-y has H/W times as many pixels per unit. To make a unit-length
+    # vector visually equal on screen, scale y components by W/H.
+    ASPECT_W_OVER_H = 340.0 / 410.0   # ~0.83
 
-    # For y in log-pressure space we use multiplicative offsets (factor of 10**Δlog).
-    # 1 unit of paper-y corresponds to log(P_BOTTOM/P_TOP) = log(1050/100) ≈ 1.02
-    # decades of log-pressure. So Δpaper_y of 0.01 ≈ 0.0102 decades.
     LOGP_SCALE = math.log10(P_BOTTOM / P_TOP)   # ~1.022
 
     def _paper_dy_to_logp_factor(dpaper_y):
-        """Convert a paper-y offset to a log-P multiplicative factor.
-        Positive dpaper_y means visually upward on the chart, which is toward
-        LOWER pressure (top of chart). On the reversed log axis, lower P maps
-        to higher paper-y, so dpaper_y > 0 -> multiply P by 10**(-dpaper_y * LOGP_SCALE)."""
+        """Convert a paper-y offset to a log-P multiplicative factor."""
         return 10 ** (-dpaper_y * LOGP_SCALE)
 
     def _add_segment(x0, y0, x1, y1, color=SHAPE_COLOR, width=SHAPE_WIDTH):
@@ -766,15 +763,16 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
 
     def _draw_barb_glyph(p_lvl, speed_kt, wind_dir_deg):
         """Draw one full aviation-standard wind barb at pressure p_lvl."""
-        # Calm wind: open circle, no staff
+        # Calm wind: open circle (round, not oval — aspect-corrected)
         if speed_kt < 3:
+            r = 0.010
             fig.add_shape(
                 type="circle",
                 xref="paper", yref="y",
-                x0=BARB_COL_X - 0.012,
-                x1=BARB_COL_X + 0.012,
-                y0=p_lvl * _paper_dy_to_logp_factor(-0.012),
-                y1=p_lvl * _paper_dy_to_logp_factor(0.012),
+                x0=BARB_COL_X - r,
+                x1=BARB_COL_X + r,
+                y0=p_lvl * _paper_dy_to_logp_factor(-r * ASPECT_W_OVER_H),
+                y1=p_lvl * _paper_dy_to_logp_factor(r * ASPECT_W_OVER_H),
                 line=dict(color=SHAPE_COLOR, width=1.2),
                 layer="above",
             )
@@ -795,39 +793,31 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         ux = math.sin(rad)    # +x component of "from" direction (paper-x)
         uy = math.cos(rad)    # +y component of "from" direction (paper-y up)
 
-        # Staff endpoints
+        # Staff endpoints. y-components scaled by ASPECT_W_OVER_H so the staff
+        # has equal pixel length in x and y on screen.
         staff_tail_x = BARB_COL_X + ux * STAFF_LEN
-        staff_tail_dpy = uy * STAFF_LEN
+        staff_tail_dpy = uy * STAFF_LEN * ASPECT_W_OVER_H
         staff_tail_y = p_lvl * _paper_dy_to_logp_factor(staff_tail_dpy)
         _add_segment(BARB_COL_X, p_lvl, staff_tail_x, staff_tail_y)
 
         # Perpendicular direction for barb ticks. By convention, barbs hang on
         # the LEFT side of the staff (when looking from anchor toward tail in
         # northern hemisphere). The left-perpendicular of (ux, uy) is (-uy, ux).
-        # We negate to get the right-hand perpendicular for visual consistency
-        # with most aviation chart conventions.
         perp_x = -uy
         perp_y = ux
 
-        # Barbs are placed starting from the staff TAIL (away from the data
-        # point) and walk inward toward the anchor.
         n_total = pennants + full_barbs + half_barbs
         if n_total == 0:
             return
 
-        # Compute positions of each barb along the staff
-        # Position 0 = at the tail, position 1 = closer to anchor
         gap_step = STAFF_LEN * BARB_GAP
 
-        # We'll place pennants first (at the outermost positions), then full
-        # barbs, then a half-barb if any.
         positions = []
-        # Track outward distance from anchor along the staff
         dist_from_anchor = STAFF_LEN
         for _ in range(pennants):
             positions.append(("pennant", dist_from_anchor))
             dist_from_anchor -= gap_step
-            dist_from_anchor -= STAFF_LEN * 0.10   # pennants take a bit more space
+            dist_from_anchor -= STAFF_LEN * 0.12
         for _ in range(full_barbs):
             positions.append(("full", dist_from_anchor))
             dist_from_anchor -= gap_step
@@ -837,27 +827,25 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
 
         for kind, d in positions:
             base_x = BARB_COL_X + ux * d
-            base_dpy = uy * d
+            base_dpy = uy * d * ASPECT_W_OVER_H
             base_y = p_lvl * _paper_dy_to_logp_factor(base_dpy)
 
             if kind == "pennant":
-                # Filled triangle: base of staff length along staff direction,
-                # tip out perpendicular to staff.
                 _add_pennant(
                     base_x, base_y,
-                    x_along_dx=ux * STAFF_LEN * 0.30,
-                    x_along_dy=uy * STAFF_LEN * 0.30,
+                    x_along_dx=ux * STAFF_LEN * 0.32,
+                    x_along_dy=uy * STAFF_LEN * 0.32 * ASPECT_W_OVER_H,
                     x_perp_dx=perp_x * BARB_LEN,
-                    x_perp_dy=perp_y * BARB_LEN,
+                    x_perp_dy=perp_y * BARB_LEN * ASPECT_W_OVER_H,
                 )
             elif kind == "full":
                 tip_x = base_x + perp_x * BARB_LEN
-                tip_dpy = perp_y * BARB_LEN
+                tip_dpy = perp_y * BARB_LEN * ASPECT_W_OVER_H
                 tip_y = base_y * _paper_dy_to_logp_factor(tip_dpy)
                 _add_segment(base_x, base_y, tip_x, tip_y)
             elif kind == "half":
                 tip_x = base_x + perp_x * BARB_LEN * 0.55
-                tip_dpy = perp_y * BARB_LEN * 0.55
+                tip_dpy = perp_y * BARB_LEN * 0.55 * ASPECT_W_OVER_H
                 tip_y = base_y * _paper_dy_to_logp_factor(tip_dpy)
                 _add_segment(base_x, base_y, tip_x, tip_y)
 
@@ -880,8 +868,8 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
 
     fig.update_layout(
         title=dict(text=title, font=dict(color=panel_color, size=12)),
-        height=480,
-        margin=dict(l=38, r=64, t=36, b=32),
+        height=430,
+        margin=dict(l=38, r=60, t=34, b=30),
         plot_bgcolor="#1B1E23",
         paper_bgcolor="#1B1E23",
         xaxis=dict(
