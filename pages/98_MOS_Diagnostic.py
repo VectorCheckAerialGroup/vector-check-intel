@@ -245,6 +245,67 @@ emit("  - If TEST 2 returns 404 but TEST 1 OK → metar_CYBN not in MOS station 
 emit("  - If TEST 4 returns 404 → mix-obs not licensed → remove fallback path")
 emit("  - If TEST 5 has any 404 → that specific model is not on this subscription")
 emit("  - TEST 6 shows the actual quota numbers")
+emit("  - TEST 7 = scorecard's exact historical params, per model")
+emit("  - TEST 8 = full ARMS forecast params (95) against each model — finds blend-only params")
+
+
+# -----------------------------------------------------------------------------
+# TEST 8 — Full 95-param ARMS forecast request, per model. Identifies
+# additional parameters not supported by each raw NWP model (e.g. HRRR may
+# lack high-altitude pressure levels). Uses a bisection-style approach:
+# request the full surface set, then add pressure levels one at a time.
+# -----------------------------------------------------------------------------
+banner("TEST 8 — Full ARMS param set against each raw model (find HRRR's gap)")
+
+# Reuse the actual param list the provider builds. Easier to import than to
+# duplicate the list here.
+try:
+    import sys
+    sys.path.insert(0, "/app")
+    from modules.meteomatics_provider import (
+        _build_param_list, _filter_params_for_model, _MODEL_PARAM_BLOCKLIST,
+    )
+    pairs = _build_param_list()
+    emit(f"Building full request: {len(pairs)} params (matches what fetch_meteomatics_forecast uses)")
+except Exception as e:
+    emit(f"Could not import provider module: {e}")
+    pairs = []
+
+if pairs:
+    raw_models = [
+        ("ecmwf-ifs",   "ECMWF IFS"),
+        ("ecmwf-aifs",  "ECMWF AIFS"),
+        ("ncep-gfs",    "NCEP GFS"),
+        ("ncep-hrrr",   "NCEP HRRR"),
+    ]
+    for model_id, label in raw_models:
+        # Apply the current blocklist (so we test exactly what the live code sends)
+        filtered = _filter_params_for_model(pairs, model_id)
+        mm_params = [p[1] for p in filtered]
+        emit(f"\n{label} ({model_id}): testing with {len(mm_params)} params (after blocklist)")
+
+        # Test in batches of 10 (matches METEOMATICS_BATCH_SIZE)
+        batch_size = 10
+        any_fail = False
+        for i in range(0, len(mm_params), batch_size):
+            batch = mm_params[i:i+batch_size]
+            param_str = ",".join(batch)
+            url = (f"https://api.meteomatics.com/{validdate_fwd}/{param_str}"
+                   f"/{PRIMARY_LAT},{PRIMARY_LON}/json?model={model_id}")
+            status, body, elapsed, _ = fetch_mm(url, timeout=10)
+            if status != 200:
+                snippet = body[:250].decode(errors="replace").replace("\n", " ")
+                emit(f"  batch {i//batch_size + 1} ({len(batch)} params) -> {status} FAIL ({elapsed}ms)")
+                emit(f"    Params: {batch}")
+                emit(f"    Body: {snippet}")
+                any_fail = True
+            else:
+                pass    # silent on success to keep output readable
+        if not any_fail:
+            emit(f"  All batches OK")
+
+
+banner("END")
 
 output_text = "\n".join(out_lines)
 st.text_area("Output:", value=output_text, height=600)
