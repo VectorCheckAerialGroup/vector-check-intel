@@ -719,17 +719,12 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     SHAPE_COLOR   = "#9ca3af"   # slightly dimmer slate
     SHAPE_WIDTH   = 1.1
 
-    # Approximate panel aspect for screen-space barb geometry.
-    # At ~340 px wide and ~430 px tall plot area (3-column Streamlit layout
-    # with height=430 below), paper-x and paper-y don't span the same number
-    # of pixels. We compensate by scaling paper-y offsets in the barb glyph
-    # so the staff length and tick perpendiculars are visually equal lengths.
-    # If panel width is W px and panel height is H px:
-    #   1 paper-x unit = W px
-    #   1 paper-y unit = H px
-    # So paper-y has H/W times as many pixels per unit. To make a unit-length
-    # vector visually equal on screen, scale y components by W/H.
-    ASPECT_W_OVER_H = 340.0 / 360.0   # ~0.94 — near-square panel
+    # Approximate panel aspect for screen-space barb geometry. With panel
+    # height=720 px and ~600 px column width in 3-column layout, the data
+    # area is roughly 500 × 660 px after margins. paper-y spans more pixels
+    # per unit than paper-x, so we scale y components by W/H to keep barbs
+    # visually orthogonal on screen.
+    ASPECT_W_OVER_H = 500.0 / 660.0   # ~0.76 — portrait panel
 
     LOGP_SCALE = math.log10(P_BOTTOM / P_TOP)   # ~1.022
 
@@ -874,8 +869,13 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
 
     fig.update_layout(
         title=dict(text=title, font=dict(color=panel_color, size=12)),
-        height=380,
-        margin=dict(l=38, r=60, t=34, b=30),
+        # Skew-T panels should be portrait-oriented (taller than wide) since
+        # the vertical axis covers the full troposphere on a log scale.
+        # At ~600 px column width in the 3-column layout, a 720 px height
+        # gives a 1:1.2 portrait aspect that lets the vertical structure
+        # of the atmosphere read naturally.
+        height=720,
+        margin=dict(l=42, r=60, t=34, b=32),
         plot_bgcolor="#1B1E23",
         paper_bgcolor="#1B1E23",
         xaxis=dict(
