@@ -321,8 +321,15 @@ def compute_cape_cin(parcel: dict, env_pressures: np.ndarray,
 
 def extract_high_res_profile(h: dict, idx: int,
                              sfc_T: float, sfc_Td: float,
-                             sfc_P: float) -> Optional[dict]:
+                             sfc_P: float,
+                             wind_kt_scale: float = 1.0) -> Optional[dict]:
     """Pulls all available pressure-level data plus surface.
+
+    Args:
+        wind_kt_scale: multiplicative factor to convert h's wind_speed_NNNhPa
+            values to knots. Caller is responsible for passing the correct
+            value based on the response's reported units (1.0 if knots,
+            0.539957 if km/h, 1.943844 if m/s).
 
     Returns dict with arrays sorted by descending pressure.
     Returns None if there's not enough data.
@@ -370,8 +377,7 @@ def extract_high_res_profile(h: dict, idx: int,
         wd_v = None
         if ws_list and len(ws_list) > idx and ws_list[idx] is not None:
             try:
-                # Open-Meteo serves wind in km/h on this endpoint family
-                ws_v = float(ws_list[idx]) * KMH_TO_KT
+                ws_v = float(ws_list[idx]) * wind_kt_scale
             except (TypeError, ValueError):
                 ws_v = None
         if wd_list and len(wd_list) > idx and wd_list[idx] is not None:
@@ -406,7 +412,7 @@ def extract_high_res_profile(h: dict, idx: int,
 
 P_BOTTOM = 1050.0
 P_TOP = 100.0
-SKEW_C_PER_DECADE = 50.0
+SKEW_C_PER_DECADE = 45.0
 
 
 def skew_x(temp_C, pressure_hPa):
@@ -422,7 +428,7 @@ def skew_x(temp_C, pressure_hPa):
 def render_sounding_plotly(profile: dict, parcel_lift_p: float,
                             title: str = "", panel_color: str = "#D1D5DB",
                             sfc_elevation_ft: float = 0.0,
-                            x_range: tuple = (-40, 30),
+                            x_range: tuple = (-35, 30),
                             show_parcel: bool = False) -> tuple:
     """Renders the interactive Skew-T as a Plotly figure.
 
@@ -706,12 +712,12 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
     # BARB_LEN are in paper-fraction units, calibrated to produce ~14 px
     # staff / ~8 px tick at typical 3-column Streamlit panel widths (~340 px).
     # =========================================================================
-    BARB_COL_X    = 0.945       # paper-fraction x for the barb anchor column
-    STAFF_LEN     = 0.040       # staff length, paper-fraction units
-    BARB_LEN      = 0.022       # barb tick length, paper x units
-    BARB_GAP      = 0.14        # spacing between successive barbs (as fraction of staff)
-    SHAPE_COLOR   = "#cbd5e1"
-    SHAPE_WIDTH   = 1.2
+    BARB_COL_X    = 0.965       # paper-fraction x for the barb anchor column
+    STAFF_LEN     = 0.032       # staff length, paper-fraction units (~11 px)
+    BARB_LEN      = 0.018       # barb tick length, paper x units (~6 px)
+    BARB_GAP      = 0.16        # spacing between successive barbs (as fraction of staff)
+    SHAPE_COLOR   = "#9ca3af"   # slightly dimmer slate
+    SHAPE_WIDTH   = 1.1
 
     # Approximate panel aspect for screen-space barb geometry.
     # At ~340 px wide and ~430 px tall plot area (3-column Streamlit layout
