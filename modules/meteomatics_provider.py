@@ -128,7 +128,7 @@ _MODEL_MISSING_PRESSURE_LEVELS = {
 _MODEL_MISSING_SURFACE_PARAMS = {
     "ecmwf-ifs":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
     "ecmwf-aifs": {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p",
-                   "cape:Jkg", "freezing_level:m"},
+                   "cape:Jkg", "freezing_level:m", "snow_depth:m"},
     "ncep-gfs":   {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
     "ncep-hrrr":  {"weather_symbol_1h:idx", "visibility:m", "pbl_height:m", "prob_precip_1h:p"},
     # "mix" supports everything — intentionally omitted
