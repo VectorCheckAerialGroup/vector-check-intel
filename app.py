@@ -16,6 +16,7 @@ from supabase import create_client, Client
 # Import Vector Check Modules
 from modules.data_ingest    import get_aviation_weather, fetch_mission_data, get_model_run_info
 from modules.hazard_logic   import get_weather_element, calculate_icing_profile, get_turb_ice, apply_tactical_highlights
+from modules.atmosphere     import evaluate_blsn
 from modules.visualizations import plot_convective_profile
 from modules.sounding import extract_high_res_profile, render_sounding_plotly
 from modules.telemetry      import log_action
@@ -82,12 +83,42 @@ USER_DEFAULTS = {
 @st.cache_resource
 def _get_supabase() -> Client | None:
     """Returns a cached Supabase client. Created once, reused across all calls.
-    FIX: Previously created a new TCP connection per invocation."""
+    Returns None when the secrets are missing AND raises (clearing the cache)
+    when initialization itself fails so a transient credential/network problem
+    doesn't permanently pin the session at None.
+
+    To force a fresh client creation (e.g. after rotating credentials),
+    call `_get_supabase.clear()` and then invoke this function again.
+    """
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
+    except (KeyError, FileNotFoundError):
+        # Secrets not configured — return None and don't retry (this is a
+        # config issue that requires operator intervention to fix).
+        return None
+    try:
         return create_client(url, key)
-    except Exception:
+    except Exception as e:
+        # Transient failure — surface it so cache_resource doesn't pin None.
+        # Streamlit will retry on the next call.
+        raise RuntimeError(f"Supabase client init failed: {e}") from e
+
+
+def _safe_get_supabase() -> Client | None:
+    """Wrapper that suppresses the cache-clearing RuntimeError so callers can
+    use a simple truthy check. Use this everywhere except in code that wants
+    to know specifically that init failed (vs not-configured).
+    """
+    try:
+        return _get_supabase()
+    except RuntimeError:
+        # Init failed — clear the cache so we retry on the next call, but
+        # return None so this call can proceed with the JSON fallback path.
+        try:
+            _get_supabase.clear()
+        except Exception:
+            pass
         return None
 
 
@@ -95,7 +126,7 @@ def load_prefs(user: str) -> dict:
     """Loads operator preferences from Supabase, falling back to local JSON."""
     # --- Primary: Supabase ---
     try:
-        sb = _get_supabase()
+        sb = _safe_get_supabase()
         if sb:
             result = sb.table(PREFS_TABLE).select("*").eq("operator_id", user).execute()
             if result.data:
@@ -133,7 +164,7 @@ def save_prefs(user: str, lat, lon, wind, ceil, vis, turb, ice) -> None:
 
     # --- Primary: Supabase upsert ---
     try:
-        sb = _get_supabase()
+        sb = _safe_get_supabase()
         if sb:
             sb.table(PREFS_TABLE).upsert(payload).execute()
             return
@@ -211,6 +242,47 @@ st.markdown("""
 # =============================================================================
 # 2. ZERO-COST AUTHENTICATION & LEGAL GATEWAY
 # =============================================================================
+def _verify_password(supplied: str, stored: str) -> bool:
+    """Constant-time password verification.
+
+    Supports two storage formats in secrets.toml:
+      1. bcrypt hash — recommended, starts with $2a$ / $2b$ / $2y$
+      2. plaintext  — legacy, deprecated, will log a warning
+
+    Uses hmac.compare_digest for the plaintext comparison so timing attacks
+    against the plaintext path are at least not trivial.
+    """
+    import hmac
+    if not isinstance(stored, str) or not isinstance(supplied, str):
+        return False
+
+    # bcrypt-style hash detection
+    if stored.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            import bcrypt
+            return bcrypt.checkpw(supplied.encode("utf-8"), stored.encode("utf-8"))
+        except Exception:
+            # bcrypt failure (bad hash, library missing) — fail closed.
+            return False
+
+    # Legacy plaintext path — constant-time compare. Log a deprecation warning
+    # so operators know to upgrade.
+    import logging
+    logging.getLogger("arms.auth").warning(
+        "Plaintext password in secrets.toml detected — migrate to bcrypt hash. "
+        "Generate with: python -c \"import bcrypt; "
+        "print(bcrypt.hashpw(b'YOUR_PASSWORD', bcrypt.gensalt()).decode())\""
+    )
+    return hmac.compare_digest(supplied, stored)
+
+
+# Rate limiting constants for login attempts (per-session, in-memory only).
+# Doesn't protect against process restarts or new sessions, but raises the
+# brute-force cost meaningfully for a single attacker.
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_S = 15 * 60   # 15 minutes
+
+
 def check_password() -> bool:
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -252,18 +324,46 @@ This Agreement shall be governed by and construed in accordance with the laws of
     st.markdown(eula_text, unsafe_allow_html=True)
     st.subheader("Operator Authentication")
 
+    # Per-session rate limit state — lives in session_state.
+    if "_login_attempts" not in st.session_state:
+        st.session_state["_login_attempts"] = []   # list of unix-second timestamps
+
+    # Evict timestamps older than the rate window
+    import time as _t
+    _now = _t.time()
+    st.session_state["_login_attempts"] = [
+        ts for ts in st.session_state["_login_attempts"]
+        if _now - ts < _LOGIN_WINDOW_S
+    ]
+    _is_rate_limited = len(st.session_state["_login_attempts"]) >= _LOGIN_MAX_ATTEMPTS
+
+    if _is_rate_limited:
+        _oldest = min(st.session_state["_login_attempts"])
+        _wait_s = int(_LOGIN_WINDOW_S - (_now - _oldest))
+        _wait_min = max(1, _wait_s // 60)
+        st.error(
+            f"⚠️ Too many failed login attempts. Please wait {_wait_min} "
+            f"minute(s) before trying again."
+        )
+
     with st.form("login_form"):
         eula_check = st.checkbox("I confirm I am the Pilot in Command (PIC) and I accept the terms of this End User License Agreement.")
         st.markdown("<br>", unsafe_allow_html=True)
         user = st.text_input("Operator ID")
         pwd  = st.text_input("Passcode", type="password")
-        submitted = st.form_submit_button("Acknowledge & Authenticate")
+        submitted = st.form_submit_button("Acknowledge & Authenticate",
+                                          disabled=_is_rate_limited)
 
-        if submitted:
-            if user in st.secrets.get("passwords", {}) and pwd == st.secrets["passwords"][user]:
+        if submitted and not _is_rate_limited:
+            stored = st.secrets.get("passwords", {}).get(user, "")
+            valid = bool(stored) and _verify_password(pwd, stored)
+            if valid:
                 if not eula_check:
                     st.error("⚠️ REGULATORY HALT: You must accept the End User License Agreement to authenticate.")
                 else:
+                    # Reset rate-limit counter on successful auth
+                    st.session_state["_login_attempts"] = []
+
                     st.session_state["password_correct"] = True
                     st.session_state["eula_accepted"]    = True
                     st.session_state["active_operator"]  = user
@@ -283,7 +383,16 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     except: pass
                     st.rerun()
             else:
-                st.error("⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode.")
+                # Record the failed attempt
+                st.session_state["_login_attempts"].append(_now)
+                _remaining = _LOGIN_MAX_ATTEMPTS - len(st.session_state["_login_attempts"])
+                if _remaining > 0:
+                    st.error(f"⚠️ UNAUTHORIZED: Invalid Operator ID or Passcode. "
+                             f"{_remaining} attempt(s) remaining before lockout.")
+                else:
+                    st.error("⚠️ UNAUTHORIZED: Account locked for 15 minutes.")
+                try: log_action(user or "UNKNOWN", 0.0, 0.0, "SYS", "AUTH_FAIL")
+                except: pass
 
     return False
 
@@ -515,8 +624,26 @@ def get_nearest_icao_station(user_lat: float, user_lon: float) -> dict:
 
 
 @st.cache_data(ttl=900)
-def fetch_weather_payload(fetch_lat: float, fetch_lon: float, fetch_model: str) -> dict:
-    return fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
+def fetch_weather_payload(fetch_lat: float, fetch_lon: float, fetch_model: str,
+                          fetch_model_id: str = "") -> dict:
+    """Fetches the forecast payload AND its run-cycle metadata in one cached call.
+
+    The two were previously cached separately (15-min forecast TTL, 30-min run-info
+    TTL) and could desynchronize after a new NWP cycle published — the dashboard
+    would label fresh forecast data with a stale run cycle, or vice versa.
+    Combining them guarantees the displayed run-cycle label always describes the
+    forecast data that's actually on screen.
+
+    Returns the original payload dict augmented with a "_run_info" key carrying
+    the cycle metadata, or just the payload on failure to fetch metadata.
+    """
+    payload = fetch_mission_data(fetch_lat, fetch_lon, fetch_model)
+    if isinstance(payload, dict):
+        try:
+            payload["_run_info"] = get_model_run_info(fetch_model, model_id=fetch_model_id) or {}
+        except Exception:
+            payload["_run_info"] = {}
+    return payload
 
 
 @st.cache_data(ttl=900)
@@ -547,7 +674,7 @@ def fetch_climate_context_cached(lat_val: float, lon_val: float, month_val: int)
     Returns a dict (not a dataclass) because st.cache_data requires
     serializable return types.
     """
-    sb = _get_supabase()
+    sb = _safe_get_supabase()
 
     ctx = get_climate_context(lat_val, lon_val, month_val, sb_client=sb)
 
@@ -700,21 +827,13 @@ def compute_impact_matrix(
                 wx = 63 if is_heavy else 61
 
         # --- BLSN / DRSN Kinetic Split ---
-        is_snowing   = wx in [71, 73, 75, 77, 85, 86, 68, 69]
-        is_cold_snow = t_temp <= -5.0
-        has_snowpack = sn_depth >= SNOWPACK_BLSN_THRESHOLD_M  # 5 cm threshold
-
-        blsn_trigger = False
-        if is_cold_snow:
-            if is_snowing:
-                if w_spd >= 20.0 or gst >= 30.0:
-                    blsn_trigger = True
-            elif has_snowpack:
-                if w_spd >= 25.0 or gst >= 35.0:
-                    blsn_trigger = True
-
-        if blsn_trigger and vis_sm > 4.0:
-            vis_sm = max(1.5, vis_sm * 0.5)
+        # Single authoritative implementation in modules/atmosphere.py. Returns
+        # the BLSN trigger flag (used downstream for hazard banding), the DRSN
+        # trigger flag, and a vis_sm value adjusted for blowing snow obscuration.
+        blsn_trigger, _drsn_trigger, vis_sm = evaluate_blsn(
+            wx=wx, t_temp=t_temp, w_spd=w_spd, gst=gst,
+            sn_depth=sn_depth, vis_sm=vis_sm,
+        )
 
         # --- Cloud base cascade ---
         c_base_agl = 99999
@@ -894,9 +1013,30 @@ if _out_of_coverage:
 
 
 def log_refresh_callback():
-    st.cache_data.clear()
-    try: log_action(st.session_state.get("active_operator", "UNKNOWN"), lat, lon, icao, "MANUAL_REFRESH")
-    except Exception: pass
+    """Selectively invalidates forecast/observation caches without nuking
+    expensive long-TTL caches (climate context: 24h TTL, astronomy: 24h TTL).
+
+    Targeted caches:
+      - fetch_weather_payload (forecast + run-info, 15min TTL)
+      - fetch_metar_taf (5min TTL)
+      - Model performance scorecard (30min TTL) — clears via its own decorator
+    """
+    for cache_fn_name in (
+        "fetch_weather_payload",
+        "fetch_metar_taf",
+        "fetch_space_weather_cached",
+    ):
+        fn = globals().get(cache_fn_name)
+        if fn is not None and hasattr(fn, "clear"):
+            try:
+                fn.clear()
+            except Exception:
+                pass
+    try:
+        log_action(st.session_state.get("active_operator", "UNKNOWN"),
+                   lat, lon, icao, "MANUAL_REFRESH")
+    except Exception:
+        pass
 
 
 st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
@@ -905,7 +1045,7 @@ st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 _selected_url, _selected_id, _ = _all_models[model_choice]
 model_api_map = {model_choice: _selected_url}
 
-data = fetch_weather_payload(lat, lon, model_api_map[model_choice])
+data = fetch_weather_payload(lat, lon, model_api_map[model_choice], _selected_id)
 
 if icao != "NONE": metar_raw, taf_raw = fetch_metar_taf(icao)
 else:              metar_raw, taf_raw = "NIL", "NIL"
@@ -942,8 +1082,20 @@ local_tz = pytz.timezone(tz_str) if tz_str else timezone.utc
 tz_abbr  = datetime.now(local_tz).tzname() if tz_str else "UTC"
 
 h         = data["hourly"]
-is_kmh    = "km/h" in data.get("hourly_units", {}).get("wind_speed_10m", "km/h").lower()
-k_conv    = 0.539957 if is_kmh else 1.0
+# Robust wind-unit detection. Defaults to knots since Open-Meteo is now asked
+# to serve knots directly via &wind_speed_unit=kn (see data_ingest.py).
+# Handles all four units Open-Meteo can emit, so a missing or unexpected
+# wind_speed_unit flag never silently produces wrong wind values.
+_wind_unit_raw = data.get("hourly_units", {}).get("wind_speed_10m", "kn").lower()
+if "km/h" in _wind_unit_raw:
+    k_conv = 0.539957     # km/h -> kt
+elif "m/s" in _wind_unit_raw:
+    k_conv = 1.943844     # m/s -> kt
+elif "mph" in _wind_unit_raw:
+    k_conv = 0.868976     # mph -> kt
+else:
+    k_conv = 1.0          # already knots
+is_kmh    = (k_conv == 0.539957)   # retained for backward compatibility with downstream
 raw_wind_unit  = "KT"
 sfc_elevation  = data.get('elevation', 0) * 3.28084
 
@@ -967,14 +1119,9 @@ if "forecast_slider" not in st.session_state or st.session_state.forecast_slider
 # IMPACT MATRIX UI
 # =============================================================================
 
-# Fetch the run cycle info for the active model (cached separately from forecast data).
-# This tells us which NWP cycle (00Z/06Z/12Z/18Z for GEM/ECMWF, hourly for HRRR, etc.)
-# produced the forecast currently being displayed.
-@st.cache_data(ttl=1800)
-def _fetch_run_info_cached(mdl_url: str, mdl_id: str) -> dict:
-    return get_model_run_info(mdl_url, model_id=mdl_id)
-
-_run_info = _fetch_run_info_cached(_selected_url, _selected_id)
+# Run cycle info is now embedded in the cached weather payload so it can never
+# drift out of sync with the forecast data on screen. See fetch_weather_payload.
+_run_info = data.get("_run_info", {}) if isinstance(data, dict) else {}
 
 # Build model title with run cycle indicator
 if _run_info and _run_info.get("run_cycle_z"):
@@ -1282,22 +1429,14 @@ raw_gst_list = h.get('wind_gusts_10m')
 raw_gst      = (float(raw_gst_list[forecast_idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > forecast_idx and raw_gst_list[forecast_idx] is not None) else w_spd
 gst          = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
 
-is_snowing   = wx in [71, 73, 75, 77, 85, 86, 68, 69]
-is_cold_snow = t_temp <= -5.0
-has_snowpack = sn_depth >= SNOWPACK_BLSN_THRESHOLD_M
-
-blsn_trigger = False
-drsn_trigger = False
-
-if is_cold_snow:
-    if is_snowing:
-        if w_spd >= 20.0 or gst >= 30.0:
-            blsn_trigger = True
-    elif has_snowpack:
-        if w_spd >= 25.0 or gst >= 35.0:
-            blsn_trigger = True
-        elif w_spd >= 15.0 or gst >= 20.0:
-            drsn_trigger = True
+# BLSN / DRSN kinetic gate — single authoritative implementation in
+# modules/atmosphere.py. Returns trigger flags + a vis_sm adjusted for blowing
+# snow obscuration (the dashboard previously set the flag but forgot to
+# apply the visibility reduction).
+blsn_trigger, drsn_trigger, vis_sm = evaluate_blsn(
+    wx=wx, t_temp=t_temp, w_spd=w_spd, gst=gst,
+    sn_depth=sn_depth, vis_sm=vis_sm,
+)
 
 weather_str = get_weather_element(wx, w_spd)
 
@@ -2169,7 +2308,7 @@ else:
     @st.cache_data(ttl=1800, show_spinner="Scoring models against actuals…")
     def _fetch_scorecard_cached(sc_lat: float, sc_lon: float, sc_icao: str) -> dict:
         """Fetches trailing 24h performance scorecard. Cached 30 min."""
-        sb = _get_supabase()
+        sb = _safe_get_supabase()
         # Optional Synoptic API token (falls back to demotoken if absent).
         # Configure via SECRETS_TOML:  [synoptic] \n token = "..."
         try:
@@ -2631,7 +2770,7 @@ if _kestrel_file is not None:
                 )
 
                 # Store in Supabase
-                _sb = _get_supabase()
+                _sb = _safe_get_supabase()
                 if _sb:
                     _stored = store_verification(_sb, _vr)
                     if _stored:
@@ -2722,7 +2861,7 @@ if _kestrel_file is not None:
         st.error(f"Verification failed: {e}")
 
 # --- Trailing MVS History (shows even without upload) ---
-_sb_vf = _get_supabase()
+_sb_vf = _safe_get_supabase()
 if _sb_vf:
     _recent = load_recent_verifications(_sb_vf, lat, lon, days=90)
     if _recent:
@@ -2827,7 +2966,7 @@ for _panel_idx, (_col, (_pidx, _ptitle, _pcolor)) in enumerate(zip(_sounding_col
         _t, _td, _p, _ws, _wd = _sfc
 
         # Build the high-resolution profile for this hour
-        _profile = extract_high_res_profile(h, _pidx, _t, _td, _p)
+        _profile = extract_high_res_profile(h, _pidx, _t, _td, _p, wind_kt_scale=k_conv)
         if _profile is None:
             st.warning(f"{_ptitle}: insufficient pressure-level data.")
             continue
