@@ -79,6 +79,115 @@ VIS_MAE_WARN_SM = 3.0
 # HISTORICAL FORECAST FETCH (Open-Meteo Previous Runs)
 # =============================================================================
 
+def _fetch_model_history_meteomatics_mos(station_id: str, lat: float, lon: float,
+                                          display_name: str = "MOS") -> dict:
+    """Fetches 24h of historical MOS forecast data for the scorecard.
+
+    MOS is statistically-tuned per-station forecast — when scored against
+    METAR observations at the same station it often beats raw NWP by
+    10-30% on surface variables.
+
+    Costs 1 batch (10 quota units) per call. Returns the same dict shape
+    as _fetch_model_history or None on failure (e.g. station has no MOS).
+    """
+    if not station_id:
+        return None
+    try:
+        from modules.meteomatics_provider import (
+            METEOMATICS_BASE, _get_credentials,
+        )
+    except ImportError:
+        return None
+
+    creds = _get_credentials()
+    if creds is None:
+        return None
+
+    # Backward 24h + forward 6h
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(hours=24)
+    end = now + timedelta(hours=6)
+    validdate = f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}:PT1H"
+
+    mm_params = [
+        "t_2m:C", "relative_humidity_2m:p",
+        "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
+        "sfc_pressure:hPa",
+    ]
+    param_str = ",".join(mm_params)
+    url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
+           f"/json?source=mm-mos")
+
+    try:
+        from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
+        payload = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2, basic_auth=creds)
+    except _HttpFetchError as e:
+        logger.info("MOS history fetch failed for %s: %s", display_name, e)
+        return None
+
+    # Index by parameter, then filter to past hours only (same logic as
+    # _fetch_model_history)
+    by_param: dict = {}
+    times_iso: list = []
+    for block in (payload.get("data") or []):
+        coords = block.get("coordinates") or []
+        if not coords:
+            continue
+        dates = coords[0].get("dates") or []
+        if not dates:
+            continue
+        by_param[block.get("parameter")] = dates
+        if not times_iso:
+            times_iso = [(d["date"][:-1] if d["date"].endswith("Z") else d["date"])[:16]
+                         for d in dates]
+
+    if not times_iso:
+        return None
+
+    kept_indices = []
+    now_filter = datetime.now(timezone.utc)
+    for i, t_str in enumerate(times_iso):
+        try:
+            t = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        age_hours = (now_filter - t).total_seconds() / 3600.0
+        if 0 <= age_hours <= 24:
+            kept_indices.append(i)
+
+    if not kept_indices:
+        return None
+
+    def _pick(mm_key: str) -> list:
+        dates = by_param.get(mm_key) or []
+        out = []
+        for idx in kept_indices:
+            if idx < len(dates):
+                val = dates[idx].get("value")
+                if val is None:
+                    out.append(None)
+                else:
+                    try:
+                        f = float(val)
+                        out.append(None if f <= -998 else f)
+                    except (TypeError, ValueError):
+                        out.append(None)
+            else:
+                out.append(None)
+        return out
+
+    return {
+        "times": [times_iso[i] for i in kept_indices],
+        "wind_kt":      _pick("wind_speed_10m:kn"),
+        "wind_dir":     _pick("wind_dir_10m:d"),
+        "gust_kt":      _pick("wind_gusts_10m_1h:kn"),
+        "temp_c":       _pick("t_2m:C"),
+        "pressure_hpa": _pick("sfc_pressure:hPa"),
+        "rh":           _pick("relative_humidity_2m:p"),
+        "visibility_sm": [None] * len(kept_indices),
+    }
+
+
 def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
                                        display_name: str = "MIX") -> dict:
     """Fetches 24h of historical Meteomatics forecast data for the scorecard.
@@ -1127,6 +1236,30 @@ def compute_performance_scorecard(
     metar_obs, metar_station_ids = fetch_metars_in_radius(
         lat, lon, radius_km=mesonet_radius_km, hours=24,
     )
+
+    # mix-obs fallback: if AviationWeather.gov returned nothing (typically
+    # at non-airport sites or outside Canada/CONUS), try Meteomatics' global
+    # station observation feed. Same observation shape so the scorer doesn't
+    # care which source produced the data.
+    mix_obs_used = False
+    if not metar_obs:
+        try:
+            from modules.meteomatics_provider import (
+                fetch_meteomatics_station_obs, has_credentials as _mm_has,
+            )
+            from modules.ensemble_analysis import _nearest_icao_for_mos
+            if _mm_has():
+                icao = _nearest_icao_for_mos(lat, lon)
+                if icao:
+                    fallback_station = f"metar_{icao}"
+                    metar_obs = fetch_meteomatics_station_obs(fallback_station, hours_back=24)
+                    if metar_obs:
+                        metar_station_ids = [icao]
+                        mix_obs_used = True
+                        logger.info("AviationWeather METAR empty; using mix-obs fallback for %s", icao)
+        except Exception as e:
+            logger.info("mix-obs fallback failed: %s", e)
+
     mesonet_obs, mesonet_status = fetch_mesonet_history(
         lat, lon,
         radius_km=mesonet_radius_km,
@@ -1197,6 +1330,13 @@ def compute_performance_scorecard(
             all_candidate_models.append(("MIX", MODEL_ENDPOINTS["MIX"], True))
         if "AIFS" in MODEL_ENDPOINTS:
             all_candidate_models.append(("AIFS", MODEL_ENDPOINTS["AIFS"], True))
+        if "MOS" in MODEL_ENDPOINTS:
+            # MOS coverage depends on whether there's an ICAO station near
+            # the query point. The ensemble logic does the lookup; we mirror
+            # it here so the scorecard only attempts MOS where it can succeed.
+            from modules.ensemble_analysis import _nearest_icao_for_mos
+            _mos_icao = _nearest_icao_for_mos(lat, lon)
+            all_candidate_models.append(("MOS", MODEL_ENDPOINTS["MOS"], bool(_mos_icao)))
 
     def _empty_record(name: str, status: str) -> dict:
         return {
@@ -1218,12 +1358,27 @@ def compute_performance_scorecard(
     # I/O bottleneck (4-6 × ~3s each → ~15-20s serial). The downstream MAE
     # computation is fast and stays serial.
     #
-    # Dispatch: URLs starting with "meteomatics://" route through the
-    # Meteomatics scorecard fetcher (different auth, different params).
-    # All other URLs go to the Open-Meteo path.
+    # Dispatch by URL scheme:
+    #   meteomatics-mos://<flag>  → station-keyed MOS fetcher (needs ICAO)
+    #   meteomatics://<model>     → gridded Meteomatics fetcher
+    #   http(s)://...             → Open-Meteo fetcher
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # Resolve nearest ICAO once for MOS dispatch (lookup is cached)
+    _mos_station_id = ""
+    if "MOS" in MODEL_ENDPOINTS:
+        from modules.ensemble_analysis import _nearest_icao_for_mos
+        _icao = _nearest_icao_for_mos(lat, lon)
+        if _icao:
+            _mos_station_id = f"metar_{_icao}"
+
     def _dispatch_history(name: str, url: str):
+        if url.startswith("meteomatics-mos://"):
+            if not _mos_station_id:
+                return None    # no nearby ICAO → MOS unavailable
+            return _fetch_model_history_meteomatics_mos(
+                _mos_station_id, lat, lon, display_name=name
+            )
         if url.startswith("meteomatics://"):
             model_id = url.replace("meteomatics://", "")
             return _fetch_model_history_meteomatics(model_id, lat, lon, display_name=name)
