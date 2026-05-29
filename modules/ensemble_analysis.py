@@ -92,16 +92,15 @@ def _build_model_routes() -> dict:
     # NAM CONUS — Open-Meteo only
     routes["NAM"] = ("open-meteo", _om_url("gfs?models=ncep_nam_conus"))
 
-    # Meteomatics MOS — Model Output Statistics, statistically-tuned per-station
-    # forecast using multiple linear regression against historical observations.
-    # Fundamentally different artifact than the gridded models above — it's a
-    # station-specific calibration that often outperforms raw NWP at recurrent
-    # locations like ICAO airports.
+    # MOS (Meteomatics Model Output Statistics) — DISABLED. Diagnostic on
+    # 2026-05-29 confirmed find_station?source=mm-mos returns zero stations
+    # near our VCAG sites (CYBN, CYOD, CYTA, CYBG, CYYZ). MOS coverage is
+    # concentrated in Europe with limited North American footprint. Re-enable
+    # if Meteomatics adds North American MOS coverage or if VCAG deploys to
+    # a European site.
     #
-    # The target field is just "mm-mos" — the dispatcher constructs the URL
-    # using ?source=mm-mos and a station_id (resolved from the nearest ICAO).
-    if mm:
-        routes["MOS"] = ("meteomatics-mos", "mm-mos")
+    # if mm:
+    #     routes["MOS"] = ("meteomatics-mos", "mm-mos")
 
     return routes
 
