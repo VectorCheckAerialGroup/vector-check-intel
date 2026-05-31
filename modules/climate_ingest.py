@@ -41,7 +41,12 @@ ECCC_STATIONS_URL = "https://api.weather.gc.ca/collections/climate-stations/item
 ECCC_HOURLY_URL = "https://api.weather.gc.ca/collections/climate-hourly/items"
 NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/hourly/point"
 
-# Date range — NASA POWER's earliest hourly data is 2001
+# Date range — defines the climatology window. NASA POWER's earliest hourly
+# data is 2001; ERA5 extends back to 1940 but we keep the same window so
+# percentiles are comparable across sources (mixing record lengths would
+# produce misleading "this is unusual for the season" badges). To extend
+# the record on an ERA5-only site, change CLIMATE_START_YEAR — the rest of
+# the pipeline handles arbitrary spans.
 CLIMATE_START_YEAR = 2001
 CLIMATE_END_YEAR = 2025
 
@@ -345,6 +350,98 @@ def _fetch_nasa_power_year(lat: float, lon: float, year: int):
 
 
 # =============================================================================
+# TIER 2 (preferred reanalysis): ERA5 via Open-Meteo archive
+# =============================================================================
+# ERA5 is the European Centre for Medium-Range Weather Forecasts' fifth
+# global atmospheric reanalysis. Hourly data from 1940 to present, ~25 km
+# grid resolution, internally consistent across the full record because the
+# same NWP system (ECMWF IFS frozen at cycle 41r2) is used throughout. It's
+# the de facto standard for climate normals and operational analysis.
+#
+# Latency: 5-7 days behind realtime (Copernicus production cycle).
+# Resolution: 25 km horizontal, hourly temporal.
+# Coverage: global, including ocean and poles.
+#
+# We pull via Open-Meteo's archive API which serves pre-decoded ERA5 as a
+# fast JSON time-series. Through the paid customer-archive-api endpoint
+# we get higher rate limits and no IP-based throttling.
+
+SOURCE_ERA5 = "ERA5"
+
+
+def _fetch_era5_year(lat: float, lon: float, year: int):
+    """Fetches one year of hourly ERA5 reanalysis at the query point.
+
+    Returns the same dict shape as _fetch_nasa_power_year so it slots into
+    the existing _merge_data + _compute_percentiles pipeline unchanged.
+    Returns None on any failure (caller falls through to the next tier).
+    """
+    from modules.open_meteo_endpoints import build_archive_url
+
+    # Variable selection matches what we use for climatology: 2m temp/RH,
+    # 10m wind speed/direction, MSL pressure. Open-Meteo's archive API
+    # canonical names (different from forecast API in places — note
+    # wind_speed_10m vs windspeed_10m; we use the underscore form which
+    # they accept on the archive endpoint per their docs).
+    suffix = (
+        f"latitude={lat}&longitude={lon}"
+        f"&start_date={year}-01-01&end_date={year}-12-31"
+        f"&hourly=temperature_2m,relative_humidity_2m,"
+        f"wind_speed_10m,wind_direction_10m,pressure_msl"
+        f"&wind_speed_unit=kn"
+        f"&timezone=UTC"
+    )
+    url = build_archive_url(endpoint="archive", query_suffix=suffix)
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("ERA5 fetch failed for %f,%f year %d: %s", lat, lon, year, e)
+        return None
+
+    hourly = data.get("hourly") or {}
+    times = hourly.get("time") or []
+    if not times:
+        return None
+
+    # Open-Meteo returns parallel arrays already in our target units
+    # (wind in knots because we passed wind_speed_unit=kn). Direct copy.
+    t2m_arr = hourly.get("temperature_2m") or []
+    rh2m_arr = hourly.get("relative_humidity_2m") or []
+    ws_arr = hourly.get("wind_speed_10m") or []
+    wd_arr = hourly.get("wind_direction_10m") or []
+    pmsl_arr = hourly.get("pressure_msl") or []
+
+    out = {
+        "wind_kt": [], "temp_c": [], "rh": [],
+        "pressure_hpa": [], "wind_dir": [], "timestamps": [],
+    }
+    for i, t_str in enumerate(times):
+        # Normalize timestamps to ISO 8601 with 'T' separator for
+        # _filter_to_month compatibility. Open-Meteo returns
+        # "2024-01-01T00:00" form already.
+        out["timestamps"].append(t_str)
+
+        def _safe(arr, idx):
+            if idx < len(arr) and arr[idx] is not None:
+                try:
+                    return float(arr[idx])
+                except (TypeError, ValueError):
+                    return None
+            return None
+
+        out["temp_c"].append(_safe(t2m_arr, i))
+        out["rh"].append(_safe(rh2m_arr, i))
+        out["wind_kt"].append(_safe(ws_arr, i))
+        out["wind_dir"].append(_safe(wd_arr, i))
+        out["pressure_hpa"].append(_safe(pmsl_arr, i))
+
+    return out
+
+
+# =============================================================================
 # DATA UTILITIES
 # =============================================================================
 
@@ -600,7 +697,7 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
         if cached is not None and cached.wind.sample_count > 0:
             return cached
 
-    # Tier 1: ECCC
+    # Tier 1: ECCC (real station observations)
     station = _find_nearest_eccc_station(lat, lon)
     if station is not None:
         merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
@@ -621,7 +718,30 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
                 _save_to_cache(sb_client, ctx)
             return ctx
 
-    # Tier 2: NASA POWER
+    # Tier 2: ERA5 reanalysis via Open-Meteo archive (preferred reanalysis source)
+    # ECMWF ERA5 is the gold standard for climatology — internally consistent
+    # 1940-present record. 25km global grid. Hourly resolution. We prefer it
+    # over NASA POWER's MERRA-2 because ERA5 uses more recent data assimilation
+    # methods (4D-Var vs IAU) and has better skill at sub-daily timescales.
+    merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
+    for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
+        year_data = _fetch_era5_year(lat, lon, year)
+        if year_data is not None:
+            _merge_data(merged, _filter_to_month(year_data, month))
+        time.sleep(REQUEST_DELAY_S)
+
+    if len(merged["wind_kt"]) >= 100:
+        ctx = _build_context(
+            merged, lat_bin, lon_bin, month,
+            source=SOURCE_ERA5,
+            source_label="ERA5 reanalysis \u00b7 ~25 km grid",
+            distance_km=25.0,
+        )
+        if sb_client is not None:
+            _save_to_cache(sb_client, ctx)
+        return ctx
+
+    # Tier 3: NASA POWER (MERRA-2 reanalysis, ~50 km, fallback)
     merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
     for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
         year_data = _fetch_nasa_power_year(lat, lon, year)
@@ -642,7 +762,7 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
 
     return ClimateContext(
         lat_bin=lat_bin, lon_bin=lon_bin, month=month,
-        error="Both ECCC and NASA POWER unavailable for this location.",
+        error="ECCC, ERA5, and NASA POWER all unavailable for this location.",
     )
 
 
@@ -662,10 +782,14 @@ def bootstrap_site(lat: float, lon: float, sb_client) -> dict:
         source_label = f"ECCC {station['station_name']} \u00b7 {station['distance_km']} km"
         distance_km = station["distance_km"]
     else:
-        use_tier = "NASA_POWER"
-        source = SOURCE_NASA_POWER
-        source_label = "NASA POWER \u00b7 ~50 km grid"
-        distance_km = 50.0
+        # Default to ERA5 globally. If ERA5 turns out to fail year-by-year
+        # below, the monthly buckets will end up under-populated and the
+        # caller can re-bootstrap with NASA POWER, but this is the right
+        # default since ERA5 has better skill than MERRA-2 at most points.
+        use_tier = "ERA5"
+        source = SOURCE_ERA5
+        source_label = "ERA5 reanalysis \u00b7 ~25 km grid"
+        distance_km = 25.0
 
     monthly_buckets = {
         m: {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
@@ -678,6 +802,8 @@ def bootstrap_site(lat: float, lon: float, sb_client) -> dict:
     for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
         if use_tier == "ECCC":
             year_data = _fetch_eccc_year(station["station_id"], year)
+        elif use_tier == "ERA5":
+            year_data = _fetch_era5_year(lat, lon, year)
         else:
             year_data = _fetch_nasa_power_year(lat, lon, year)
 
