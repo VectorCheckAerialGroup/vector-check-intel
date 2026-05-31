@@ -476,11 +476,13 @@ def fetch_meteomatics_station_obs(station_id: str, hours_back: int = 24) -> list
             t = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             continue
-        # Use surface pressure if reported, else fall back to MSL pressure.
-        # The scorecard's MAE comparator expects pressure in hPa.
-        sfc_p = _val("sfc_pressure:hPa", i)
-        if sfc_p is None:
-            sfc_p = _val("msl_pressure:hPa", i)
+        # Prefer MSL pressure (sea-level-adjusted) — METAR altim is also MSL-
+        # adjusted, so this gives apples-to-apples pressure comparison in the
+        # scorecard. Fall back to surface pressure if MSL isn't reported by
+        # this station type (rare).
+        msl_p = _val("msl_pressure:hPa", i)
+        if msl_p is None:
+            msl_p = _val("sfc_pressure:hPa", i)
         obs_list.append({
             "time":          t,
             "station_id":    station_id,
@@ -488,7 +490,7 @@ def fetch_meteomatics_station_obs(station_id: str, hours_back: int = 24) -> list
             "wind_dir":      _val("wind_dir_10m:d", i),
             "gust_kt":       _val("wind_gusts_10m_1h:kn", i),
             "temp_c":        _val("t_2m:C", i),
-            "pressure_hpa":  sfc_p,
+            "pressure_hpa":  msl_p,
             "_source":       "meteomatics-obs",
         })
     return obs_list
