@@ -571,11 +571,17 @@ def compute_weighted_model_mae(
         if slat is None or slon is None:
             continue
         d_km = _haversine_km(site_lat, site_lon, slat, slon)
-        w = _distance_weight(d_km)
+        # Combined weight = distance × quality. METAR observations don't
+        # set _quality_weight (default 1.0). Non-METAR stations (synoptic,
+        # marine, coop) have quality < 1.0 set by find_station discovery.
+        # See _quality_weight_for_category in meteomatics_provider.
+        quality_w = float(first.get("_quality_weight", 1.0))
+        w = _distance_weight(d_km) * quality_w
         mae = compute_model_mae(history, obs)
         per_station_records.append({
             "sid": sid,
             "distance_km": d_km,
+            "quality_weight": quality_w,
             "weight": w,
             "mae": mae,
         })
@@ -651,9 +657,11 @@ def compute_weighted_model_mae(
         "pressure_n": pres_n, "rh_n": rh_n, "vis_n": vis_n,
         "earliest_obs_time": earliest,
         "latest_obs_time": latest,
-        # Diagnostic — list of (sid, distance_km, weight) for debugging
+        # Diagnostic — list of (sid, distance_km, quality_weight, combined_weight) for debugging
         "_stations_used": [
-            (r["sid"], round(r["distance_km"], 1), round(r["weight"], 3))
+            (r["sid"], round(r["distance_km"], 1),
+             round(r.get("quality_weight", 1.0), 2),
+             round(r["weight"], 3))
             for r in per_station_records
         ],
     }
@@ -1557,7 +1565,80 @@ def compute_performance_scorecard(
     )
     kestrel_obs = fetch_kestrel_sessions_24h(sb_client, lat, lon) if sb_client else []
 
-    all_observations = metar_obs + mesonet_obs + kestrel_obs
+    # Augment with non-METAR stations from Meteomatics' find_station catalog.
+    # Discovers WMO synoptic stations, marine buoys, and cooperative observer
+    # sites that AviationWeather.gov doesn't surface. Each station's
+    # observations are tagged with a quality_weight (per category) that
+    # multiplies the distance weight in MAE aggregation. Default on; the
+    # cost is +1 quota unit for the catalog query plus ~10 quota units per
+    # non-overlapping station for the mix-obs history fetch.
+    nonmetar_obs = []
+    nonmetar_station_records = []   # for diagnostics + scorecard footer
+    try:
+        from modules.meteomatics_provider import (
+            fetch_meteomatics_find_station,
+            fetch_meteomatics_station_obs,
+            has_credentials as _mm_has,
+        )
+        if _mm_has():
+            existing_sids = set(metar_station_ids)
+            catalog = fetch_meteomatics_find_station(
+                lat, lon, radius_km=mesonet_radius_km, source="mix-obs", limit=15
+            )
+            # Filter to stations NOT already covered by METAR — no point
+            # double-counting CYTR if AviationWeather already returned it.
+            new_stations = []
+            for s in catalog:
+                # Strip the wmo_/metar_ prefix to compare against AviationWeather IDs
+                bare_id = s["station_id"].replace("metar_", "").replace("wmo_", "")
+                if bare_id in existing_sids:
+                    continue
+                # Also skip if the station_id starts with metar_ and that ICAO
+                # is in our existing set (different prefix, same station)
+                new_stations.append(s)
+
+            # Cap at a reasonable number to bound quota — we already have
+            # METAR coverage from AviationWeather; this is supplementary.
+            new_stations = new_stations[:8]
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            if new_stations:
+                with ThreadPoolExecutor(max_workers=len(new_stations)) as ex:
+                    futures = {
+                        ex.submit(fetch_meteomatics_station_obs,
+                                  s["station_id"], 24): s
+                        for s in new_stations
+                    }
+                    for fut in as_completed(futures):
+                        s = futures[fut]
+                        try:
+                            obs = fut.result()
+                        except Exception as e:
+                            logger.info("Non-METAR obs fetch failed for %s: %s",
+                                        s["station_id"], e)
+                            continue
+                        if not obs:
+                            continue
+                        # Tag each obs with the station's coordinates,
+                        # quality weight, and category. The aggregator reads
+                        # _quality_weight to multiply against distance weight.
+                        for o in obs:
+                            o["_lat"] = s["lat"]
+                            o["_lon"] = s["lon"]
+                            o["_quality_weight"] = s["quality_weight"]
+                            o["_station_category"] = s["category"]
+                            # The station_id in the obs dict needs to match
+                            # what's used for grouping — keep the bare form
+                            # (no prefix) for consistency with METAR sids
+                            o["station_id"] = s["station_id"]
+                        nonmetar_obs.extend(obs)
+                        nonmetar_station_records.append(s)
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.info("find_station augmentation failed: %s", e)
+
+    all_observations = metar_obs + mesonet_obs + kestrel_obs + nonmetar_obs
 
     # Mesonet station summary for the dashboard's source list
     mesonet_station_ids = set()
