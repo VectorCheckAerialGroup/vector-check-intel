@@ -2923,11 +2923,47 @@ else:
             )
             st.markdown(_sc_header, unsafe_allow_html=True)
 
-            for _m in _sc["models"]:
+            # Sort models for display:
+            #   1. Scorable models in ascending composite_score order (best first)
+            #   2. Out-of-coverage models grouped at the bottom
+            #   3. Unavailable models last
+            # The composite_score is computed by _composite_score() in
+            # modules/model_performance.py: wind×3 + gust×2 + temp×1 + press×0.5
+            # + dir×0.05 + rh×0.05 — weighted for UAS operational impact.
+            def _sort_key(m):
+                _status = m.get("status", "OK")
+                if _status == "OUT_OF_COVERAGE":
+                    return (1, 0.0)
+                if _status == "UNAVAILABLE":
+                    return (2, 0.0)
+                _cs = m.get("composite_score", float("inf"))
+                if _cs is None or _cs == float("inf"):
+                    return (2, 0.0)
+                return (0, _cs)
+
+            _sorted_models = sorted(_sc["models"], key=_sort_key)
+            # Track the rank only among scorable models so OUT_OF_COVERAGE
+            # and UNAVAILABLE rows don't consume a rank slot.
+            _rank_counter = 0
+
+            for _m in _sorted_models:
                 _name = _m["name"]
                 _is_best = (_name == _best)
                 _row_bg = "#1E2530" if _is_best else "#161A1F"
                 _name_style = "color:#4ade80;font-weight:600;" if _is_best else "color:#D1D5DB;"
+
+                # Show the rank for scorable models. Rank label is grey, name
+                # styled per the best-performer flag.
+                _status = _m.get("status", "OK")
+                if _status in ("OUT_OF_COVERAGE", "UNAVAILABLE"):
+                    _rank_prefix = ""
+                else:
+                    _rank_counter += 1
+                    _rank_prefix = (
+                        f'<span style="color:#6B7280;font-size:0.70rem;'
+                        f'font-variant-numeric:tabular-nums;margin-right:6px;">'
+                        f'{_rank_counter}.</span>'
+                    )
 
                 if _m["status"] == "OUT_OF_COVERAGE":
                     # Distinct dimmed row + an explicit "Out of coverage" message
@@ -2940,7 +2976,7 @@ else:
                     )
                     _sc_row = (
                         f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;opacity:0.55;">'
-                        f'<div style="font-size:0.82rem;color:#6B7280;padding:5px 6px;background:{_row_bg};">{_name}</div>'
+                        f'<div style="font-size:0.82rem;color:#6B7280;padding:5px 6px;background:{_row_bg};">{_rank_prefix}{_name}</div>'
                         f'{_msg_cell}'
                         f'</div>'
                     )
@@ -2954,7 +2990,7 @@ else:
                     )
                     _sc_row = (
                         f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
-                        f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_name}</div>'
+                        f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_rank_prefix}{_name}</div>'
                         f'{_empty_cell * 6}'
                         f'</div>'
                     )
@@ -2985,7 +3021,7 @@ else:
 
                 _sc_row = (
                     f'<div style="display:grid;grid-template-columns:{_grid_template};gap:1px;">'
-                    f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_name}</div>'
+                    f'<div style="font-size:0.82rem;{_name_style}padding:5px 6px;background:{_row_bg};">{_rank_prefix}{_name}</div>'
                     f'{_datacell(_w_clr, _w_val, "500")}'
                     f'{_datacell(_d_clr, _d_val)}'
                     f'{_datacell(_g_clr, _g_val)}'
@@ -3004,6 +3040,9 @@ else:
                 '<span style="color:#4ade80;">green</span> = within tolerance, '
                 '<span style="color:#E58E26;">amber</span> = drifting, '
                 '<span style="color:#ff6b4a;">red</span> = systematically off.'
+                '<br>Ranked by UAS-operational composite: wind \u00d73 + gust \u00d72 + '
+                'temp \u00d71 + press \u00d70.5 + dir \u00d70.05/\u00b0 + rh \u00d70.05/%. '
+                'Lowest sum = best forecast for ops.'
                 '</div>',
                 unsafe_allow_html=True,
             )
