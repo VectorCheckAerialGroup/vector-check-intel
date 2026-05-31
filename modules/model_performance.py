@@ -397,6 +397,269 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
 
 
 # =============================================================================
+# DISTANCE-WEIGHTED VERIFICATION (the statistically professional aggregator)
+# =============================================================================
+# Methodology: for each METAR station inside the verification radius, fetch
+# the model's forecast at THAT station's coordinates. Score each station's
+# forecast against that station's observations independently. Aggregate the
+# per-station MAEs into a single model MAE using a top-hat plateau (all
+# stations within 10 km weighted equally) plus exponential decay beyond:
+#     w(d) = 1.0                          for d <= 10 km
+#     w(d) = exp(-(d - 10) / 25)          for d >  10 km
+# A station at 35 km from site (one decay length past plateau) gets ~37%
+# weight relative to a plateau-region station; at 60 km it's ~14%.
+#
+# This eliminates the spatial mismatch in the simpler "forecast at site vs
+# obs at nearby stations" approach by making the forecast and the obs share
+# a coordinate per pairing. Cost: N additional model fetches per scorecard
+# refresh, where N is the number of in-radius stations beyond the first.
+
+
+_WEIGHT_PLATEAU_KM = 10.0
+_WEIGHT_DECAY_KM = 25.0
+# A station must have at least this many hours of valid observations within
+# the past 24h to be included in scoring at all. Drops stations with sparse
+# obs that would otherwise produce statistically meaningless MAEs.
+_MIN_OBS_HOURS_FOR_INCLUSION = 12
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two coordinates, in km."""
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat = p2 - p1
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _distance_weight(d_km: float) -> float:
+    """Top-hat plateau within 10 km + exponential decay beyond.
+    See module-level methodology docstring."""
+    if d_km <= _WEIGHT_PLATEAU_KM:
+        return 1.0
+    return math.exp(-(d_km - _WEIGHT_PLATEAU_KM) / _WEIGHT_DECAY_KM)
+
+
+def _group_observations_by_station(observations: list) -> dict:
+    """Returns {station_id: [obs, obs, ...]} for obs that have a station_id
+    AND attached _lat/_lon. Obs without coordinates are dropped from
+    weighted scoring (they can't be distance-weighted).
+    """
+    by_station: dict = {}
+    for o in observations:
+        sid = o.get("station_id")
+        if not sid:
+            continue
+        if o.get("_lat") is None or o.get("_lon") is None:
+            continue
+        by_station.setdefault(sid, []).append(o)
+    return by_station
+
+
+# Module-level cache for per-station model forecasts. Key = (model_name,
+# round(lat,3), round(lon,3), hour_bucket). Forecasts at the same station
+# don't need to be re-fetched across operators with overlapping station
+# footprints (e.g. CYTR serves both Belleville and Petawawa scorecards).
+# Cached values live for 15 minutes; we put the hour_bucket in the key so
+# stale values naturally expire on the hour rotation.
+_STATION_FORECAST_CACHE: dict = {}
+
+
+def _cache_key(model_name: str, lat: float, lon: float) -> tuple:
+    """Build a stable cache key. Hour bucket means cache entries auto-expire
+    on the hour rotation without needing a TTL sweep."""
+    hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    return (model_name, round(lat, 3), round(lon, 3), hour_bucket)
+
+
+def _fetch_model_history_at_stations(
+    model_name: str,
+    endpoint_url: str,
+    stations: list,
+) -> dict:
+    """Fetches the model's history at each station's coordinates in parallel.
+
+    Args:
+        model_name:    display label (used for cache key + dispatch)
+        endpoint_url:  the URL or marker (meteomatics:// or http(s)://)
+        stations:      list of (station_id, lat, lon) tuples
+
+    Returns:
+        dict {station_id: history_dict_or_None}.
+    """
+    if not stations:
+        return {}
+
+    # Dispatch helper — picks the right per-coordinate fetcher based on URL
+    def _fetch_one_station(sid: str, slat: float, slon: float):
+        key = _cache_key(model_name, slat, slon)
+        if key in _STATION_FORECAST_CACHE:
+            return sid, _STATION_FORECAST_CACHE[key]
+        try:
+            if endpoint_url.startswith("meteomatics-mos://"):
+                # MOS is station-keyed natively. Use station_id directly.
+                history = _fetch_model_history_meteomatics_mos(
+                    f"metar_{sid}", slat, slon, display_name=f"{model_name}@{sid}"
+                )
+            elif endpoint_url.startswith("meteomatics://"):
+                model_id = endpoint_url.replace("meteomatics://", "")
+                history = _fetch_model_history_meteomatics(
+                    model_id, slat, slon, display_name=f"{model_name}@{sid}"
+                )
+            else:
+                history = _fetch_model_history(
+                    f"{model_name}@{sid}", endpoint_url, slat, slon
+                )
+        except Exception as e:
+            logger.info("Per-station fetch failed for %s at %s: %s", model_name, sid, e)
+            history = None
+        _STATION_FORECAST_CACHE[key] = history
+        return sid, history
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=max(2, len(stations))) as ex:
+        futures = [ex.submit(_fetch_one_station, sid, slat, slon)
+                   for (sid, slat, slon) in stations]
+        for fut in as_completed(futures):
+            try:
+                sid, history = fut.result()
+                results[sid] = history
+            except Exception as e:
+                logger.warning("Per-station worker crashed for %s: %s", model_name, e)
+    return results
+
+
+def compute_weighted_model_mae(
+    per_station_histories: dict,
+    obs_by_station: dict,
+    site_lat: float,
+    site_lon: float,
+) -> dict:
+    """Distance-weighted aggregation of per-station MAEs.
+
+    Args:
+        per_station_histories: {station_id: history_dict_or_None}
+        obs_by_station:        {station_id: [obs, obs, ...]}
+        site_lat, site_lon:    user's site coordinates (for distance computation)
+
+    Returns:
+        dict with same shape as compute_model_mae output:
+          wind_mae_kt, dir_mae_deg, gust_mae_kt, temp_mae_c, pressure_mae_hpa,
+          rh_mae_pct, vis_mae_sm, sample_count, *_n counts, earliest/latest_obs_time
+        Aggregation:
+          - per-station MAE computed via the existing compute_model_mae
+          - per-station weight from _distance_weight()
+          - station dropped if it has fewer than _MIN_OBS_HOURS_FOR_INCLUSION
+            valid observation hours
+          - reported MAE = weighted mean of per-station MAEs (per variable)
+          - sample_count, *_n counts = sum across contributing stations
+    """
+    # Build (station_id, distance, per-station MAE) records
+    per_station_records: list = []
+    for sid, history in per_station_histories.items():
+        if history is None:
+            continue
+        obs = obs_by_station.get(sid) or []
+        # Apply the completeness filter — drop sparsely-reporting stations
+        if len(obs) < _MIN_OBS_HOURS_FOR_INCLUSION:
+            continue
+        # Need station coords to compute distance — pull from the first obs
+        first = obs[0]
+        slat, slon = first.get("_lat"), first.get("_lon")
+        if slat is None or slon is None:
+            continue
+        d_km = _haversine_km(site_lat, site_lon, slat, slon)
+        w = _distance_weight(d_km)
+        mae = compute_model_mae(history, obs)
+        per_station_records.append({
+            "sid": sid,
+            "distance_km": d_km,
+            "weight": w,
+            "mae": mae,
+        })
+
+    # If no stations qualified, return empty record with the standard shape
+    if not per_station_records:
+        return {
+            "wind_mae_kt": None, "dir_mae_deg": None, "gust_mae_kt": None,
+            "temp_mae_c": None, "pressure_mae_hpa": None, "rh_mae_pct": None,
+            "vis_mae_sm": None,
+            "sample_count": 0,
+            "wind_n": 0, "dir_n": 0, "gust_n": 0, "temp_n": 0,
+            "pressure_n": 0, "rh_n": 0, "vis_n": 0,
+            "earliest_obs_time": None, "latest_obs_time": None,
+            "_stations_used": [],
+        }
+
+    # Weighted mean per variable. Only include stations that have a non-None
+    # MAE for that variable (a station with no temperature obs shouldn't drag
+    # the temperature aggregate).
+    def _weighted_mean(key: str) -> tuple:
+        """Returns (weighted_mean_or_None, sum_of_n_across_stations)."""
+        weighted_sum = 0.0
+        weight_total = 0.0
+        n_total = 0
+        n_key = key.replace("_mae_kt", "_n").replace("_mae_deg", "_n") \
+                   .replace("_mae_c", "_n").replace("_mae_hpa", "_n") \
+                   .replace("_mae_pct", "_n").replace("_mae_sm", "_n")
+        for r in per_station_records:
+            v = r["mae"].get(key)
+            n = r["mae"].get(n_key, 0) or 0
+            if v is None or n == 0:
+                continue
+            weighted_sum += v * r["weight"]
+            weight_total += r["weight"]
+            n_total += n
+        if weight_total == 0.0:
+            return None, n_total
+        return round(weighted_sum / weight_total, 1), n_total
+
+    wind_mae, wind_n = _weighted_mean("wind_mae_kt")
+    dir_mae, dir_n   = _weighted_mean("dir_mae_deg")
+    gust_mae, gust_n = _weighted_mean("gust_mae_kt")
+    temp_mae, temp_n = _weighted_mean("temp_mae_c")
+    pres_mae, pres_n = _weighted_mean("pressure_mae_hpa")
+    rh_mae, rh_n     = _weighted_mean("rh_mae_pct")
+    vis_mae, vis_n   = _weighted_mean("vis_mae_sm")
+
+    # Time bounds — earliest and latest observation across contributing stations
+    earliest = None
+    latest = None
+    sample_total = 0
+    for r in per_station_records:
+        m = r["mae"]
+        sample_total += m.get("sample_count", 0) or 0
+        e = m.get("earliest_obs_time")
+        l = m.get("latest_obs_time")
+        if e and (earliest is None or e < earliest):
+            earliest = e
+        if l and (latest is None or l > latest):
+            latest = l
+
+    return {
+        "wind_mae_kt": wind_mae,
+        "dir_mae_deg": dir_mae,
+        "gust_mae_kt": gust_mae,
+        "temp_mae_c": temp_mae,
+        "pressure_mae_hpa": pres_mae,
+        "rh_mae_pct": rh_mae,
+        "vis_mae_sm": vis_mae,
+        "sample_count": sample_total,
+        "wind_n": wind_n, "dir_n": dir_n, "gust_n": gust_n, "temp_n": temp_n,
+        "pressure_n": pres_n, "rh_n": rh_n, "vis_n": vis_n,
+        "earliest_obs_time": earliest,
+        "latest_obs_time": latest,
+        # Diagnostic — list of (sid, distance_km, weight) for debugging
+        "_stations_used": [
+            (r["sid"], round(r["distance_km"], 1), round(r["weight"], 3))
+            for r in per_station_records
+        ],
+    }
+
+
+# =============================================================================
 # METAR HISTORY FETCH (AviationWeather.gov)
 # =============================================================================
 
@@ -476,6 +739,14 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
         if d_km <= radius_km:
             station_ids.add(sid)
 
+    # Snapshot the bbox-discovered coordinates so we can backfill them onto
+    # the per-station history fetch (the ids= endpoint sometimes omits coords)
+    station_coords: dict = {}
+    for obs in discovery:
+        sid = obs.get("station_id")
+        if sid and sid in station_ids and obs.get("_lat") is not None:
+            station_coords[sid] = (float(obs["_lat"]), float(obs["_lon"]))
+
     if not station_ids:
         return [], []
 
@@ -489,9 +760,12 @@ def fetch_metars_in_radius(lat: float, lon: float, radius_km: float = 75.0,
             f"?ids={sid}&format=json&hours={hours}"
         )
         sid_obs = _fetch_and_parse_metar(sid_url, want_station_id=True)
+        # Keep _lat/_lon on the obs — needed for distance-weighted per-station
+        # MAE scoring downstream. Backfill from bbox discovery if the per-
+        # station endpoint didn't return coords.
         for o in sid_obs:
-            o.pop("_lat", None)
-            o.pop("_lon", None)
+            if o.get("_lat") is None and sid in station_coords:
+                o["_lat"], o["_lon"] = station_coords[sid]
             all_observations.append(o)
 
     return all_observations, station_list
@@ -1369,17 +1643,30 @@ def compute_performance_scorecard(
             "rolling": None,
         }
 
-    # Phase 1: fetch all model histories in parallel. The fetches are the
-    # I/O bottleneck (4-6 × ~3s each → ~15-20s serial). The downstream MAE
-    # computation is fast and stays serial.
-    #
-    # Dispatch by URL scheme:
-    #   meteomatics-mos://<flag>  → station-keyed MOS fetcher (needs ICAO)
-    #   meteomatics://<model>     → gridded Meteomatics fetcher
-    #   http(s)://...             → Open-Meteo fetcher
+    # Phase 1 — Discover the unique METAR stations contributing observations,
+    # with coordinates. The verification scorer fetches each model's forecast
+    # at every station's location independently, then aggregates per-station
+    # MAEs via the distance-weighted top-hat + exponential method (see
+    # _distance_weight). This is the statistically professional approach:
+    # forecast and observation share a coordinate per pairing, eliminating
+    # the spatial mismatch in simpler "single forecast at site" methods.
+    obs_by_station = _group_observations_by_station(all_observations)
+    stations_for_verification: list = []   # list of (sid, lat, lon)
+    for sid, obs in obs_by_station.items():
+        if not obs:
+            continue
+        slat = obs[0].get("_lat")
+        slon = obs[0].get("_lon")
+        if slat is None or slon is None:
+            continue
+        stations_for_verification.append((sid, float(slat), float(slon)))
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Resolve nearest ICAO once for MOS dispatch (lookup is cached)
+    # Resolve nearest ICAO once for MOS dispatch (lookup is cached). MOS is
+    # station-keyed natively so it gets a single fetch keyed on the nearest
+    # ICAO regardless of how many METARs are in the radius — distance
+    # weighting doesn't apply because there's only one MOS point per query.
     _mos_station_id = ""
     if "MOS" in MODEL_ENDPOINTS:
         from modules.ensemble_analysis import _nearest_icao_for_mos
@@ -1387,62 +1674,136 @@ def compute_performance_scorecard(
         if _icao:
             _mos_station_id = f"metar_{_icao}"
 
-    def _dispatch_history(name: str, url: str):
-        if url.startswith("meteomatics-mos://"):
-            if not _mos_station_id:
-                return None    # no nearby ICAO → MOS unavailable
-            return _fetch_model_history_meteomatics_mos(
-                _mos_station_id, lat, lon, display_name=name
-            )
-        if url.startswith("meteomatics://"):
-            model_id = url.replace("meteomatics://", "")
-            return _fetch_model_history_meteomatics(model_id, lat, lon, display_name=name)
-        return _fetch_model_history(name, url, lat, lon)
+    def _dispatch_mos_only(name: str, url: str):
+        """MOS is the exception — single-point fetch since it's already
+        station-tuned. The aggregation is degenerate (single station)."""
+        if not _mos_station_id:
+            return None
+        return _fetch_model_history_meteomatics_mos(
+            _mos_station_id, lat, lon, display_name=name
+        )
 
     in_coverage_models = [
         (name, url) for name, url, in_coverage in all_candidate_models if in_coverage
     ]
-    histories: dict = {}
-    if in_coverage_models:
-        with ThreadPoolExecutor(max_workers=len(in_coverage_models)) as ex:
+
+    # Two dispatch tables — per-station for gridded models, single-fetch for
+    # MOS. Each runs in parallel against its own thread pool.
+    per_station_jobs = [
+        (name, url) for name, url in in_coverage_models
+        if not url.startswith("meteomatics-mos://")
+    ]
+    single_fetch_jobs = [
+        (name, url) for name, url in in_coverage_models
+        if url.startswith("meteomatics-mos://")
+    ]
+
+    # Phase 1a — per-station fetches for all gridded models
+    per_station_histories: dict = {}   # {model_name: {station_id: history}}
+    if per_station_jobs and stations_for_verification:
+        with ThreadPoolExecutor(max_workers=len(per_station_jobs)) as ex:
             futures = {
-                ex.submit(_dispatch_history, name, url): name
-                for name, url in in_coverage_models
+                ex.submit(
+                    _fetch_model_history_at_stations,
+                    name, url, stations_for_verification
+                ): name
+                for name, url in per_station_jobs
             }
             for fut in as_completed(futures):
                 name = futures[fut]
                 try:
-                    histories[name] = fut.result()
+                    per_station_histories[name] = fut.result()
                 except Exception as e:
-                    logger.warning("Model-history worker crashed for %s: %s", name, e)
-                    histories[name] = None
+                    logger.warning("Per-station worker crashed for %s: %s", name, e)
+                    per_station_histories[name] = {}
+
+    # Phase 1b — single-fetch for MOS (parallel only if we ever have more
+    # than one MOS-style single-point model later)
+    single_fetch_histories: dict = {}
+    if single_fetch_jobs:
+        with ThreadPoolExecutor(max_workers=max(1, len(single_fetch_jobs))) as ex:
+            futures = {
+                ex.submit(_dispatch_mos_only, name, url): name
+                for name, url in single_fetch_jobs
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    single_fetch_histories[name] = fut.result()
+                except Exception as e:
+                    logger.warning("Single-fetch worker crashed for %s: %s", name, e)
+                    single_fetch_histories[name] = None
 
     model_results = []
     for name, url, in_coverage in all_candidate_models:
         if not in_coverage:
-            # Don't query — return an OUT_OF_COVERAGE placeholder so the
-            # dashboard can show the row with a clear "not available here"
-            # state rather than silently letting Open-Meteo return GFS data
-            # masquerading as the requested model.
             model_results.append(_empty_record(name, "OUT_OF_COVERAGE"))
             continue
 
-        history = histories.get(name)
-        if history is None:
+        # MOS path — single-point history, score the single station against
+        # its own obs (degenerate "weighting" — one station gets weight 1.0)
+        if url.startswith("meteomatics-mos://"):
+            history = single_fetch_histories.get(name)
+            if history is None:
+                model_results.append(_empty_record(name, "UNAVAILABLE"))
+                continue
+            # Use only the MOS station's observations for scoring
+            mos_obs = obs_by_station.get(_mos_station_id.replace("metar_", ""), [])
+            if not mos_obs:
+                # Fallback — score against all observations if we can't find
+                # a matching METAR. Less precise but better than nothing.
+                mae = compute_model_mae(history, all_observations)
+            else:
+                mae = compute_model_mae(history, mos_obs)
+            mae["name"] = name
+            mae["status"] = "OK"
+            mae["composite_score"] = _composite_score(mae)
+            pairings = compute_model_pairings(history, mos_obs or all_observations)
+            mae["rolling"] = compute_rolling_mae(
+                pairings, window_hours=6, step_hours=1, span_hours=24
+            )
+            model_results.append(mae)
+            continue
+
+        # Gridded model path — per-station weighted aggregation
+        station_hist = per_station_histories.get(name) or {}
+        if not station_hist:
             model_results.append(_empty_record(name, "UNAVAILABLE"))
             continue
 
-        # Aggregate MAE
-        mae = compute_model_mae(history, all_observations)
+        mae = compute_weighted_model_mae(
+            station_hist, obs_by_station, lat, lon
+        )
+        if mae["sample_count"] == 0:
+            model_results.append(_empty_record(name, "UNAVAILABLE"))
+            continue
+
         mae["name"] = name
         mae["status"] = "OK"
         mae["composite_score"] = _composite_score(mae)
 
-        # Per-hour pairings (used both for trend rendering and downstream analysis)
-        pairings = compute_model_pairings(history, all_observations)
-        mae["rolling"] = compute_rolling_mae(
-            pairings, window_hours=6, step_hours=1, span_hours=24
-        )
+        # Rolling-MAE trend — uses the station closest to the site as a
+        # representative timeseries (so the trend line is interpretable as
+        # "the model at the most-representative ground truth"). Far stations
+        # don't contribute to the rolling trend even though they contribute
+        # to the aggregated MAE — this is a deliberate choice to keep the
+        # trend visualization clean.
+        if stations_for_verification:
+            closest_sid = min(
+                stations_for_verification,
+                key=lambda t: _haversine_km(lat, lon, t[1], t[2])
+            )[0]
+            closest_history = station_hist.get(closest_sid)
+            closest_obs = obs_by_station.get(closest_sid) or []
+            if closest_history is not None and closest_obs:
+                pairings = compute_model_pairings(closest_history, closest_obs)
+                mae["rolling"] = compute_rolling_mae(
+                    pairings, window_hours=6, step_hours=1, span_hours=24
+                )
+            else:
+                mae["rolling"] = None
+        else:
+            mae["rolling"] = None
 
         model_results.append(mae)
 
