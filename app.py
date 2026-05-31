@@ -2735,6 +2735,48 @@ else:
                 )
             if _madis_status_chip is not None:
                 _src_chips.append(_madis_status_chip)
+
+        # find_station augmentation chip — non-METAR stations from Meteomatics
+        _nonmetar_n = _sc.get("nonmetar_count", 0)
+        _fs_status = _sc.get("find_station_status", {}) or {}
+        _fs_state = _fs_status.get("state", "not_attempted")
+        if _nonmetar_n > 0:
+            _nonmetar_stns = _sc.get("nonmetar_stations", [])
+            _nonmetar_label = (
+                f'<b>{_nonmetar_n}</b> non-METAR obs from '
+                f'<b>{len(_nonmetar_stns)}</b> stations'
+            )
+            _src_chips.append(
+                f'<span style="background:#1E2530;border:1px solid #2A3038;'
+                f'border-radius:3px;padding:3px 9px;color:#D1D5DB;" '
+                f'title="{", ".join(s["id"] for s in _nonmetar_stns)}">'
+                f'{_nonmetar_label}</span>'
+            )
+        elif _fs_state == "catalog_empty":
+            _src_chips.append(
+                '<span style="background:#1E2530;border:1px solid #2A3038;'
+                'border-radius:3px;padding:3px 9px;color:#6B7280;" '
+                'title="Meteomatics find_station returned no stations within '
+                'verification radius. Non-METAR observation networks have '
+                'sparse coverage in this region.">'
+                'Non-METAR: none in range</span>'
+            )
+        elif _fs_state == "all_redundant":
+            _fs_catalog_size = _fs_status.get("catalog_size", 0)
+            _src_chips.append(
+                f'<span style="background:#1E2530;border:1px solid #2A3038;'
+                f'border-radius:3px;padding:3px 9px;color:#6B7280;" '
+                f'title="{_fs_status.get("message","")}">'
+                f'Non-METAR: {_fs_catalog_size} found, all already in METAR set</span>'
+            )
+        elif _fs_state == "error":
+            _src_chips.append(
+                f'<span style="background:#2A1F1B;border:1px solid #7C2D12;'
+                f'border-radius:3px;padding:3px 9px;color:#fb923c;" '
+                f'title="{_fs_status.get("message","")}">'
+                f'Non-METAR: error</span>'
+            )
+        # not_attempted / no_credentials — show nothing (silent)
         if _kestrel_n > 0:
             _src_chips.append(
                 f'<span style="background:#1E2530;border:1px solid #2A3038;'
