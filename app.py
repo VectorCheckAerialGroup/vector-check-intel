@@ -2216,6 +2216,10 @@ else:
         _src_color = "#2abf2a"
         _src_bg = "rgba(42, 191, 42, 0.12)"
         _src_desc = "station observations"
+    elif _src == "ERA5_MM":
+        _src_color = "#3b82f6"
+        _src_bg = "rgba(59, 130, 246, 0.12)"
+        _src_desc = "ECMWF reanalysis \u00b7 downscaled"
     elif _src == "ERA5":
         _src_color = "#3b82f6"
         _src_bg = "rgba(59, 130, 246, 0.12)"
@@ -2235,6 +2239,9 @@ else:
     if _src == "ECCC":
         _src_dot = "#4ade80"
         _src_desc = "station observations"
+    elif _src == "ERA5_MM":
+        _src_dot = "#3b82f6"
+        _src_desc = "ECMWF reanalysis \u00b7 downscaled"
     elif _src == "ERA5":
         _src_dot = "#3b82f6"
         _src_desc = "ECMWF reanalysis"
