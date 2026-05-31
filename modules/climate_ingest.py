@@ -350,7 +350,131 @@ def _fetch_nasa_power_year(lat: float, lon: float, year: int):
 
 
 # =============================================================================
-# TIER 2 (preferred reanalysis): ERA5 via Open-Meteo archive
+# TIER 2 (preferred reanalysis): ERA5 via Meteomatics (downscaled to 90m)
+# =============================================================================
+# Meteomatics serves ECMWF ERA5 reanalysis with their proprietary 90m
+# downscaling layer applied. While the underlying ERA5 grid is 25km, the
+# downscaled output accounts for high-resolution terrain, land usage, and
+# coastline features. For point-based aviation forecasting at VCAG sites
+# (some of which sit on lake shores or in valleys), this produces a
+# meaningfully better climatology than raw 25km ERA5.
+#
+# Latency: 5-7 days behind realtime (Copernicus production cycle).
+# Resolution: ~90 m horizontal (downscaled), 1 hour temporal.
+# Coverage: global.
+# Record: 1940 to present.
+#
+# Quota cost: each year-of-hourly-data call is sized like a normal forecast
+# query. For a 25-year bootstrap at one site that's 25 × (5 params × hours)
+# which approximates ~125 quota units total. Cached in Supabase after first
+# computation so subsequent operators at the same site pay nothing.
+
+SOURCE_ERA5_MM = "ERA5_MM"   # ERA5 via Meteomatics (downscaled 90m)
+SOURCE_ERA5 = "ERA5"          # ERA5 via Open-Meteo archive (25km, fallback)
+
+
+def _fetch_meteomatics_era5_year(lat: float, lon: float, year: int):
+    """Fetches one year of hourly ERA5 reanalysis via Meteomatics.
+
+    Uses source=ecmwf-era5 with Meteomatics' 90m downscaling layer applied.
+    Returns the same dict shape as _fetch_era5_year so the merge/percentile
+    pipeline downstream is unchanged.
+    Returns None on any failure (caller falls through to the next tier).
+    """
+    # Lazy import to keep climate_ingest independent of Meteomatics module
+    # at import time (some environments may not have credentials configured).
+    try:
+        from modules.meteomatics_provider import (
+            _get_credentials as _mm_creds,
+            METEOMATICS_BASE as _MM_BASE,
+            DEFAULT_TIMEOUT_S as _MM_TIMEOUT,
+        )
+    except ImportError:
+        return None
+
+    creds = _mm_creds()
+    if creds is None:
+        return None
+
+    # Build the time range. Meteomatics validdate format:
+    #   START--END:STEP   where STEP is PT1H for hourly
+    start = f"{year}-01-01T00:00:00Z"
+    end = f"{year}-12-31T23:00:00Z"
+    validdate = f"{start}--{end}:PT1H"
+
+    # Surface parameters matching what NASA POWER and Open-Meteo ERA5 return.
+    # Pressure uses msl_pressure for METAR-comparable values.
+    params = ",".join([
+        "t_2m:C",
+        "relative_humidity_2m:p",
+        "wind_speed_10m:kn",
+        "wind_dir_10m:d",
+        "msl_pressure:hPa",
+    ])
+
+    url = (f"{_MM_BASE}/{validdate}/{params}/{lat:.4f},{lon:.4f}"
+           f"/json?source=ecmwf-era5")
+
+    try:
+        from modules.http_client import fetch_json as _fj, HttpFetchError as _HFE
+        payload = _fj(url, timeout=_MM_TIMEOUT, retries=2, basic_auth=creds)
+    except Exception as e:
+        logger.warning("Meteomatics ERA5 fetch failed for %f,%f year %d: %s",
+                        lat, lon, year, e)
+        return None
+
+    # Parse: Meteomatics returns one block per parameter, each with parallel
+    # date/value lists. We need to align them by validdate.
+    by_param: dict = {}
+    times_iso: list = []
+    for block in (payload.get("data") or []):
+        coords = block.get("coordinates") or []
+        if not coords:
+            continue
+        dates = coords[0].get("dates") or []
+        if not dates:
+            continue
+        by_param[block.get("parameter")] = dates
+        if not times_iso:
+            times_iso = [d["date"] for d in dates]
+
+    if not times_iso:
+        return None
+
+    def _vals(mm_key: str) -> list:
+        dates = by_param.get(mm_key) or []
+        out = []
+        for d in dates:
+            v = d.get("value")
+            if v is None:
+                out.append(None)
+            else:
+                try:
+                    f = float(v)
+                    out.append(None if f <= -998 else f)
+                except (TypeError, ValueError):
+                    out.append(None)
+        return out
+
+    out = {
+        "timestamps":   times_iso,
+        "temp_c":       _vals("t_2m:C"),
+        "rh":           _vals("relative_humidity_2m:p"),
+        "wind_kt":      _vals("wind_speed_10m:kn"),
+        "wind_dir":     _vals("wind_dir_10m:d"),
+        "pressure_hpa": _vals("msl_pressure:hPa"),
+    }
+
+    # Sanity: if all variables are entirely empty, return None
+    if not any(any(v is not None for v in out[k])
+                for k in ["temp_c", "wind_kt", "rh", "pressure_hpa"]):
+        return None
+
+    return out
+
+
+# =============================================================================
+# TIER 3 (fallback reanalysis): ERA5 via Open-Meteo archive
 # =============================================================================
 # ERA5 is the European Centre for Medium-Range Weather Forecasts' fifth
 # global atmospheric reanalysis. Hourly data from 1940 to present, ~25 km
@@ -365,8 +489,6 @@ def _fetch_nasa_power_year(lat: float, lon: float, year: int):
 # We pull via Open-Meteo's archive API which serves pre-decoded ERA5 as a
 # fast JSON time-series. Through the paid customer-archive-api endpoint
 # we get higher rate limits and no IP-based throttling.
-
-SOURCE_ERA5 = "ERA5"
 
 
 def _fetch_era5_year(lat: float, lon: float, year: int):
@@ -732,11 +854,36 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
                 _save_to_cache(sb_client, ctx)
             return ctx
 
-    # Tier 2: ERA5 reanalysis via Open-Meteo archive (preferred reanalysis source)
-    # ECMWF ERA5 is the gold standard for climatology — internally consistent
-    # 1940-present record. 25km global grid. Hourly resolution. We prefer it
-    # over NASA POWER's MERRA-2 because ERA5 uses more recent data assimilation
-    # methods (4D-Var vs IAU) and has better skill at sub-daily timescales.
+    # Tier 2: ERA5 reanalysis via Meteomatics (downscaled to 90m).
+    # This is the highest-quality reanalysis option when Meteomatics
+    # credentials are configured. Falls through silently if not.
+    try:
+        from modules.meteomatics_provider import has_credentials as _mm_has_creds
+        if _mm_has_creds():
+            merged_mm = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
+            for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
+                year_data = _fetch_meteomatics_era5_year(lat, lon, year)
+                if year_data is not None:
+                    _merge_data(merged_mm, _filter_to_month(year_data, month))
+                time.sleep(REQUEST_DELAY_S)
+
+            if len(merged_mm["wind_kt"]) >= 100:
+                ctx = _build_context(
+                    merged_mm, lat_bin, lon_bin, month,
+                    source=SOURCE_ERA5_MM,
+                    source_label="ERA5 reanalysis \u00b7 Meteomatics 90 m downscaled",
+                    distance_km=0.09,    # 90 m
+                )
+                if sb_client is not None:
+                    _save_to_cache(sb_client, ctx)
+                return ctx
+    except ImportError:
+        pass
+
+    # Tier 3: ERA5 reanalysis via Open-Meteo archive (25 km native grid).
+    # Falls back here if Meteomatics ERA5 fails or credentials aren't set.
+    # ECMWF ERA5 remains the gold standard for climatology — internally
+    # consistent 1940-present record at hourly resolution.
     merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
     for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
         year_data = _fetch_era5_year(lat, lon, year)
@@ -755,7 +902,7 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
             _save_to_cache(sb_client, ctx)
         return ctx
 
-    # Tier 3: NASA POWER (MERRA-2 reanalysis, ~50 km, fallback)
+    # Tier 4: NASA POWER (MERRA-2 reanalysis, ~50 km, final fallback)
     merged = {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
     for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
         year_data = _fetch_nasa_power_year(lat, lon, year)
@@ -776,7 +923,7 @@ def get_climate_context(lat: float, lon: float, month: int, sb_client=None) -> C
 
     return ClimateContext(
         lat_bin=lat_bin, lon_bin=lon_bin, month=month,
-        error="ECCC, ERA5, and NASA POWER all unavailable for this location.",
+        error="ECCC, Meteomatics ERA5, Open-Meteo ERA5, and NASA POWER all unavailable for this location.",
     )
 
 
@@ -796,14 +943,25 @@ def bootstrap_site(lat: float, lon: float, sb_client) -> dict:
         source_label = f"ECCC {station['station_name']} \u00b7 {station['distance_km']} km"
         distance_km = station["distance_km"]
     else:
-        # Default to ERA5 globally. If ERA5 turns out to fail year-by-year
-        # below, the monthly buckets will end up under-populated and the
-        # caller can re-bootstrap with NASA POWER, but this is the right
-        # default since ERA5 has better skill than MERRA-2 at most points.
-        use_tier = "ERA5"
-        source = SOURCE_ERA5
-        source_label = "ERA5 reanalysis \u00b7 ~25 km grid"
-        distance_km = 25.0
+        # Prefer Meteomatics ERA5 (90m downscaled) when credentials available;
+        # falls back to raw 25km ERA5 via Open-Meteo if not.
+        _mm_available = False
+        try:
+            from modules.meteomatics_provider import has_credentials as _mm_has_creds
+            _mm_available = _mm_has_creds()
+        except ImportError:
+            pass
+
+        if _mm_available:
+            use_tier = "ERA5_MM"
+            source = SOURCE_ERA5_MM
+            source_label = "ERA5 reanalysis \u00b7 Meteomatics 90 m downscaled"
+            distance_km = 0.09
+        else:
+            use_tier = "ERA5"
+            source = SOURCE_ERA5
+            source_label = "ERA5 reanalysis \u00b7 ~25 km grid"
+            distance_km = 25.0
 
     monthly_buckets = {
         m: {k: [] for k in ["wind_kt", "temp_c", "rh", "pressure_hpa", "wind_dir", "timestamps"]}
@@ -816,6 +974,8 @@ def bootstrap_site(lat: float, lon: float, sb_client) -> dict:
     for year in range(CLIMATE_START_YEAR, CLIMATE_END_YEAR + 1):
         if use_tier == "ECCC":
             year_data = _fetch_eccc_year(station["station_id"], year)
+        elif use_tier == "ERA5_MM":
+            year_data = _fetch_meteomatics_era5_year(lat, lon, year)
         elif use_tier == "ERA5":
             year_data = _fetch_era5_year(lat, lon, year)
         else:
