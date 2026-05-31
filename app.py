@@ -1791,6 +1791,15 @@ elif wx < 40 and vis_sm < 7.0:
     elif rh >= 75:
         weather_str = "HAZE (HZ)"
 
+# Pre-compute is_snowing from the same wx codes evaluate_blsn() uses
+# internally. Needed so we can render "SNOW & BLSN" vs plain "BLSN" depending
+# on whether snow is also actively falling. Codes match WMO ww:
+#   71/73/75 — light/moderate/heavy snow
+#   77       — snow grains
+#   85/86    — snow showers (light/heavy)
+#   68/69    — sleet (rain & snow mixed)
+is_snowing = wx in [71, 73, 75, 77, 85, 86, 68, 69]
+
 if blsn_trigger:
     weather_str = f"{weather_str} & BLSN" if is_snowing else "BLOWING SNOW (BLSN)"
 elif drsn_trigger:
