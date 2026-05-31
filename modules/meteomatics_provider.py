@@ -495,6 +495,221 @@ def fetch_meteomatics_station_obs(station_id: str, hours_back: int = 24) -> list
 
 
 # =============================================================================
+# STATION CATALOG (find_station) — discover all observation stations in radius
+# =============================================================================
+# Meteomatics' find_station endpoint returns the catalog of indexed stations
+# at a given location. Categories include METAR airports, WMO synoptic
+# stations, marine buoys (C-MAN, AMDA), Swiss MeteoSwiss (MCH), and
+# regional cooperative observer networks. Adding non-METAR stations to the
+# scorecard's verification expands the ground-truth sample beyond what
+# AviationWeather.gov provides.
+
+# Category -> quality weight mapping. METAR and WMO synoptic stations are
+# professionally quality-controlled and weighted equally. Marine stations
+# have different exposure (water temp influence, anemometer height) so
+# they're discounted. Cooperative observer networks have variable quality
+# and get the largest discount.
+_STATION_QUALITY_WEIGHTS = {
+    "METAR":     1.0,
+    "SYNOP":     1.0,
+    "WMO":       1.0,
+    "AMDA":      0.7,    # marine
+    "C-MAN":     0.7,    # marine
+    "MCH":       0.9,    # MeteoSwiss — professional but different network
+    "COOP":      0.5,
+    "DEFAULT":   0.6,    # anything else — moderate discount
+}
+
+
+def _quality_weight_for_category(category: str) -> float:
+    """Maps a Meteomatics station category string to a quality weight.
+    Tolerant to case variation and partial matches."""
+    if not category:
+        return _STATION_QUALITY_WEIGHTS["DEFAULT"]
+    upper = category.upper()
+    for tag, weight in _STATION_QUALITY_WEIGHTS.items():
+        if tag in upper:
+            return weight
+    return _STATION_QUALITY_WEIGHTS["DEFAULT"]
+
+
+def fetch_meteomatics_find_station(
+    lat: float,
+    lon: float,
+    radius_km: float = 75.0,
+    source: str = "mix-obs",
+    limit: int = 30,
+) -> list:
+    """Discovers all observation stations within radius_km of (lat, lon)
+    using Meteomatics' find_station catalog.
+
+    Args:
+        lat, lon:    center coordinates
+        radius_km:   search radius
+        source:      "mix-obs" for station observations (default), or
+                     "mm-mos" for MOS-supported stations
+        limit:       max stations to return (Meteomatics defaults to ~50;
+                     we cap lower to keep verification quota manageable)
+
+    Returns:
+        List of dicts with keys:
+            station_id    — Meteomatics station identifier (use directly in
+                            fetch_meteomatics_station_obs)
+            category      — station type/category from catalog
+            name          — station display name
+            lat, lon      — station coordinates
+            elevation     — station elevation in metres
+            distance_km   — great-circle distance from query point
+            quality_weight — derived from category, used in MAE aggregation
+        Empty list on any failure (credentials missing, API error, etc).
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return []
+
+    # find_station returns CSV by default. Limit results by location radius
+    # via lat/lon distance filtering done client-side since the endpoint
+    # uses bounding boxes rather than radii.
+    url = (f"{METEOMATICS_BASE}/find_station"
+           f"?location={lat:.4f},{lon:.4f}"
+           f"&source={source}")
+    try:
+        # find_station returns CSV, not JSON — bypass the JSON parser
+        from modules.http_client import fetch_text, HttpFetchError as _HFE
+        try:
+            raw = fetch_text(url, timeout=DEFAULT_TIMEOUT_S, retries=1, basic_auth=creds)
+        except _HFE as e:
+            logger.info("find_station fetch failed: %s", e)
+            return []
+    except ImportError:
+        # Fallback if fetch_text isn't available — use urllib directly
+        import urllib.request, urllib.error, base64
+        user, pw = creds
+        auth = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Basic {auth}",
+            "User-Agent": "VectorCheck-ARMS/2.7",
+            "Accept": "text/csv",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT_S) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            logger.info("find_station urllib fetch failed: %s", e)
+            return []
+
+    if not raw or not raw.strip():
+        return []
+
+    # Parse the CSV. Meteomatics uses semicolon-separated values.
+    # Columns: Station Category;Station Type;ID Hash;WMO ID;Alternative IDs;
+    #          Name;Location Lat,Lon;Elevation;Start Date;End Date;
+    #          Horizontal Distance;Vertical Distance;Effective Distance
+    import csv
+    import io
+    stations: list = []
+    reader = csv.reader(io.StringIO(raw), delimiter=";")
+    rows = list(reader)
+    if len(rows) < 2:
+        return []   # header only, no data
+
+    header = [h.strip() for h in rows[0]]
+    def _col_idx(name: str) -> int:
+        for i, h in enumerate(header):
+            if name.lower() in h.lower():
+                return i
+        return -1
+
+    cat_i = _col_idx("category")
+    type_i = _col_idx("type")
+    wmo_i = _col_idx("wmo")
+    alt_i = _col_idx("alternative")
+    name_i = _col_idx("name")
+    loc_i = _col_idx("location")
+    elev_i = _col_idx("elevation")
+    dist_i = _col_idx("horizontal distance")
+
+    for row in rows[1:]:
+        if len(row) < 6 or not any(row):
+            continue
+
+        # Extract the station's preferred identifier. Prefer WMO ID where
+        # available (it's stable and Meteomatics-canonical). Fall back to
+        # the first alternative ID (often the METAR/ICAO code).
+        wmo_id = row[wmo_i].strip() if wmo_i >= 0 and wmo_i < len(row) else ""
+        alt_ids = row[alt_i].strip() if alt_i >= 0 and alt_i < len(row) else ""
+        if wmo_id and wmo_id.isdigit():
+            station_id = f"wmo_{wmo_id}"
+        elif alt_ids:
+            # Alternative IDs are comma-separated; take the first that looks
+            # METAR-shaped (4 chars, alphanumeric)
+            first_alt = alt_ids.split(",")[0].strip()
+            if first_alt and len(first_alt) == 4 and first_alt.isalnum():
+                station_id = f"metar_{first_alt}"
+            else:
+                station_id = alt_ids.split(",")[0].strip()
+        else:
+            continue   # no usable identifier
+
+        # Parse lat,lon — format is "lat,lon" in a single column
+        loc_str = row[loc_i].strip() if loc_i >= 0 and loc_i < len(row) else ""
+        s_lat, s_lon = None, None
+        if "," in loc_str:
+            try:
+                parts = loc_str.split(",")
+                s_lat = float(parts[0])
+                s_lon = float(parts[1])
+            except (ValueError, IndexError):
+                pass
+        if s_lat is None or s_lon is None:
+            continue   # can't distance-weight without coords
+
+        # Distance is given by the API but verify with our own haversine
+        try:
+            api_dist = float(row[dist_i]) if dist_i >= 0 and dist_i < len(row) and row[dist_i].strip() else None
+        except (ValueError, IndexError):
+            api_dist = None
+
+        # Compute our own as a safety check (the API might return distance
+        # in different units across versions)
+        R = 6371.0
+        lat1, lat2 = math.radians(lat), math.radians(s_lat)
+        dlat = lat2 - lat1
+        dlon = math.radians(s_lon - lon)
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        d_km = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        if d_km > radius_km:
+            continue   # outside our verification radius
+
+        category = row[cat_i].strip() if cat_i >= 0 and cat_i < len(row) else ""
+        station_type = row[type_i].strip() if type_i >= 0 and type_i < len(row) else ""
+        name = row[name_i].strip() if name_i >= 0 and name_i < len(row) else ""
+        try:
+            elevation = float(row[elev_i]) if elev_i >= 0 and elev_i < len(row) and row[elev_i].strip() else None
+        except ValueError:
+            elevation = None
+
+        quality = _quality_weight_for_category(category or station_type)
+
+        stations.append({
+            "station_id":     station_id,
+            "category":       category,
+            "type":           station_type,
+            "name":           name,
+            "lat":            s_lat,
+            "lon":            s_lon,
+            "elevation":      elevation,
+            "distance_km":    d_km,
+            "quality_weight": quality,
+        })
+
+    # Sort by distance and apply limit
+    stations.sort(key=lambda s: s["distance_km"])
+    return stations[:limit]
+
+
+# =============================================================================
 # FETCH (with subscription-aware batching)
 # =============================================================================
 # Meteomatics trial subscriptions cap requests at 10 parameters each, so we
