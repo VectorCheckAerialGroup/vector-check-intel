@@ -55,8 +55,12 @@ from modules.ensemble_analysis import (
 # standard 10m wind/2m temp endpoints uniformly across these models.
 _PERF_VARS = (
     "wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
-    "temperature_2m,surface_pressure,relative_humidity_2m,visibility"
+    "temperature_2m,pressure_msl,relative_humidity_2m,visibility"
 )
+# Note: pressure_msl (mean sea level pressure) is used for verification —
+# METAR reports altimeter setting which is also sea-level-adjusted. The main
+# dashboard separately uses surface_pressure for density altitude / takeoff
+# computations at the actual elevation; this is the scorecard-only choice.
 
 # MAE tolerance thresholds (green / amber / red)
 WIND_MAE_GOOD_KT = 2.0     # green if MAE below this
@@ -112,7 +116,7 @@ def _fetch_model_history_meteomatics_mos(station_id: str, lat: float, lon: float
     mm_params = [
         "t_2m:C", "relative_humidity_2m:p",
         "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
-        "sfc_pressure:hPa",
+        "msl_pressure:hPa",
     ]
     param_str = ",".join(mm_params)
     url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
@@ -182,7 +186,7 @@ def _fetch_model_history_meteomatics_mos(station_id: str, lat: float, lon: float
         "wind_dir":     _pick("wind_dir_10m:d"),
         "gust_kt":      _pick("wind_gusts_10m_1h:kn"),
         "temp_c":       _pick("t_2m:C"),
-        "pressure_hpa": _pick("sfc_pressure:hPa"),
+        "pressure_hpa": _pick("msl_pressure:hPa"),
         "rh":           _pick("relative_humidity_2m:p"),
         "visibility_sm": [None] * len(kept_indices),
     }
@@ -227,10 +231,14 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
     # Meteomatics returns 404 for the whole request when any single param
     # is unavailable, including those broke every model except MIX. They're
     # not used in scoring anyway, so they're gone.
+    #
+    # Pressure uses msl_pressure:hPa (sea-level-adjusted), not sfc_pressure,
+    # so it's directly comparable to METAR altimeter setting. The main
+    # forecast path keeps surface_pressure for density altitude work.
     mm_params = [
         "t_2m:C", "relative_humidity_2m:p",
         "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
-        "sfc_pressure:hPa",
+        "msl_pressure:hPa",
     ]
     # Additionally filter against the per-model blocklist (in case future
     # additions to mm_params accidentally include a blend-only param).
@@ -309,7 +317,7 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
         "wind_dir":     _pick("wind_dir_10m:d"),
         "gust_kt":      _pick("wind_gusts_10m_1h:kn"),
         "temp_c":       _pick("t_2m:C"),
-        "pressure_hpa": _pick("sfc_pressure:hPa"),
+        "pressure_hpa": _pick("msl_pressure:hPa"),
         "rh":           _pick("relative_humidity_2m:p"),
         "visibility_sm": _pick("visibility:m", 1.0 / 1609.344),
     }
@@ -388,7 +396,7 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
         "wind_dir": _pick("wind_direction_10m"),
         "gust_kt": _pick("wind_gusts_10m", _wind_scale),
         "temp_c": _pick("temperature_2m"),
-        "pressure_hpa": _pick("surface_pressure"),
+        "pressure_hpa": _pick("pressure_msl"),
         "rh": _pick("relative_humidity_2m"),
         # Open-Meteo returns visibility in meters; convert to statute miles
         # to match METAR's vsby field. Some endpoints don't include this.
@@ -1574,6 +1582,22 @@ def compute_performance_scorecard(
     # non-overlapping station for the mix-obs history fetch.
     nonmetar_obs = []
     nonmetar_station_records = []   # for diagnostics + scorecard footer
+    # Diagnostic status — surfaced to the dashboard footer so operators can
+    # see what happened. Possible states:
+    #   not_attempted    — Meteomatics credentials missing
+    #   no_credentials   — Meteomatics module not importable
+    #   catalog_empty    — find_station returned no stations in radius
+    #   all_redundant    — catalog returned stations but all overlap METAR
+    #   ok               — N non-METAR stations added
+    #   error            — exception during discovery/fetch
+    find_station_status = {
+        "attempted": False,
+        "state": "not_attempted",
+        "catalog_size": 0,
+        "new_stations": 0,
+        "obs_added": 0,
+        "message": "",
+    }
     try:
         from modules.meteomatics_provider import (
             fetch_meteomatics_find_station,
@@ -1581,61 +1605,76 @@ def compute_performance_scorecard(
             has_credentials as _mm_has,
         )
         if _mm_has():
+            find_station_status["attempted"] = True
             existing_sids = set(metar_station_ids)
             catalog = fetch_meteomatics_find_station(
                 lat, lon, radius_km=mesonet_radius_km, source="mix-obs", limit=15
             )
-            # Filter to stations NOT already covered by METAR — no point
-            # double-counting CYTR if AviationWeather already returned it.
-            new_stations = []
-            for s in catalog:
-                # Strip the wmo_/metar_ prefix to compare against AviationWeather IDs
-                bare_id = s["station_id"].replace("metar_", "").replace("wmo_", "")
-                if bare_id in existing_sids:
-                    continue
-                # Also skip if the station_id starts with metar_ and that ICAO
-                # is in our existing set (different prefix, same station)
-                new_stations.append(s)
+            find_station_status["catalog_size"] = len(catalog)
 
-            # Cap at a reasonable number to bound quota — we already have
-            # METAR coverage from AviationWeather; this is supplementary.
-            new_stations = new_stations[:8]
+            if not catalog:
+                find_station_status["state"] = "catalog_empty"
+                find_station_status["message"] = (
+                    "Meteomatics find_station returned no stations in radius. "
+                    "Non-METAR network coverage is sparse in this region."
+                )
+            else:
+                # Filter to stations NOT already covered by METAR — no point
+                # double-counting CYTR if AviationWeather already returned it.
+                new_stations = []
+                for s in catalog:
+                    bare_id = s["station_id"].replace("metar_", "").replace("wmo_", "")
+                    if bare_id in existing_sids:
+                        continue
+                    new_stations.append(s)
 
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            if new_stations:
-                with ThreadPoolExecutor(max_workers=len(new_stations)) as ex:
-                    futures = {
-                        ex.submit(fetch_meteomatics_station_obs,
-                                  s["station_id"], 24): s
-                        for s in new_stations
-                    }
-                    for fut in as_completed(futures):
-                        s = futures[fut]
-                        try:
-                            obs = fut.result()
-                        except Exception as e:
-                            logger.info("Non-METAR obs fetch failed for %s: %s",
-                                        s["station_id"], e)
-                            continue
-                        if not obs:
-                            continue
-                        # Tag each obs with the station's coordinates,
-                        # quality weight, and category. The aggregator reads
-                        # _quality_weight to multiply against distance weight.
-                        for o in obs:
-                            o["_lat"] = s["lat"]
-                            o["_lon"] = s["lon"]
-                            o["_quality_weight"] = s["quality_weight"]
-                            o["_station_category"] = s["category"]
-                            # The station_id in the obs dict needs to match
-                            # what's used for grouping — keep the bare form
-                            # (no prefix) for consistency with METAR sids
-                            o["station_id"] = s["station_id"]
-                        nonmetar_obs.extend(obs)
-                        nonmetar_station_records.append(s)
-    except ImportError:
-        pass
+                # Cap at a reasonable number to bound quota — we already have
+                # METAR coverage from AviationWeather; this is supplementary.
+                new_stations = new_stations[:8]
+                find_station_status["new_stations"] = len(new_stations)
+
+                if not new_stations:
+                    find_station_status["state"] = "all_redundant"
+                    find_station_status["message"] = (
+                        f"Meteomatics returned {len(catalog)} stations but all "
+                        "overlap with AviationWeather METAR coverage."
+                    )
+                else:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    with ThreadPoolExecutor(max_workers=len(new_stations)) as ex:
+                        futures = {
+                            ex.submit(fetch_meteomatics_station_obs,
+                                      s["station_id"], 24): s
+                            for s in new_stations
+                        }
+                        for fut in as_completed(futures):
+                            s = futures[fut]
+                            try:
+                                obs = fut.result()
+                            except Exception as e:
+                                logger.info("Non-METAR obs fetch failed for %s: %s",
+                                            s["station_id"], e)
+                                continue
+                            if not obs:
+                                continue
+                            for o in obs:
+                                o["_lat"] = s["lat"]
+                                o["_lon"] = s["lon"]
+                                o["_quality_weight"] = s["quality_weight"]
+                                o["_station_category"] = s["category"]
+                                o["station_id"] = s["station_id"]
+                            nonmetar_obs.extend(obs)
+                            nonmetar_station_records.append(s)
+                    find_station_status["obs_added"] = len(nonmetar_obs)
+                    find_station_status["state"] = "ok"
+        else:
+            find_station_status["state"] = "no_credentials"
+    except ImportError as e:
+        find_station_status["state"] = "no_credentials"
+        find_station_status["message"] = f"Module unavailable: {e}"
     except Exception as e:
+        find_station_status["state"] = "error"
+        find_station_status["message"] = f"{type(e).__name__}: {e}"
         logger.info("find_station augmentation failed: %s", e)
 
     all_observations = metar_obs + mesonet_obs + kestrel_obs + nonmetar_obs
@@ -1909,6 +1948,13 @@ def compute_performance_scorecard(
         "mesonet_stations": sorted(mesonet_station_ids),
         "mesonet_status": mesonet_status,
         "kestrel_count": len(kestrel_obs),
+        "nonmetar_count": len(nonmetar_obs),
+        "nonmetar_stations": [
+            {"id": s["station_id"], "name": s["name"], "category": s["category"],
+             "distance_km": round(s["distance_km"], 1)}
+            for s in nonmetar_station_records
+        ],
+        "find_station_status": find_station_status,
         "window_start_utc": window_start,
         "window_end_utc": window_end,
         "has_data": True,
