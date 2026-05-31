@@ -2199,13 +2199,18 @@ else:
 
     st.caption(f"25-year hourly normals ({climate['years_range']}) \u00b7 {regional_name} \u00b7 {_month_name}")
 
-    # Source badge — green for ECCC station observations, amber for NASA POWER reanalysis
+    # Source badge — green for ECCC station observations, blue for ERA5
+    # reanalysis (preferred reanalysis source), amber for NASA POWER (fallback)
     _src = climate.get("source", "")
     _src_label = climate.get("source_label", "Unknown source")
     if _src == "ECCC":
         _src_color = "#2abf2a"
         _src_bg = "rgba(42, 191, 42, 0.12)"
         _src_desc = "station observations"
+    elif _src == "ERA5":
+        _src_color = "#3b82f6"
+        _src_bg = "rgba(59, 130, 246, 0.12)"
+        _src_desc = "ECMWF reanalysis"
     elif _src == "NASA_POWER":
         _src_color = "#E58E26"
         _src_bg = "rgba(229, 142, 38, 0.12)"
@@ -2221,6 +2226,9 @@ else:
     if _src == "ECCC":
         _src_dot = "#4ade80"
         _src_desc = "station observations"
+    elif _src == "ERA5":
+        _src_dot = "#3b82f6"
+        _src_desc = "ECMWF reanalysis"
     elif _src == "NASA_POWER":
         _src_dot = "#94a3b8"
         _src_desc = "gridded reanalysis"
