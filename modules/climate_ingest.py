@@ -50,8 +50,8 @@ NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/hourly/point"
 CLIMATE_START_YEAR = 2001
 CLIMATE_END_YEAR = 2025
 
-ECCC_MAX_STATION_DISTANCE_KM = 30.0
-ECCC_BBOX_PADDING_DEG = 0.4
+ECCC_MAX_STATION_DISTANCE_KM = 50.0
+ECCC_BBOX_PADDING_DEG = 0.6
 
 SPATIAL_BIN_RESOLUTION = 0.1
 
@@ -575,11 +575,25 @@ def _load_from_cache(sb_client, lat_bin, lon_bin, month):
             return None
 
         first = pct_result.data[0]
+        _cached_source = first.get("source", "")
+
+        # Tier-order upgrade: when this code was deployed the tier order
+        # changed from (ECCC, NASA_POWER) to (ECCC, ERA5, NASA_POWER). Any
+        # entries cached as NASA_POWER may now be eligible for ECCC (wider
+        # 50km radius) or ERA5 (preferred reanalysis). Treat them as cache
+        # miss so the tier dispatcher re-resolves once, then settles into
+        # the better source.
+        if _cached_source == SOURCE_NASA_POWER:
+            logger.info("Cached NASA POWER entry for (%s, %s, %d) treated as "
+                        "stale to allow re-evaluation against new tier order",
+                        lat_bin, lon_bin, month)
+            return None
+
         ctx = ClimateContext(
             lat_bin=lat_bin, lon_bin=lon_bin, month=month,
             years_range=f"{CLIMATE_START_YEAR}\u2013{CLIMATE_END_YEAR}",
             cached=True,
-            source=first.get("source", ""),
+            source=_cached_source,
             source_label=first.get("source_label", ""),
             source_distance_km=first.get("source_distance_km", 0.0) or 0.0,
         )
