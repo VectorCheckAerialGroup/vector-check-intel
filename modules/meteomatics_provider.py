@@ -607,108 +607,146 @@ def fetch_meteomatics_find_station(
     # Columns: Station Category;Station Type;ID Hash;WMO ID;Alternative IDs;
     #          Name;Location Lat,Lon;Elevation;Start Date;End Date;
     #          Horizontal Distance;Vertical Distance;Effective Distance
-    import csv
-    import io
-    stations: list = []
-    reader = csv.reader(io.StringIO(raw), delimiter=";")
-    rows = list(reader)
-    if len(rows) < 2:
-        return []   # header only, no data
+    #
+    # Wrap parsing in a top-level guard so any unexpected CSV format issue
+    # returns an empty list rather than propagating an exception that would
+    # surface in the UI as a confusing "error" badge.
+    try:
+        import csv
+        import io
+        stations: list = []
+        reader = csv.reader(io.StringIO(raw), delimiter=";")
+        rows = list(reader)
+        if len(rows) < 2:
+            return []   # header only, no data
 
-    header = [h.strip() for h in rows[0]]
-    def _col_idx(name: str) -> int:
-        for i, h in enumerate(header):
-            if name.lower() in h.lower():
-                return i
-        return -1
+        header = [h.strip() for h in rows[0]]
+        def _col_idx(name: str) -> int:
+            for i, h in enumerate(header):
+                if name.lower() in h.lower():
+                    return i
+            return -1
 
-    cat_i = _col_idx("category")
-    type_i = _col_idx("type")
-    wmo_i = _col_idx("wmo")
-    alt_i = _col_idx("alternative")
-    name_i = _col_idx("name")
-    loc_i = _col_idx("location")
-    elev_i = _col_idx("elevation")
-    dist_i = _col_idx("horizontal distance")
+        cat_i = _col_idx("category")
+        type_i = _col_idx("type")
+        wmo_i = _col_idx("wmo")
+        alt_i = _col_idx("alternative")
+        name_i = _col_idx("name")
+        loc_i = _col_idx("location")
+        elev_i = _col_idx("elevation")
+        dist_i = _col_idx("horizontal distance")
 
-    for row in rows[1:]:
-        if len(row) < 6 or not any(row):
-            continue
+        # Detect whether Meteomatics returns lat,lon as one combined column
+        # (e.g. "44.12,-77.53") or as two separate semicolon-delimited columns.
+        # The header shows "Location Lat,Lon" as one column but data rows can
+        # use either form. We probe a sample data row to figure out which.
+        location_split_into_two = False
+        if loc_i >= 0:
+            for probe_row in rows[1:]:
+                if not any(probe_row) or len(probe_row) < loc_i + 1:
+                    continue
+                probe_val = probe_row[loc_i].strip()
+                if "," in probe_val:
+                    location_split_into_two = False
+                    break
+                try:
+                    _v1 = float(probe_val)
+                    _v2 = float(probe_row[loc_i + 1].strip())
+                    if -90 <= _v1 <= 90 and -180 <= _v2 <= 180:
+                        location_split_into_two = True
+                        # Elev/dist column positions shift right by one
+                        if elev_i >= 0:
+                            elev_i += 1
+                        if dist_i >= 0:
+                            dist_i += 1
+                        break
+                except (ValueError, IndexError):
+                    continue
 
-        # Extract the station's preferred identifier. Prefer WMO ID where
-        # available (it's stable and Meteomatics-canonical). Fall back to
-        # the first alternative ID (often the METAR/ICAO code).
-        wmo_id = row[wmo_i].strip() if wmo_i >= 0 and wmo_i < len(row) else ""
-        alt_ids = row[alt_i].strip() if alt_i >= 0 and alt_i < len(row) else ""
-        if wmo_id and wmo_id.isdigit():
-            station_id = f"wmo_{wmo_id}"
-        elif alt_ids:
-            # Alternative IDs are comma-separated; take the first that looks
-            # METAR-shaped (4 chars, alphanumeric)
-            first_alt = alt_ids.split(",")[0].strip()
-            if first_alt and len(first_alt) == 4 and first_alt.isalnum():
-                station_id = f"metar_{first_alt}"
+        for row in rows[1:]:
+            if len(row) < 6 or not any(row):
+                continue
+
+            # Station identifier. Prefer WMO ID where available; fall back
+            # to first Alternative ID (often the METAR/ICAO code).
+            wmo_id = row[wmo_i].strip() if wmo_i >= 0 and wmo_i < len(row) else ""
+            alt_ids = row[alt_i].strip() if alt_i >= 0 and alt_i < len(row) else ""
+            if wmo_id and wmo_id.isdigit():
+                station_id = f"wmo_{wmo_id}"
+            elif alt_ids:
+                first_alt = alt_ids.split(",")[0].strip()
+                if first_alt and len(first_alt) == 4 and first_alt.isalnum():
+                    station_id = f"metar_{first_alt}"
+                else:
+                    station_id = first_alt
             else:
-                station_id = alt_ids.split(",")[0].strip()
-        else:
-            continue   # no usable identifier
+                continue   # no usable identifier
 
-        # Parse lat,lon — format is "lat,lon" in a single column
-        loc_str = row[loc_i].strip() if loc_i >= 0 and loc_i < len(row) else ""
-        s_lat, s_lon = None, None
-        if "," in loc_str:
+            # Parse lat,lon — handles both combined-column and split-column forms
+            s_lat, s_lon = None, None
+            if loc_i >= 0 and loc_i < len(row):
+                if location_split_into_two:
+                    if loc_i + 1 < len(row):
+                        try:
+                            s_lat = float(row[loc_i].strip())
+                            s_lon = float(row[loc_i + 1].strip())
+                        except (ValueError, IndexError):
+                            pass
+                else:
+                    loc_str = row[loc_i].strip()
+                    if "," in loc_str:
+                        try:
+                            parts = loc_str.split(",")
+                            s_lat = float(parts[0])
+                            s_lon = float(parts[1])
+                        except (ValueError, IndexError):
+                            pass
+            if s_lat is None or s_lon is None:
+                continue
+
+            # Compute distance via haversine (don't trust the API's distance
+            # column — units have varied across Meteomatics API versions)
+            R = 6371.0
+            lat1, lat2 = math.radians(lat), math.radians(s_lat)
+            dlat = lat2 - lat1
+            dlon = math.radians(s_lon - lon)
+            a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+            d_km = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            if d_km > radius_km:
+                continue
+
+            category = row[cat_i].strip() if cat_i >= 0 and cat_i < len(row) else ""
+            station_type = row[type_i].strip() if type_i >= 0 and type_i < len(row) else ""
+            name = row[name_i].strip() if name_i >= 0 and name_i < len(row) else ""
             try:
-                parts = loc_str.split(",")
-                s_lat = float(parts[0])
-                s_lon = float(parts[1])
-            except (ValueError, IndexError):
-                pass
-        if s_lat is None or s_lon is None:
-            continue   # can't distance-weight without coords
+                elevation = float(row[elev_i]) if elev_i >= 0 and elev_i < len(row) and row[elev_i].strip() else None
+            except ValueError:
+                elevation = None
 
-        # Distance is given by the API but verify with our own haversine
-        try:
-            api_dist = float(row[dist_i]) if dist_i >= 0 and dist_i < len(row) and row[dist_i].strip() else None
-        except (ValueError, IndexError):
-            api_dist = None
+            quality = _quality_weight_for_category(category or station_type)
 
-        # Compute our own as a safety check (the API might return distance
-        # in different units across versions)
-        R = 6371.0
-        lat1, lat2 = math.radians(lat), math.radians(s_lat)
-        dlat = lat2 - lat1
-        dlon = math.radians(s_lon - lon)
-        a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-        d_km = 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            stations.append({
+                "station_id":     station_id,
+                "category":       category,
+                "type":           station_type,
+                "name":           name,
+                "lat":            s_lat,
+                "lon":            s_lon,
+                "elevation":      elevation,
+                "distance_km":    d_km,
+                "quality_weight": quality,
+            })
 
-        if d_km > radius_km:
-            continue   # outside our verification radius
-
-        category = row[cat_i].strip() if cat_i >= 0 and cat_i < len(row) else ""
-        station_type = row[type_i].strip() if type_i >= 0 and type_i < len(row) else ""
-        name = row[name_i].strip() if name_i >= 0 and name_i < len(row) else ""
-        try:
-            elevation = float(row[elev_i]) if elev_i >= 0 and elev_i < len(row) and row[elev_i].strip() else None
-        except ValueError:
-            elevation = None
-
-        quality = _quality_weight_for_category(category or station_type)
-
-        stations.append({
-            "station_id":     station_id,
-            "category":       category,
-            "type":           station_type,
-            "name":           name,
-            "lat":            s_lat,
-            "lon":            s_lon,
-            "elevation":      elevation,
-            "distance_km":    d_km,
-            "quality_weight": quality,
-        })
-
-    # Sort by distance and apply limit
-    stations.sort(key=lambda s: s["distance_km"])
-    return stations[:limit]
+        stations.sort(key=lambda s: s["distance_km"])
+        return stations[:limit]
+    except Exception as e:
+        # Any parsing failure — log and return empty so the caller sees
+        # "catalog_empty" rather than a propagating exception that would
+        # show "Non-METAR: error" in the dashboard.
+        logger.warning("find_station parse failed: %s (raw[:200]=%r)",
+                        e, raw[:200] if raw else "")
+        return []
 
 
 # =============================================================================
