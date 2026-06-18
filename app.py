@@ -780,6 +780,19 @@ def compute_impact_matrix(
     t_ice:        str,
     terrain_env:  str,
     tz_str:       str,
+    # Enable flags for each constraint (default True for backward compat)
+    en_wind:      bool = True,
+    en_ceil:      bool = True,
+    en_vis:       bool = True,
+    en_turb:      bool = True,
+    en_ice:       bool = True,
+    # New optional constraints (default disabled)
+    en_tmax:      bool = False,
+    t_tmax:       float = 40.0,
+    en_tmin:      bool = False,
+    t_tmin:       float = -20.0,
+    en_rhmax:     bool = False,
+    t_rhmax:      int = 95,
 ) -> tuple[list, list, list]:
     """
     Evaluates Go/No-Go status for every hour in the 72-hour forecast window.
@@ -951,12 +964,26 @@ def compute_impact_matrix(
         turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
 
         # --- Go / No-Go decision ---
+        # Each constraint is checked only if its enable flag is True.
+        # Operators toggle constraints in/out of effect from the UI.
         max_wind_val = max(w_spd, gst)
-        if max_wind_val > t_wind:                                  failures.append(f"Wind ({int(max_wind_val)}KT)")
-        if vis_sm < t_vis:                                         failures.append(f"Vis ({vis_sm:.1f}SM)")
-        if c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]: failures.append(f"Ceil ({c_base_agl}ft)")
-        if hazard_lvl(turb) > hazard_lvl(t_turb):                 failures.append(f"Turb ({turb})")
-        if hazard_lvl(ice)  > hazard_lvl(t_ice):                  failures.append(f"Ice ({ice})")
+        if en_wind and max_wind_val > t_wind:
+            failures.append(f"Wind ({int(max_wind_val)}KT)")
+        if en_vis and vis_sm < t_vis:
+            failures.append(f"Vis ({vis_sm:.1f}SM)")
+        if en_ceil and c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]:
+            failures.append(f"Ceil ({c_base_agl}ft)")
+        if en_turb and hazard_lvl(turb) > hazard_lvl(t_turb):
+            failures.append(f"Turb ({turb})")
+        if en_ice and hazard_lvl(ice) > hazard_lvl(t_ice):
+            failures.append(f"Ice ({ice})")
+        # New optional constraints (opt-in via toggle)
+        if en_tmax and t_temp > t_tmax:
+            failures.append(f"Temp ({t_temp:.0f}\u00b0C > {t_tmax:.0f})")
+        if en_tmin and t_temp < t_tmin:
+            failures.append(f"Temp ({t_temp:.0f}\u00b0C < {t_tmin:.0f})")
+        if en_rhmax and rh_v > t_rhmax:
+            failures.append(f"RH ({rh_v}% > {t_rhmax}%)")
 
         dt_local = datetime.fromisoformat(h_data["time"][mat_i]).replace(tzinfo=timezone.utc).astimezone(local_tz_mat)
         time_str = dt_local.strftime('%H:%M')
@@ -1476,29 +1503,69 @@ st.subheader(_matrix_title)
 st.caption(_matrix_sub)
 
 with st.expander("Configure Operational Constraints"):
-    tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+    # Two-row layout: each constraint has an enable toggle + threshold input.
+    # Toggles let the operator turn off any constraint that doesn't apply to
+    # the current op (e.g. ignore icing for a daylight summer flight, or
+    # add a Max Temp gate for battery-temperature-sensitive RPAS work).
+    st.caption("Toggle constraints on/off; disabled constraints are skipped in the Impact Matrix.")
 
-    s_wind = st.session_state.get('input_wind', 30)
-    s_ceil = st.session_state.get('input_ceil', 500)
-    s_vis  = st.session_state.get('input_vis',  3.0)
+    # Row 1: existing constraints
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
 
-    t_wind = tc1.number_input("Max Wind/Gust (KT)",  value=int(s_wind))
-    t_ceil = tc2.number_input("Min Ceiling (ft AGL)", value=int(s_ceil), step=100)
-    t_vis  = tc3.number_input("Min Vis (SM)",          value=float(s_vis), step=0.5)
+    with r1c1:
+        en_wind = st.toggle("Max Wind/Gust", value=st.session_state.get('en_wind', True), key='en_wind')
+        t_wind = st.number_input("KT", value=int(st.session_state.get('input_wind', 30)),
+                                  key='input_wind', label_visibility="collapsed",
+                                  disabled=not en_wind)
+    with r1c2:
+        en_ceil = st.toggle("Min Ceiling", value=st.session_state.get('en_ceil', True), key='en_ceil')
+        t_ceil = st.number_input("ft AGL", value=int(st.session_state.get('input_ceil', 500)),
+                                  step=100, key='input_ceil', label_visibility="collapsed",
+                                  disabled=not en_ceil)
+    with r1c3:
+        en_vis = st.toggle("Min Visibility", value=st.session_state.get('en_vis', True), key='en_vis')
+        t_vis = st.number_input("SM", value=float(st.session_state.get('input_vis', 3.0)),
+                                 step=0.5, key='input_vis', label_visibility="collapsed",
+                                 disabled=not en_vis)
+    with r1c4:
+        en_turb = st.toggle("Max Turbulence", value=st.session_state.get('en_turb', True), key='en_turb')
+        turb_opts = ["NIL", "LGT", "MOD", "SEV"]
+        _turb_default = st.session_state.get('input_turb', 'MOD')
+        turb_idx = turb_opts.index(_turb_default) if _turb_default in turb_opts else 2
+        t_turb = st.selectbox("Turb", turb_opts, index=turb_idx, key='input_turb',
+                               label_visibility="collapsed", disabled=not en_turb)
 
-    turb_opts = ["NIL", "LGT", "MOD", "SEV"]
-    ice_opts  = ["NIL", "LGT", "MOD", "SEV"]
-    turb_idx  = turb_opts.index(st.session_state.get('input_turb', 'MOD')) if st.session_state.get('input_turb', 'MOD') in turb_opts else 2
-    ice_idx   = ice_opts.index(st.session_state.get('input_ice',  'NIL')) if st.session_state.get('input_ice',  'NIL') in ice_opts  else 0
+    # Row 2: existing icing + new temp/RH constraints
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
 
-    t_turb = tc4.selectbox("Max Turb",  turb_opts, index=turb_idx)
-    t_ice  = tc5.selectbox("Max Icing", ice_opts,  index=ice_idx)
-
-    st.session_state['input_wind'] = t_wind
-    st.session_state['input_ceil'] = t_ceil
-    st.session_state['input_vis']  = t_vis
-    st.session_state['input_turb'] = t_turb
-    st.session_state['input_ice']  = t_ice
+    with r2c1:
+        en_ice = st.toggle("Max Icing", value=st.session_state.get('en_ice', True), key='en_ice')
+        ice_opts = ["NIL", "LGT", "MOD", "SEV"]
+        _ice_default = st.session_state.get('input_ice', 'NIL')
+        ice_idx = ice_opts.index(_ice_default) if _ice_default in ice_opts else 0
+        t_ice = st.selectbox("Ice", ice_opts, index=ice_idx, key='input_ice',
+                              label_visibility="collapsed", disabled=not en_ice)
+    with r2c2:
+        # Max temperature: triggers when surface temp exceeds this value.
+        # Default disabled — opt-in for battery-sensitive ops or hot-weather limits.
+        en_tmax = st.toggle("Max Temperature", value=st.session_state.get('en_tmax', False), key='en_tmax')
+        t_tmax = st.number_input("\u00b0C", value=float(st.session_state.get('input_tmax', 40.0)),
+                                   step=1.0, key='input_tmax', label_visibility="collapsed",
+                                   disabled=not en_tmax)
+    with r2c3:
+        # Min temperature: triggers when surface temp drops below this value.
+        # Default disabled — opt-in for cold-weather battery and structural limits.
+        en_tmin = st.toggle("Min Temperature", value=st.session_state.get('en_tmin', False), key='en_tmin')
+        t_tmin = st.number_input("\u00b0C", value=float(st.session_state.get('input_tmin', -20.0)),
+                                   step=1.0, key='input_tmin', label_visibility="collapsed",
+                                   disabled=not en_tmin)
+    with r2c4:
+        # Max relative humidity: triggers when RH exceeds this value.
+        # Useful for condensation / optical sensor degradation in payload-heavy missions.
+        en_rhmax = st.toggle("Max Relative Humidity", value=st.session_state.get('en_rhmax', False), key='en_rhmax')
+        t_rhmax = st.number_input("%", value=int(st.session_state.get('input_rhmax', 95)),
+                                    step=5, key='input_rhmax', label_visibility="collapsed",
+                                    disabled=not en_rhmax)
 
 # Run the cached physics computation — only re-executes when inputs change
 x_labels, color_vals, hover_texts = compute_impact_matrix(
@@ -1514,6 +1581,17 @@ x_labels, color_vals, hover_texts = compute_impact_matrix(
     t_ice         = t_ice,
     terrain_env   = terrain_env,
     tz_str        = tz_str or "UTC",
+    en_wind       = en_wind,
+    en_ceil       = en_ceil,
+    en_vis        = en_vis,
+    en_turb       = en_turb,
+    en_ice        = en_ice,
+    en_tmax       = en_tmax,
+    t_tmax        = t_tmax,
+    en_tmin       = en_tmin,
+    t_tmin        = t_tmin,
+    en_rhmax      = en_rhmax,
+    t_rhmax       = t_rhmax,
 )
 
 tick_vals  = x_labels[::4]
@@ -1859,15 +1937,18 @@ else:                  sfc_dir_disp, sfc_spd_disp = f"{sfc_dir:03d}°", str(int(
 # =============================================================================
 
 st.subheader("Forecasted Surface Data")
-c = st.columns(8)
-c[0].metric("Temp",        f"{t_temp}°C")
+c = st.columns(9)
+c[0].metric("Temp",        f"{t_temp}\u00b0C")
 c[1].metric("RH",          f"{rh}%")
 c[2].metric("Wind Dir",    sfc_dir_disp)
 c[3].metric("Wind Spd",    f"{sfc_spd_disp} {raw_wind_unit}")
-c[4].metric("Weather",     weather_str)
-c[5].metric("Visibility",  vis_disp)
-c[6].metric("Freezing LVL", frz_disp)
-c[7].metric("Cloud Base",  c_base_disp)
+# Gust column. Uses the same gust value the rest of the dashboard already
+# computes (raw obs gust if provided, otherwise wind × 1.25 floor).
+c[4].metric("Gust",        f"{int(gst)} {raw_wind_unit}")
+c[5].metric("Weather",     weather_str)
+c[6].metric("Visibility",  vis_disp)
+c[7].metric("Freezing LVL", frz_disp)
+c[8].metric("Cloud Base",  c_base_disp)
 
 st.divider()
 
@@ -1904,7 +1985,15 @@ for alt in [400, 300, 200, 100]:
     elif int(s_c) <= 3: mat_dir, mat_spd = "VRB",  "3"
     else:                mat_dir, mat_spd = f"{d_c:03d}°", str(int(s_c))
 
-    stack_tactical.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir, f"Spd ({raw_wind_unit})": mat_spd, f"Gust ({raw_wind_unit})": str(int(g_c)), "Turbulence": turb, "Icing": ice})
+    stack_tactical.append({
+        "Alt (AGL)": f"{alt}ft",
+        "Dir": mat_dir,
+        f"Spd ({raw_wind_unit})": mat_spd,
+        f"Gust ({raw_wind_unit})": str(int(g_c)),
+        "Temp (\u00b0C)": f"{alt_t:.0f}" if alt_t is not None else "N/A",
+        "Turbulence": turb,
+        "Icing": ice,
+    })
 
 df_tactical = pd.DataFrame(stack_tactical).set_index("Alt (AGL)")
 st.table(df_tactical)
@@ -1927,7 +2016,15 @@ stack_ext  = []
 
 if not p_profile:
     for alt in [5000, 4000, 3000, 2000, 1000]:
-        stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": "N/A", f"Spd ({raw_wind_unit})": "N/A", f"Gust ({raw_wind_unit})": "N/A", "Turbulence": "N/A", "Icing": "N/A"})
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft",
+            "Dir": "N/A",
+            f"Spd ({raw_wind_unit})": "N/A",
+            f"Gust ({raw_wind_unit})": "N/A",
+            "Temp (\u00b0C)": "N/A",
+            "Turbulence": "N/A",
+            "Icing": "N/A",
+        })
 else:
     for alt in [5000, 4000, 3000, 2000, 1000]:
         pts = [{'h': u_h * 3.28, 's': u_v, 'd': u_dir}] + p_profile
@@ -1951,7 +2048,15 @@ else:
         elif int(s_e) <= 3: mat_dir_ext, mat_spd_ext = "VRB",  "3"
         else:                mat_dir_ext, mat_spd_ext = f"{d_e:03d}°", str(int(s_e))
 
-        stack_ext.append({"Alt (AGL)": f"{alt}ft", "Dir": mat_dir_ext, f"Spd ({raw_wind_unit})": mat_spd_ext, f"Gust ({raw_wind_unit})": str(int(g_e)), "Turbulence": turb, "Icing": ice})
+        stack_ext.append({
+            "Alt (AGL)": f"{alt}ft",
+            "Dir": mat_dir_ext,
+            f"Spd ({raw_wind_unit})": mat_spd_ext,
+            f"Gust ({raw_wind_unit})": str(int(g_e)),
+            "Temp (\u00b0C)": f"{alt_t:.0f}" if alt_t is not None else "N/A",
+            "Turbulence": turb,
+            "Icing": ice,
+        })
 
 df_ext = pd.DataFrame(stack_ext).set_index("Alt (AGL)")
 st.table(df_ext)
