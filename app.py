@@ -3178,9 +3178,21 @@ else:
                 _sv_agree = (_sv_best == _sv_sfc_best)
                 _sv_launch = _sv.get("launch_time", "")[:16].replace("T", " ")
                 _agree_txt = (
-                    f'<span style="color:#4ade80;">agrees with</span>' if _sv_agree
-                    else f'<span style="color:#E58E26;">differs from</span>'
+                    '<span style="color:#4ade80;">agrees with</span>' if _sv_agree
+                    else '<span style="color:#E58E26;">differs from</span>'
                 )
+                # Build the interpretation line outside the f-string. Python
+                # 3.11 forbids backslashes (here, the \u2014 em-dash escapes)
+                # inside f-string expression braces, so this must be a plain
+                # string assignment.
+                _em = "\u2014"
+                if _sv_agree:
+                    _sv_interp = (f"Surface and profile agree {_em} high confidence "
+                                  f"in this model for layered ops.")
+                else:
+                    _sv_interp = (f"Surface and profile disagree {_em} the surface-best "
+                                  f"model may misrepresent the wind structure aloft. "
+                                  f"Weight the profile result for climb/descent planning.")
                 st.markdown(
                     f'<div style="margin-top:14px;padding:10px 12px;background:#161A1F;'
                     f'border-left:2px solid #3b82f6;border-radius:0 4px 4px 0;">'
@@ -3193,7 +3205,7 @@ else:
                     f'\u2014 {_agree_txt} the surface scorecard\u2019s best ({_sv_sfc_best}).'
                     f'</div>'
                     f'<div style="font-size:0.6rem;color:#6B7280;margin-top:5px;">'
-                    f'{"Surface and profile agree \u2014 high confidence in this model for layered ops."  if _sv_agree else "Surface and profile disagree \u2014 the surface-best model may misrepresent the wind structure aloft. Weight the profile result for climb/descent planning."}'
+                    f'{_sv_interp}'
                     f'</div>'
                     f'</div>',
                     unsafe_allow_html=True,
