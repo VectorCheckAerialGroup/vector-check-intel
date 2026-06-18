@@ -2233,8 +2233,19 @@ def generate_pdf_report() -> bytes:
         pdf.set_font("helvetica", "B", 12)
         pdf.cell(0, 8, title, border=0, new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("helvetica", "B", 9)
-        col_names  = ["Alt (AGL)"] + list(df.columns)
-        col_widths = [25, 20, 25, 25, 30, 25]
+        col_names = ["Alt (AGL)"] + list(df.columns)
+
+        # Dynamic column widths: the index column ("Alt (AGL)") gets a fixed
+        # width; the remaining data columns split the available page width
+        # evenly. This adapts automatically as columns are added/removed
+        # (e.g. the new Temp column) so the table can never run off the end
+        # of col_widths the way a hardcoded list did.
+        n_cols      = len(col_names)
+        first_width = 25
+        page_width  = pdf.w - 2 * pdf.l_margin          # usable width
+        rest_width  = max(18, (page_width - first_width) / max(1, n_cols - 1))
+        col_widths  = [first_width] + [rest_width] * (n_cols - 1)
+
         for col_i, col in enumerate(col_names):
             pdf.cell(col_widths[col_i], 8, safe_txt(str(col)), border=1, align='C')
         pdf.ln(8)
