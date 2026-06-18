@@ -77,10 +77,18 @@ def _build_model_routes() -> dict:
     # GFS — prefer Meteomatics, fall back to Open-Meteo
     routes["GFS"] = ("meteomatics", "ncep-gfs") if mm else ("open-meteo", _om_url("gfs"))
 
-    # HRRR — prefer Meteomatics, fall back to Open-Meteo (CONUS-only model
-    # but the routing decision is location-agnostic; coverage gating still
-    # happens at the dashboard level via _is_conus_coverage)
-    routes["HRRR"] = ("meteomatics", "ncep-hrrr") if mm else ("open-meteo", _om_url("gfs?models=ncep_hrrr_conus"))
+    # HRRR — prefer Meteomatics, fall back to Open-Meteo.
+    #
+    # IMPORTANT: Open-Meteo's HRRR (ncep_hrrr_conus) is CONUS-only and only
+    # carries ~2 days of forecast. When a requested hour has no HRRR data,
+    # Open-Meteo's seamless model nesting SILENTLY substitutes GFS (a 25km
+    # global model) for that hour. Mixing 3km HRRR and 25km GFS in one series
+    # produces inconsistent, erroneous winds — this was the source of the
+    # bad fallback wind speeds. We add &cell_selection=nearest to pin the grid
+    # cell and rely on the scorecard's _detect_model_contamination check to
+    # flag any series where the realized resolution doesn't match HRRR.
+    routes["HRRR"] = ("meteomatics", "ncep-hrrr") if mm else (
+        "open-meteo", _om_url("gfs?models=ncep_hrrr_conus&cell_selection=nearest"))
 
     # ICON Global — Open-Meteo only (vectorcheck subscription doesn't include
     # DWD ICON via Meteomatics)
