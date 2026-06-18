@@ -83,6 +83,32 @@ VIS_MAE_WARN_SM = 3.0
 # HISTORICAL FORECAST FETCH (Open-Meteo Previous Runs)
 # =============================================================================
 
+def _sanitize_model_wind(ws_list: list, gust_list: list) -> tuple:
+    """Physical-plausibility filter for model surface winds.
+
+    Nulls out non-physical samples rather than letting them poison the MAE:
+      - Surface (10 m) sustained wind outside [0, 120] kt → unit error / corrupt cell
+      - Gust outside [0, 180] kt → same
+      - Gust reported below its own sustained wind (by > 0.5 kt) → bad data
+
+    Primary motivation: Open-Meteo's seamless model nesting silently backfills
+    HRRR gaps with GFS, which produced erroneous fallback wind speeds. A unit
+    mismatch (m/s read as kn, etc.) also surfaces as absurdly high values this
+    catches. Operates in place and also returns the lists for chaining.
+    """
+    n = len(ws_list)
+    for j in range(n):
+        w = ws_list[j]
+        if w is not None and (w < 0 or w > 120):
+            ws_list[j] = None
+        g = gust_list[j] if j < len(gust_list) else None
+        if g is not None and (g < 0 or g > 180):
+            gust_list[j] = None
+        elif (g is not None and ws_list[j] is not None and g < ws_list[j] - 0.5):
+            gust_list[j] = None
+    return ws_list, gust_list
+
+
 def _fetch_model_history_meteomatics_mos(station_id: str, lat: float, lon: float,
                                           display_name: str = "MOS") -> dict:
     """Fetches 24h of historical MOS forecast data for the scorecard.
@@ -235,9 +261,23 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
     # Pressure uses msl_pressure:hPa (sea-level-adjusted), not sfc_pressure,
     # so it's directly comparable to METAR altimeter setting. The main
     # forecast path keeps surface_pressure for density altitude work.
+    # Gust parameter is model-dependent. The bias-corrected MIX blend carries
+    # the statistically-aggregated wind_gusts_10m_1h:kn, but raw NWP models
+    # (HRRR, AIFS, GFS, ECMWF-IFS) on the vectorcheck subscription do NOT all
+    # expose the _1h aggregation — requesting it 404s the whole batch (all-or-
+    # nothing semantics). Raw models carry the instantaneous wind_gusts_10m:kn
+    # instead. We pick per-model and record which gust param we used so the
+    # parser reads the right block back.
+    _RAW_MODELS_INSTANT_GUST = {"ncep-hrrr", "ncep-gfs", "ecmwf-ifs", "ecmwf-aifs"}
+    model_id = METEOMATICS_MODELS[model]
+    if model_id in _RAW_MODELS_INSTANT_GUST:
+        _gust_param = "wind_gusts_10m:kn"
+    else:
+        _gust_param = "wind_gusts_10m_1h:kn"
+
     mm_params = [
         "t_2m:C", "relative_humidity_2m:p",
-        "wind_speed_10m:kn", "wind_dir_10m:d", "wind_gusts_10m_1h:kn",
+        "wind_speed_10m:kn", "wind_dir_10m:d", _gust_param,
         "msl_pressure:hPa",
     ]
     # Additionally filter against the per-model blocklist (in case future
@@ -249,7 +289,6 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
     except (ImportError, KeyError):
         pass
     param_str = ",".join(mm_params)
-    model_id = METEOMATICS_MODELS[model]
     url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
 
     try:
@@ -311,11 +350,25 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
                 out.append(None)
         return out
 
+    # Gust block name depends on which variant we requested for this model
+    # (see _RAW_MODELS_INSTANT_GUST above). Read whichever one came back so
+    # raw models (instantaneous gust) and the MIX blend (_1h gust) both parse.
+    if "wind_gusts_10m_1h:kn" in by_param:
+        _gust_key = "wind_gusts_10m_1h:kn"
+    elif "wind_gusts_10m:kn" in by_param:
+        _gust_key = "wind_gusts_10m:kn"
+    else:
+        _gust_key = "wind_gusts_10m_1h:kn"   # absent → _pick returns all-None
+
+    _mm_wind = _pick("wind_speed_10m:kn")
+    _mm_gust = _pick(_gust_key)
+    _mm_wind, _mm_gust = _sanitize_model_wind(_mm_wind, _mm_gust)
+
     return {
         "times": [times_iso[i] for i in kept_indices],
-        "wind_kt":      _pick("wind_speed_10m:kn"),
+        "wind_kt":      _mm_wind,
         "wind_dir":     _pick("wind_dir_10m:d"),
-        "gust_kt":      _pick("wind_gusts_10m_1h:kn"),
+        "gust_kt":      _mm_gust,
         "temp_c":       _pick("t_2m:C"),
         "pressure_hpa": _pick("msl_pressure:hPa"),
         "rh":           _pick("relative_humidity_2m:p"),
@@ -390,11 +443,20 @@ def _fetch_model_history(model_name: str, endpoint_url: str, lat: float, lon: fl
                 out.append(None)
         return out
 
+    _wind = _pick("wind_speed_10m", _wind_scale)
+    _gust = _pick("wind_gusts_10m", _wind_scale)
+    _dir = _pick("wind_direction_10m")
+
+    # Physical-plausibility sanity filter (shared with the Meteomatics parser).
+    # Catches unit errors, corrupt cells, and the seamless-nesting backfill
+    # that mixed HRRR with GFS and produced erroneous fallback winds.
+    _wind, _gust = _sanitize_model_wind(_wind, _gust)
+
     return {
         "times": [times_iso[i] for i in kept_indices],
-        "wind_kt": _pick("wind_speed_10m", _wind_scale),
-        "wind_dir": _pick("wind_direction_10m"),
-        "gust_kt": _pick("wind_gusts_10m", _wind_scale),
+        "wind_kt": _wind,
+        "wind_dir": _dir,
+        "gust_kt": _gust,
         "temp_c": _pick("temperature_2m"),
         "pressure_hpa": _pick("pressure_msl"),
         "rh": _pick("relative_humidity_2m"),
