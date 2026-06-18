@@ -35,6 +35,9 @@ from modules.model_performance import (
 )
 from modules.geomag import get_magnetic_declination
 from modules.kestrel_ingest import parse_kestrel_csv
+from modules.sounding_ingest import (
+    verify_sounding_csv, parse_sounding_csv, bin_profile_by_alt,
+)
 from modules.forecast_verification import (
     average_session, compute_file_hash, match_forecast_hour,
     compute_verification, store_verification, load_recent_verifications,
@@ -3163,6 +3166,39 @@ else:
                 unsafe_allow_html=True,
             )
 
+            # Cross-reference: if a drone sounding was verified this session,
+            # surface its result here. The sounding verifies vertical structure
+            # (a different question than the surface scorecard above), so a
+            # disagreement between the two is operationally meaningful — it
+            # means a model good at the surface may be poor through the layer.
+            _sv = st.session_state.get("_last_sounding_verification")
+            if _sv:
+                _sv_best = _sv.get("best_model", "\u2014")
+                _sv_sfc_best = _best  # surface scorecard's best
+                _sv_agree = (_sv_best == _sv_sfc_best)
+                _sv_launch = _sv.get("launch_time", "")[:16].replace("T", " ")
+                _agree_txt = (
+                    f'<span style="color:#4ade80;">agrees with</span>' if _sv_agree
+                    else f'<span style="color:#E58E26;">differs from</span>'
+                )
+                st.markdown(
+                    f'<div style="margin-top:14px;padding:10px 12px;background:#161A1F;'
+                    f'border-left:2px solid #3b82f6;border-radius:0 4px 4px 0;">'
+                    f'<div style="font-size:0.64rem;color:#6B7280;text-transform:uppercase;'
+                    f'letter-spacing:0.5px;margin-bottom:4px;">Drone sounding cross-check</div>'
+                    f'<div style="font-size:0.72rem;color:#D1D5DB;line-height:1.5;">'
+                    f'{_sv.get("aircraft","")} \u00b7 {_sv_launch}Z \u00b7 '
+                    f'{_sv.get("span_ft",0):.0f} ft profile, {_sv.get("n_layers",0)} layers.'
+                    f'<br>Best vertical-profile fit: <b style="color:#3b82f6;">{_sv_best}</b> '
+                    f'\u2014 {_agree_txt} the surface scorecard\u2019s best ({_sv_sfc_best}).'
+                    f'</div>'
+                    f'<div style="font-size:0.6rem;color:#6B7280;margin-top:5px;">'
+                    f'{"Surface and profile agree \u2014 high confidence in this model for layered ops."  if _sv_agree else "Surface and profile disagree \u2014 the surface-best model may misrepresent the wind structure aloft. Weight the profile result for climb/descent planning."}'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
         with _perf_right:
             st.markdown(
                 '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
@@ -3461,6 +3497,228 @@ if _sb_vf:
             '</div>'
         )
         st.markdown(_hist_header + _hist_rows, unsafe_allow_html=True)
+
+st.divider()
+
+
+# =============================================================================
+# DRONE SOUNDING VERIFICATION — Vertical Profile Ground Truth
+# =============================================================================
+# Ingests a meteo-drone ascent CSV (e.g. Meteomatics MM-670M) and verifies
+# the full vertical profile against all 8 models, layer by layer. Unlike the
+# Kestrel surface comparison, this scores the model's VERTICAL STRUCTURE —
+# whether it captures boundary-layer wind shear, not just the surface value.
+
+st.subheader("Drone Sounding Verification")
+
+_ds_left, _ds_right = st.columns([1, 2])
+
+with _ds_left:
+    st.markdown(
+        '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
+        'Upload a meteo-drone ascent CSV (MM-670 series) to verify the full '
+        'vertical profile against all models, layer by layer. Captures '
+        'boundary-layer structure that surface comparison misses.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    _sounding_file = st.file_uploader(
+        "Drone sounding CSV",
+        type=["csv"],
+        key="sounding_upload",
+        label_visibility="collapsed",
+    )
+    _ds_bin = st.select_slider(
+        "Layer bin size",
+        options=[25, 50, 100, 150],
+        value=50,
+        format_func=lambda x: f"{x} ft",
+        help="Vertical resolution of the comparison. Smaller bins = finer "
+             "structure but fewer drone samples per layer.",
+    )
+
+if _sounding_file is not None:
+    try:
+        _ds_bytes = _sounding_file.getvalue()
+        _ds_text = _ds_bytes.decode("utf-8", errors="replace")
+
+        # Parse first so we can show profile metadata even if model fetch is slow
+        _profile = parse_sounding_csv(_ds_text)
+
+        if _profile is None:
+            with _ds_right:
+                st.error("Could not parse this CSV as a drone sounding. Expected "
+                         "an MM-670-style semicolon-delimited file with altitude, "
+                         "temperature, wind, and position columns.")
+        else:
+            # Determine CONUS coverage for HRRR/NAM gating at this location
+            _ds_in_conus = (24.0 <= _profile.lat <= 50.0) and (-125.0 <= _profile.lon <= -66.0)
+
+            with st.spinner(f"Verifying {_profile.n_samples}-sample ascent "
+                            f"against all models..."):
+                _pv = verify_sounding_csv(_ds_text, in_conus=_ds_in_conus, bin_ft=float(_ds_bin))
+
+            # Stash the result so the Model Performance page can reference the
+            # most recent sounding verification this session.
+            if _pv is not None and _pv.model_scores:
+                st.session_state["_last_sounding_verification"] = {
+                    "aircraft": _pv.aircraft,
+                    "launch_time": _pv.launch_time.isoformat(),
+                    "lat": _pv.lat, "lon": _pv.lon,
+                    "best_model": _pv.best_model,
+                    "n_layers": _pv.n_layers,
+                    "span_ft": _profile.span_ft,
+                    "model_scores": _pv.model_scores,
+                }
+
+            with _ds_right:
+                if _pv is None:
+                    st.error("Verification failed during processing.")
+                else:
+                    # Profile metadata banner
+                    _launch_str = _pv.launch_time.strftime("%d %b %Y %H:%M UTC")
+                    st.markdown(
+                        f'<div style="background:#161A1F;border-radius:6px;padding:10px 14px;'
+                        f'margin-bottom:12px;">'
+                        f'<div style="font-size:0.75rem;color:#D1D5DB;font-weight:600;">'
+                        f'{_pv.aircraft} \u00b7 {_launch_str}</div>'
+                        f'<div style="font-size:0.66rem;color:#6B7280;margin-top:3px;">'
+                        f'{_pv.lat:.4f}, {_pv.lon:.4f} \u00b7 '
+                        f'{_profile.span_ft:.0f} ft ascent \u00b7 {_pv.n_layers} layers '
+                        f'\u00b7 {_pv.bin_ft:.0f} ft bins</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    if not _pv.model_scores:
+                        st.warning("Profile parsed successfully, but no model data "
+                                   "could be fetched for this location/time. The "
+                                   "models may not have archived data for this date, "
+                                   "or the launch time is too far in the past.")
+                    else:
+                        # Best model badge
+                        if _pv.best_model:
+                            st.markdown(
+                                f'<span style="display:inline-block;background:rgba(74,222,128,0.12);'
+                                f'border:1px solid #4ade80;border-radius:4px;padding:3px 10px;'
+                                f'font-size:0.7rem;color:#4ade80;font-weight:600;margin-bottom:10px;">'
+                                f'Best profile fit: {_pv.best_model}</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                        # Profile-aggregate MAE table, ranked by composite
+                        def _ds_composite(s):
+                            sc = 0.0
+                            if s["wind_mae"] is not None:  sc += s["wind_mae"] * 3.0
+                            if s["temp_mae"] is not None:  sc += s["temp_mae"] * 1.0
+                            if s["pressure_mae"] is not None: sc += s["pressure_mae"] * 0.5
+                            if s["dir_mae"] is not None:   sc += s["dir_mae"] * 0.05
+                            if s["rh_mae"] is not None:    sc += s["rh_mae"] * 0.05
+                            return sc if any(s[k] is not None for k in ["wind_mae", "temp_mae"]) else float("inf")
+
+                        _ranked = sorted(
+                            _pv.model_scores.items(),
+                            key=lambda kv: _ds_composite(kv[1])
+                        )
+
+                        def _ds_cell(val, unit, good, warn):
+                            if val is None:
+                                return '<div style="font-size:0.74rem;color:#4B5563;padding:5px 6px;text-align:center;">\u2014</div>'
+                            clr = "#4ade80" if val <= good else ("#E58E26" if val <= warn else "#ff6b4a")
+                            return (f'<div style="font-size:0.78rem;color:{clr};padding:5px 6px;'
+                                    f'text-align:center;font-variant-numeric:tabular-nums;">{val:.1f}</div>')
+
+                        _ds_grid = "minmax(70px,1.2fr) repeat(4, minmax(48px,1fr))"
+                        _ds_header = (
+                            f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
+                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Model</div>'
+                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Wind</div>'
+                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Dir</div>'
+                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Temp</div>'
+                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">RH</div>'
+                            f'</div>'
+                        )
+                        _ds_rows = ""
+                        for _rank, (_m, _s) in enumerate(_ranked, 1):
+                            _is_best = (_m == _pv.best_model)
+                            _bg = "#1E2530" if _is_best else "#161A1F"
+                            _nm_clr = "#4ade80" if _is_best else "#D1D5DB"
+                            _ds_rows += (
+                                f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
+                                f'<div style="font-size:0.78rem;color:{_nm_clr};padding:5px 6px;background:{_bg};">'
+                                f'<span style="color:#6B7280;font-size:0.68rem;margin-right:5px;">{_rank}.</span>{_m}</div>'
+                                f'<div style="background:{_bg};">{_ds_cell(_s["wind_mae"], "kt", 2.0, 4.0)}</div>'
+                                f'<div style="background:{_bg};">{_ds_cell(_s["dir_mae"], "deg", 15, 30)}</div>'
+                                f'<div style="background:{_bg};">{_ds_cell(_s["temp_mae"], "C", 1.5, 3.0)}</div>'
+                                f'<div style="background:{_bg};">{_ds_cell(_s["rh_mae"], "pct", 5, 12)}</div>'
+                                f'</div>'
+                            )
+                        st.markdown(_ds_header + _ds_rows, unsafe_allow_html=True)
+                        st.markdown(
+                            '<div style="font-size:0.62rem;color:#6B7280;margin-top:8px;">'
+                            'Profile-mean MAE across all layers. Wind kt \u00b7 Dir \u00b0 '
+                            '\u00b7 Temp \u00b0C \u00b7 RH %. Ranked by UAS-operational '
+                            'composite (wind-weighted). This scores vertical structure: '
+                            'a model can nail the surface yet miss the shear aloft.'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # Wind profile chart: observed vs best model, by altitude
+                        try:
+                            import plotly.graph_objects as _go
+                            _layers = bin_profile_by_alt(_profile, bin_ft=float(_ds_bin))
+                            _obs_alt = [l.alt_agl_ft for l in _layers]
+                            _obs_wind = [l.wind_speed_kt for l in _layers]
+
+                            _fig_prof = _go.Figure()
+                            _fig_prof.add_trace(_go.Scatter(
+                                x=_obs_wind, y=_obs_alt, mode="lines+markers",
+                                name="Drone obs", line=dict(color="#4ade80", width=3),
+                                marker=dict(size=6),
+                            ))
+                            # Best model's interpolated wind per layer
+                            if _pv.best_model:
+                                _bm_wind = [
+                                    ld.model_wind for ld in _pv.layer_details
+                                    if ld.model == _pv.best_model and ld.model_wind is not None
+                                ]
+                                _bm_alt = [
+                                    ld.alt_agl_ft for ld in _pv.layer_details
+                                    if ld.model == _pv.best_model and ld.model_wind is not None
+                                ]
+                                if _bm_wind:
+                                    _fig_prof.add_trace(_go.Scatter(
+                                        x=_bm_wind, y=_bm_alt, mode="lines+markers",
+                                        name=_pv.best_model,
+                                        line=dict(color="#3b82f6", width=2, dash="dot"),
+                                        marker=dict(size=5),
+                                    ))
+                            _fig_prof.update_layout(
+                                title=dict(text="Wind speed profile \u2014 obs vs model",
+                                           font=dict(size=12, color="#9CA3AF")),
+                                xaxis_title="Wind speed (kt)",
+                                yaxis_title="Altitude (ft AGL)",
+                                height=320, margin=dict(l=10, r=10, t=36, b=10),
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                plot_bgcolor="rgba(0,0,0,0)",
+                                font=dict(color="#9CA3AF", size=10),
+                                legend=dict(font=dict(size=9), orientation="h",
+                                            yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                xaxis=dict(gridcolor="#2A2F36"),
+                                yaxis=dict(gridcolor="#2A2F36"),
+                            )
+                            st.plotly_chart(_fig_prof, use_container_width=True,
+                                            config={'displayModeBar': False})
+                        except Exception as _chart_e:
+                            st.caption(f"Profile chart unavailable: {_chart_e}")
+
+    except UnicodeDecodeError:
+        with _ds_right:
+            st.error("File encoding error. The drone CSV should be UTF-8 or ASCII.")
+    except Exception as _ds_err:
+        with _ds_right:
+            st.error(f"Sounding verification failed: {_ds_err}")
 
 st.divider()
 
