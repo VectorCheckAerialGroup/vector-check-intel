@@ -2592,7 +2592,7 @@ def _fetch_ensemble_cached(e_lat: float, e_lon: float, e_tz: str = None) -> dict
 
     # Build the side-by-side comparison matrix (24 hourly columns) and its
     # terse agreement/divergence callouts. tz_str enables local-time labels.
-    matrix = build_model_matrix(models, n_hours=24, start_offset=0, tz_str=e_tz)
+    matrix = build_model_matrix(models, n_hours=48, start_offset=0, tz_str=e_tz)
     matrix_notes = summarize_matrix(matrix)
 
     return {
@@ -2700,21 +2700,26 @@ else:
                 unsafe_allow_html=True,
             )
 
-        # Number of hourly columns to display. 24 is a lot horizontally; show
-        # an operator-selectable horizon so it stays readable.
-        _mtx_hours = st.select_slider(
-            "Forecast horizon",
-            options=[6, 12, 18, 24],
-            value=12,
-            format_func=lambda x: f"{x} h",
-            key="matrix_horizon",
-        )
-        _ncol = min(_mtx_hours, len(_hour_labels))
+        # Show the full 48-hour horizon. Tables scroll horizontally rather
+        # than truncating, so no operator interaction is needed to see the
+        # whole forecast window.
+        _ncol = min(48, len(_hour_labels))
 
-        # Shared column template: model-name column + N hour columns.
+        # Shared column template: model-name column + N hour columns. Columns
+        # use a FIXED width (not fractional) so the table extends past the
+        # container and the wrapper scrolls horizontally. The model-name column
+        # is sticky (see _scroll_open) so it stays visible while scrolling.
         _name_w = 78
-        _col_w = max(34, int((1100 - _name_w) / _ncol))   # responsive-ish
-        _grid = f"{_name_w}px repeat({_ncol}, minmax(30px, 1fr))"
+        _col_w = 38   # px per hour column — fixed so 48h overflows and scrolls
+        _grid = f"{_name_w}px repeat({_ncol}, {_col_w}px)"
+
+        # Horizontal-scroll wrapper. The model-name column is pinned via
+        # position:sticky so it doesn't scroll away with the hour columns.
+        def _scroll_open():
+            return ('<div style="overflow-x:auto;overflow-y:hidden;'
+                    'padding-bottom:6px;">')
+        def _scroll_close():
+            return '</div>'
 
         def _wind_arrow(deg):
             """Unicode arrow pointing in the direction the wind is blowing TO.
@@ -2740,7 +2745,8 @@ else:
                 _title_sub = f'{_local_abbr}/Z' if _local_abbr else 'Local/Z'
                 cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
                          f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;'
-                         f'line-height:1.25;">{title}'
+                         f'line-height:1.25;position:sticky;left:0;background:#0E1117;'
+                         f'z-index:2;">{title}'
                          f'<div style="font-size:0.5rem;color:#4B5563;font-weight:400;">'
                          f'{_title_sub}</div></div>')
                 for _ci in range(_ncol):
@@ -2752,17 +2758,22 @@ else:
                               f'<div style="font-size:0.5rem;color:#4B5563;">{_zul}z</div></div>')
             else:
                 cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
-                         f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;">{title}</div>')
+                         f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;'
+                         f'position:sticky;left:0;background:#0E1117;z-index:2;">{title}</div>')
                 for hl in _hour_labels[:_ncol]:
                     cells += (f'<div style="font-size:0.58rem;color:#6B7280;text-align:center;'
                               f'padding:4px 2px;font-variant-numeric:tabular-nums;">{hl}</div>')
             return (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
-                    f'margin-bottom:1px;">{cells}</div>')
+                    f'margin-bottom:1px;min-width:max-content;">{cells}</div>')
 
         def _model_name_cell(name):
             return (f'<div style="font-size:0.72rem;color:#D1D5DB;padding:4px 4px;'
                     f'background:#161A1F;white-space:nowrap;overflow:hidden;'
-                    f'text-overflow:ellipsis;">{name}</div>')
+                    f'text-overflow:ellipsis;position:sticky;left:0;z-index:1;">{name}</div>')
+
+        def _row_open():
+            return (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                    f'margin-bottom:1px;min-width:max-content;">')
 
         # ============ WIND TABLE (arrow + speed, gust on hover via title) ====
         st.markdown(
@@ -2799,9 +2810,8 @@ else:
                              f'<span style="font-size:0.72rem;color:{_w_clr};margin-left:1px;">{_w:.0f}</span>'
                              f'</div>')
                 _row += _cell
-            _wind_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
-                           f'margin-bottom:1px;">{_row}</div>')
-        st.markdown(_wind_html, unsafe_allow_html=True)
+            _wind_html += f'{_row_open()}{_row}</div>'
+        st.markdown(_scroll_open() + _wind_html + _scroll_close(), unsafe_allow_html=True)
 
         # ============ TEMPERATURE TABLE =====================================
         st.markdown(
@@ -2834,9 +2844,8 @@ else:
                              f'font-size:0.72rem;color:{_t_clr};font-variant-numeric:tabular-nums;">'
                              f'{_t:.0f}</div>')
                 _row += _cell
-            _temp_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
-                           f'margin-bottom:1px;">{_row}</div>')
-        st.markdown(_temp_html, unsafe_allow_html=True)
+            _temp_html += f'{_row_open()}{_row}</div>'
+        st.markdown(_scroll_open() + _temp_html + _scroll_close(), unsafe_allow_html=True)
 
         # ============ RELATIVE HUMIDITY TABLE ===============================
         st.markdown(
@@ -2864,9 +2873,8 @@ else:
                              f'font-size:0.72rem;color:{_r_clr};font-variant-numeric:tabular-nums;">'
                              f'{_r:.0f}</div>')
                 _row += _cell
-            _rh_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
-                         f'margin-bottom:1px;">{_row}</div>')
-        st.markdown(_rh_html, unsafe_allow_html=True)
+            _rh_html += f'{_row_open()}{_row}</div>'
+        st.markdown(_scroll_open() + _rh_html + _scroll_close(), unsafe_allow_html=True)
 
         # ============ VISIBILITY TABLE ======================================
         # Visibility is a diagnostic field most NWP models don't output. On our
@@ -2912,16 +2920,17 @@ else:
                                  f'font-size:0.72rem;color:{_v_clr};font-variant-numeric:tabular-nums;">'
                                  f'{_vtxt}</div>')
                     _row += _cell
-                _vis_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
-                              f'margin-bottom:1px;">{_row}</div>')
-            st.markdown(_vis_html, unsafe_allow_html=True)
+                _vis_html += f'{_row_open()}{_row}</div>'
+            st.markdown(_scroll_open() + _vis_html + _scroll_close(), unsafe_allow_html=True)
 
         # Legend
         st.markdown(
             '<div style="font-size:0.64rem;color:#6B7280;margin-top:14px;line-height:1.5;">'
-            'Columns are forecast hours (Z). Highlighted cells flag cross-model '
-            'disagreement at that hour (wind \u2265 6 kt amber / \u2265 10 kt red spread; '
-            'temp \u2265 5\u00b0C amber). Hover a wind cell for exact speed and gust.'
+            '48-hour horizon \u2014 scroll horizontally to see later hours. Columns show '
+            'local time over Zulu. Models are ordered finest resolution first. '
+            'Highlighted cells flag cross-model disagreement at that hour '
+            '(wind \u2265 6 kt amber / \u2265 10 kt red spread; temp \u2265 5\u00b0C amber). '
+            'Hover a wind cell for exact speed and gust.'
             '</div>',
             unsafe_allow_html=True,
         )
