@@ -533,13 +533,16 @@ def fetch_all_models(lat: float, lon: float) -> list:
 # return slightly different start hours or horizons.
 
 def build_model_matrix(models: list, n_hours: int = 24,
-                       start_offset: int = 0) -> dict:
+                       start_offset: int = 0, tz_str: str = None) -> dict:
     """Aligns all models onto a common hourly axis for side-by-side display.
 
     Args:
         models:        list of valid ModelForecast objects (from fetch_all_models)
         n_hours:       number of hourly columns to produce
         start_offset:  hours from the first common timestamp to begin (0 = now)
+        tz_str:        IANA timezone name (e.g. "America/Toronto"). When given,
+                       the matrix also produces local-time column labels
+                       alongside the Zulu labels.
 
     Returns a dict:
         {
@@ -563,7 +566,7 @@ def build_model_matrix(models: list, n_hours: int = 24,
 
     valid = [m for m in models if m.valid and m.times]
     if not valid:
-        return {"times": [], "hour_labels": [], "models": [], "consensus": {}}
+        return {"times": [], "hour_labels": [], "local_labels": [], "local_tz_abbr": "", "models": [], "consensus": {}}
 
     # Establish the common axis from the LATEST first-timestamp across models
     # (so every model has data at the start) parsed to datetimes.
@@ -579,7 +582,7 @@ def build_model_matrix(models: list, n_hours: int = 24,
         if t0 is not None:
             first_times.append(t0)
     if not first_times:
-        return {"times": [], "hour_labels": [], "models": [], "consensus": {}}
+        return {"times": [], "hour_labels": [], "local_labels": [], "local_tz_abbr": "", "models": [], "consensus": {}}
 
     axis_start = max(first_times) + timedelta(hours=start_offset)
     # Snap to the top of the hour
@@ -587,6 +590,25 @@ def build_model_matrix(models: list, n_hours: int = 24,
     axis = [axis_start + timedelta(hours=i) for i in range(n_hours)]
     axis_iso = [t.strftime("%Y-%m-%dT%H:%M") for t in axis]
     hour_labels = [t.strftime("%HZ") for t in axis]
+
+    # Local-time labels alongside Zulu, when a timezone is supplied. The axis
+    # datetimes are UTC (Open-Meteo is requested with timezone=UTC), so we
+    # attach UTC then convert to the local zone for display.
+    local_labels = []
+    local_tz_abbr = ""
+    if tz_str:
+        try:
+            import pytz
+            _ltz = pytz.timezone(tz_str)
+            for t in axis:
+                t_utc = t.replace(tzinfo=timezone.utc)
+                t_loc = t_utc.astimezone(_ltz)
+                local_labels.append(t_loc.strftime("%H"))
+            # Abbreviation from the first axis hour (handles DST correctly)
+            local_tz_abbr = axis[0].replace(tzinfo=timezone.utc).astimezone(_ltz).strftime("%Z")
+        except Exception:
+            local_labels = []
+            local_tz_abbr = ""
 
     # For each model, build a lookup from its timestamps to index, then sample
     # onto the common axis.
@@ -655,6 +677,8 @@ def build_model_matrix(models: list, n_hours: int = 24,
     return {
         "times": axis_iso,
         "hour_labels": hour_labels,
+        "local_labels": local_labels,
+        "local_tz_abbr": local_tz_abbr,
         "models": matrix_models,
         "consensus": {
             "wind_spread": wind_spread,
