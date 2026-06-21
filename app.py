@@ -2123,7 +2123,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-_lp_c1, _lp_c2, _lp_c3 = st.columns([1.2, 1, 2.4])
+_lp_c1, _lp_c2, _lp_spacer = st.columns([1.2, 1, 2.4])
 with _lp_c1:
     _lp_start = st.date_input(
         "Start date",
@@ -2153,98 +2153,140 @@ _lp_rows = _light_plan_cached(
     lat, lon, _lp_start.isoformat(), int(_lp_days), tz_str or "UTC"
 )
 
-# Build the sleek SVG timeline (18:00 → 06:00 frame). Renders via components
-# so the gradients/markers display exactly as designed.
+# Build the sleek SVG timeline (18:00 → 06:00 frame) entirely in Python and
+# emit static SVG markup. Rendered via st.markdown like the rest of ARMS, so
+# it doesn't depend on an iframe/JS component (which wasn't displaying).
 def _render_light_plan_svg(rows: list, tz_abbr_str: str) -> str:
-    import json as _json
-    data_js = _json.dumps([
-        {
-            "d": r["day_abbr"], "n": r["day_num"],
-            "ll": r["last_light"], "fl": r["first_light"],
-            "mr": r["moonrise"], "ms": r["moonset"],
-            "ill": r["moon_ill"], "allnight": r["moon_up_all_night"],
-        }
-        for r in rows
-    ])
+    W0, W1 = 18.0, 30.0
+    span = W1 - W0
+    L, R, top, rowH, gap = 56, 16, 6, 26, 5
+    VBW = 680
+    innerW = VBW - L - R
     n_rows = len(rows)
-    # Height: rows * (rowH+gap) + top + axis label band
-    svg_h = 6 + n_rows * (26 + 5) + 20
-    total_h = svg_h + 60   # + legend
-    return f"""
-<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-<div id="lpwrap" style="width:100%;"></div>
-<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:11px;color:#9CA3AF;margin-top:10px;padding-left:4px;">
-<span style="display:flex;align-items:center;gap:6px;"><span style="width:20px;height:7px;border-radius:4px;background:linear-gradient(90deg,#85B7EB,#0a0a0f);"></span>first / last light</span>
-<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;border-radius:4px;background:#050507;border:0.5px solid #2A3038;"></span>cycle of darkness</span>
-<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;border-radius:4px;background:#EADfae;"></span>moon up</span>
-<span style="color:#6B7280;margin-left:auto;">local time ({tz_abbr_str})</span>
-</div>
-</div>
-<script>
-(function(){{
-  const days={data_js};
-  const W0=18,W1=30,span=W1-W0;
-  const L=56,R=16,top=6,rowH=26,gap=5;
-  const VBW=680;
-  const innerW=VBW-L-R;
-  const xc=(h)=>L+((h-W0)/span)*innerW;
-  const H={svg_h};
-  let svg='<svg viewBox="0 0 '+VBW+' '+H+'" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Light planning timeline">';
-  svg+='<defs>';
-  days.forEach((r,i)=>{{
-    if(r.ll==null||r.fl==null){{ svg+='<linearGradient id="g'+i+'"><stop offset="0" stop-color="#85B7EB" stop-opacity="0.42"/></linearGradient>'; return; }}
-    const llo=((xc(r.ll)-L)/innerW), flo=((xc(r.fl)-L)/innerW);
-    svg+='<linearGradient id="g'+i+'" x1="0" x2="1" y1="0" y2="0">'+
-      '<stop offset="0" stop-color="#85B7EB" stop-opacity="0.42"/>'+
-      '<stop offset="'+Math.max(0,llo-0.05).toFixed(3)+'" stop-color="#85B7EB" stop-opacity="0.5"/>'+
-      '<stop offset="'+Math.max(0,llo).toFixed(3)+'" stop-color="#0a0a12"/>'+
-      '<stop offset="'+Math.min(1,flo).toFixed(3)+'" stop-color="#050507"/>'+
-      '<stop offset="'+Math.min(1,flo+0.05).toFixed(3)+'" stop-color="#85B7EB" stop-opacity="0.5"/>'+
-      '<stop offset="1" stop-color="#85B7EB" stop-opacity="0.42"/></linearGradient>';
-  }});
-  svg+='</defs>';
-  const tickH=[18,19,20,21,22,23,24,25,26,27,28,29,30];
-  const tickL=['18','19','20','21','22','23','00','01','02','03','04','05','06'];
-  tickH.forEach((th,i)=>{{
-    const px=xc(th); const major=(th%3===0);
-    svg+='<line x1="'+px+'" y1="'+top+'" x2="'+px+'" y2="'+(top+days.length*(rowH+gap)-gap)+'" stroke="rgba(128,128,128,'+(major?0.14:0.06)+')" stroke-width="1"/>';
-    svg+='<text x="'+px+'" y="'+(H-5)+'" text-anchor="middle" font-size="'+(major?9.5:8.5)+'" fill="rgba(150,150,150,'+(major?0.8:0.55)+')">'+tickL[i]+'</text>';
-  }});
-  days.forEach((r,i)=>{{
-    const y=top+i*(rowH+gap); const cy=y+rowH/2;
-    svg+='<rect x="'+L+'" y="'+y+'" width="'+innerW+'" height="'+rowH+'" rx="7" fill="url(#g'+i+')"/>';
-    if(r.mr!=null||r.ms!=null){{
-      const mrx=xc(Math.max(r.mr==null?W0:r.mr,W0));
-      const msx=xc(Math.min(r.ms==null?W1:r.ms,W1));
-      if(msx>mrx){{
-        const op=(r.ill/100*0.55+0.15).toFixed(2);
-        svg+='<rect x="'+mrx+'" y="'+(y+rowH-6)+'" width="'+(msx-mrx)+'" height="3.5" rx="1.75" fill="#EADfae" opacity="'+op+'"/>';
-        if(r.mr!=null && r.mr>=W0 && r.mr<=W1){{
-          const rad=2.2+r.ill/100*3;
-          svg+='<circle cx="'+mrx+'" cy="'+(y+rowH-4.25)+'" r="'+rad+'" fill="#EADfae" opacity="'+(r.ill/100*0.6+0.3).toFixed(2)+'"/>';
-        }}
-        if(r.ms!=null && r.ll!=null && r.ms>r.ll && r.ms<r.fl){{
-          svg+='<line x1="'+msx+'" y1="'+(y+2)+'" x2="'+msx+'" y2="'+(y+rowH-2)+'" stroke="#EADfae" stroke-width="1" stroke-dasharray="2 2" opacity="0.4"/>';
-        }}
-      }}
-    }}
-    svg+='<text x="'+(L-10)+'" y="'+(cy-1)+'" text-anchor="end" font-size="11" font-weight="500" fill="#E5E7EB">'+r.n+'</text>';
-    svg+='<text x="'+(L-10)+'" y="'+(cy+10)+'" text-anchor="end" font-size="8" fill="#6B7280" letter-spacing="0.5">'+r.d+'</text>';
-  }});
-  svg+='</svg>';
-  document.getElementById('lpwrap').innerHTML=svg;
-}})();
-</script>
-"""
+    svg_h = top + n_rows * (rowH + gap) + 20
 
-with _lp_c3:
-    st.empty()
+    def xc(h):
+        return L + ((h - W0) / span) * innerW
+
+    def clampf(v, lo, hi):
+        return max(lo, min(hi, v))
+
+    parts = [
+        f'<svg viewBox="0 0 {VBW} {svg_h}" width="100%" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="7-day light planning timeline">'
+    ]
+
+    # Gradient defs (one per night, anchored to that night's twilight edges)
+    parts.append("<defs>")
+    for i, r in enumerate(rows):
+        ll, fl = r["last_light"], r["first_light"]
+        if ll is None or fl is None:
+            parts.append(
+                f'<linearGradient id="lpg{i}"><stop offset="0" '
+                f'stop-color="#85B7EB" stop-opacity="0.42"/></linearGradient>'
+            )
+            continue
+        llo = clampf((xc(ll) - L) / innerW, 0.0, 1.0)
+        flo = clampf((xc(fl) - L) / innerW, 0.0, 1.0)
+        parts.append(
+            f'<linearGradient id="lpg{i}" x1="0" x2="1" y1="0" y2="0">'
+            f'<stop offset="0" stop-color="#85B7EB" stop-opacity="0.42"/>'
+            f'<stop offset="{max(0.0, llo - 0.05):.3f}" stop-color="#85B7EB" stop-opacity="0.5"/>'
+            f'<stop offset="{llo:.3f}" stop-color="#0a0a12"/>'
+            f'<stop offset="{flo:.3f}" stop-color="#050507"/>'
+            f'<stop offset="{min(1.0, flo + 0.05):.3f}" stop-color="#85B7EB" stop-opacity="0.5"/>'
+            f'<stop offset="1" stop-color="#85B7EB" stop-opacity="0.42"/>'
+            f'</linearGradient>'
+        )
+    parts.append("</defs>")
+
+    # Hour gridlines + axis labels
+    tick_h = [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    tick_l = ['18', '19', '20', '21', '22', '23', '00', '01', '02', '03', '04', '05', '06']
+    grid_bottom = top + n_rows * (rowH + gap) - gap
+    for th, tl in zip(tick_h, tick_l):
+        px = xc(th)
+        major = (th % 3 == 0)
+        parts.append(
+            f'<line x1="{px:.1f}" y1="{top}" x2="{px:.1f}" y2="{grid_bottom}" '
+            f'stroke="rgba(128,128,128,{0.14 if major else 0.06})" stroke-width="1"/>'
+        )
+        parts.append(
+            f'<text x="{px:.1f}" y="{svg_h - 5}" text-anchor="middle" '
+            f'font-size="{9.5 if major else 8.5}" '
+            f'fill="rgba(150,150,150,{0.8 if major else 0.55})" '
+            f'font-family="system-ui,sans-serif">{tl}</text>'
+        )
+
+    # Night rows
+    for i, r in enumerate(rows):
+        y = top + i * (rowH + gap)
+        cy = y + rowH / 2
+        ll, fl = r["last_light"], r["first_light"]
+        mr, ms, ill = r["moonrise"], r["moonset"], r["moon_ill"]
+
+        parts.append(
+            f'<rect x="{L}" y="{y}" width="{innerW}" height="{rowH}" rx="7" '
+            f'fill="url(#lpg{i})"/>'
+        )
+
+        # Moon up bar (clipped to frame) + moonrise dot + moonset tick
+        if mr is not None or ms is not None:
+            mr_eff = W0 if mr is None else mr
+            ms_eff = W1 if ms is None else ms
+            mrx = xc(clampf(mr_eff, W0, W1))
+            msx = xc(clampf(ms_eff, W0, W1))
+            if msx > mrx:
+                op = ill / 100 * 0.55 + 0.15
+                parts.append(
+                    f'<rect x="{mrx:.1f}" y="{y + rowH - 6}" width="{msx - mrx:.1f}" '
+                    f'height="3.5" rx="1.75" fill="#EADfae" opacity="{op:.2f}"/>'
+                )
+                if mr is not None and W0 <= mr <= W1:
+                    rad = 2.2 + ill / 100 * 3
+                    dot_op = ill / 100 * 0.6 + 0.3
+                    parts.append(
+                        f'<circle cx="{mrx:.1f}" cy="{y + rowH - 4.25}" '
+                        f'r="{rad:.1f}" fill="#EADfae" opacity="{dot_op:.2f}"/>'
+                    )
+                if ms is not None and ll is not None and fl is not None and ll < ms < fl:
+                    parts.append(
+                        f'<line x1="{msx:.1f}" y1="{y + 2}" x2="{msx:.1f}" '
+                        f'y2="{y + rowH - 2}" stroke="#EADfae" stroke-width="1" '
+                        f'stroke-dasharray="2 2" opacity="0.4"/>'
+                    )
+
+        # Day labels (left margin)
+        parts.append(
+            f'<text x="{L - 10}" y="{cy - 1:.0f}" text-anchor="end" font-size="11" '
+            f'font-weight="500" fill="#E5E7EB" font-family="system-ui,sans-serif">{r["day_num"]}</text>'
+        )
+        parts.append(
+            f'<text x="{L - 10}" y="{cy + 10:.0f}" text-anchor="end" font-size="8" '
+            f'fill="#6B7280" letter-spacing="0.5" font-family="system-ui,sans-serif">{r["day_abbr"]}</text>'
+        )
+
+    parts.append("</svg>")
+    svg = "".join(parts)
+
+    legend = (
+        f'<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;'
+        f'font-size:11px;color:#9CA3AF;margin-top:10px;padding-left:4px;">'
+        f'<span style="display:flex;align-items:center;gap:6px;"><span style="width:20px;height:7px;'
+        f'border-radius:4px;background:linear-gradient(90deg,#85B7EB,#0a0a0f);"></span>first / last light</span>'
+        f'<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;'
+        f'border-radius:4px;background:#050507;border:0.5px solid #2A3038;"></span>cycle of darkness</span>'
+        f'<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;'
+        f'border-radius:4px;background:#EADfae;"></span>moon up</span>'
+        f'<span style="color:#6B7280;margin-left:auto;">local time ({tz_abbr_str})</span>'
+        f'</div>'
+    )
+    return svg + legend
+
 
 if _lp_rows:
-    import streamlit.components.v1 as _components
-    _lp_html = _render_light_plan_svg(_lp_rows, astro['tz'])
-    _lp_height = 6 + len(_lp_rows) * (26 + 5) + 20 + 50
-    _components.html(_lp_html, height=_lp_height, scrolling=False)
+    st.markdown(_render_light_plan_svg(_lp_rows, astro['tz']), unsafe_allow_html=True)
 else:
     st.caption("Light planning data unavailable for this location/date.")
 
