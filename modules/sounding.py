@@ -604,20 +604,32 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         _shade_buoyancy(True)
         _shade_buoyancy(False)
 
-    # Environmental T (red) — with hover showing each data point
+    # Environmental T (red) — with hover showing each data point.
+    # IMPORTANT: plot in pressure-sorted (descending) order, not the raw array
+    # order. The raw profile prepends the surface point and then appends
+    # pressure levels; if the surface pressure interleaves with a level, or a
+    # provider returns a level slightly out of order, drawing in raw order
+    # makes the line jump vertically and zigzag. Sorting by descending pressure
+    # guarantees a monotonic, smoothly-connected trace.
+    _ord = np.argsort(-pressures)
+    _p_ord = pressures[_ord]
+    _t_ord = temps[_ord]
+    _td_ord = dewpts[_ord]
+    _z_ord = heights_m[_ord]
+
     hover_text = []
-    for i, p in enumerate(pressures):
-        h_m = heights_m[i] if not np.isnan(heights_m[i]) else None
+    for i in range(len(_p_ord)):
+        h_m = _z_ord[i] if not np.isnan(_z_ord[i]) else None
         h_ft = round(h_m * 3.28084) if h_m else None
         h_part = f"<br>{h_ft:,} ft ASL" if h_ft else ""
         hover_text.append(
-            f"<b>{int(p)} hPa</b>{h_part}<br>"
-            f"T = {temps[i]:.1f}°C<br>"
-            f"Td = {dewpts[i]:.1f}°C<br>"
-            f"Spread = {temps[i] - dewpts[i]:.1f}°C"
+            f"<b>{int(_p_ord[i])} hPa</b>{h_part}<br>"
+            f"T = {_t_ord[i]:.1f}\u00b0C<br>"
+            f"Td = {_td_ord[i]:.1f}\u00b0C<br>"
+            f"Spread = {_t_ord[i] - _td_ord[i]:.1f}\u00b0C"
         )
     fig.add_trace(go.Scatter(
-        x=skew_x(temps, pressures), y=pressures,
+        x=skew_x(_t_ord, _p_ord), y=_p_ord,
         mode="lines+markers", name="Temperature",
         line=dict(color="#ff4b4b", width=2.2),
         marker=dict(size=5, color="#ff4b4b"),
@@ -625,9 +637,9 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
         showlegend=False,
     ))
 
-    # Environmental Td (green)
+    # Environmental Td (green) — same sorted order
     fig.add_trace(go.Scatter(
-        x=skew_x(dewpts, pressures), y=pressures,
+        x=skew_x(_td_ord, _p_ord), y=_p_ord,
         mode="lines+markers", name="Dewpoint",
         line=dict(color="#2abf2a", width=2.2),
         marker=dict(size=5, color="#2abf2a"),
@@ -850,12 +862,21 @@ def render_sounding_plotly(profile: dict, parcel_lift_p: float,
                 tip_y = base_y * _paper_dy_to_logp_factor(tip_dpy)
                 _add_segment(base_x, base_y, tip_x, tip_y)
 
-    # Decluttered barb pass — every ~40 hPa
+    # Decluttered barb pass — every ~40 hPa. Iterate in descending-pressure
+    # order so the declutter spacing logic (which assumes monotonic pressure)
+    # works regardless of the raw profile ordering.
+    _barb_order = np.argsort(-pressures)
+    _barb_p = pressures[_barb_order]
+    _barb_ws = [wind_kt_list[i] for i in _barb_order]
+    _barb_wd = [wind_dir_list[i] for i in _barb_order]
     _last_barb_p = None
-    for p, ws, wd in zip(pressures, wind_kt_list, wind_dir_list):
+    for _bi in range(len(_barb_p)):
+        p = _barb_p[_bi]
+        ws = _barb_ws[_bi]
+        wd = _barb_wd[_bi]
         if ws is None or wd is None:
             continue
-        if _last_barb_p is not None and abs(_last_barb_p - p) < 40 and p != pressures[0]:
+        if _last_barb_p is not None and abs(_last_barb_p - p) < 40 and p != _barb_p[0]:
             continue
         _last_barb_p = p
         _draw_barb_glyph(p, ws, wd)
