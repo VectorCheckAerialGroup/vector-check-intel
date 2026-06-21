@@ -188,7 +188,7 @@ def _select_regional_model(lat: float, lon: float) -> tuple:
 _HOURLY_VARS = (
     "temperature_2m,relative_humidity_2m,wind_speed_10m,"
     "wind_direction_10m,wind_gusts_10m,surface_pressure,"
-    "precipitation_probability,weather_code"
+    "precipitation_probability,weather_code,visibility"
 )
 
 # Operational thresholds for flagging model divergence
@@ -220,6 +220,7 @@ class ModelForecast:
     pressure_hpa: list = field(default_factory=list)
     precip_prob: list = field(default_factory=list)
     wx_code: list = field(default_factory=list)
+    visibility_sm: list = field(default_factory=list)
     valid: bool = False
 
 
@@ -357,6 +358,9 @@ def _fetch_model(name: str, url: str, lat: float, lon: float) -> ModelForecast:
     mf.pressure_hpa = _safe_list("surface_pressure")
     mf.precip_prob = _safe_list("precipitation_probability")
     mf.wx_code = _safe_list("weather_code")
+    # Open-Meteo visibility is in meters; convert to statute miles for METAR
+    # comparability and aviation use.
+    mf.visibility_sm = _safe_list("visibility", 1.0 / 1609.344)
     mf.valid = len(mf.wind_kt) >= 24
 
     return mf
@@ -419,6 +423,9 @@ def _fetch_model_meteomatics(lat: float, lon: float, model: str = "mix",
     mf.pressure_hpa = _truncate("surface_pressure")
     mf.precip_prob = _truncate("precipitation_probability")
     mf.wx_code = _truncate("weather_code")
+    # Meteomatics visibility:m → statute miles. May be absent for some models.
+    _vis_m = _truncate("visibility")
+    mf.visibility_sm = [(v / 1609.344 if v is not None else None) for v in _vis_m]
     mf.valid = len(mf.wind_kt) >= 24
     return mf
 
@@ -509,6 +516,218 @@ def fetch_all_models(lat: float, lon: float) -> list:
             if mf.valid:
                 results.append(mf)
     return results
+
+
+# =============================================================================
+# MODEL COMPARISON MATRIX — per-hour, per-model side-by-side
+# =============================================================================
+# Builds an aligned matrix for the side-by-side comparison view: each model is
+# a row, each forecast hour is a column. All models are interpolated onto a
+# single common time axis (the union of hours, hourly cadence) so a column
+# always represents the same valid time across every model, even if providers
+# return slightly different start hours or horizons.
+
+def build_model_matrix(models: list, n_hours: int = 24,
+                       start_offset: int = 0) -> dict:
+    """Aligns all models onto a common hourly axis for side-by-side display.
+
+    Args:
+        models:        list of valid ModelForecast objects (from fetch_all_models)
+        n_hours:       number of hourly columns to produce
+        start_offset:  hours from the first common timestamp to begin (0 = now)
+
+    Returns a dict:
+        {
+          "times":  [ISO strings, len n_hours],     # the common column axis
+          "hour_labels": ["00Z","01Z",...],          # short labels for columns
+          "models": [
+              {
+                "name": "ECMWF",
+                "wind_kt":   [...], "wind_dir": [...], "gust_kt": [...],
+                "temp_c":    [...], "rh": [...], "visibility_sm": [...],
+              }, ...
+          ],
+          "consensus": {                              # per-hour cross-model stats
+              "wind_spread": [...], "temp_spread": [...],
+              "dir_spread":  [...], "vis_min": [...],
+          }
+        }
+    Values are None where a model has no data for that hour.
+    """
+    from datetime import datetime, timedelta
+
+    valid = [m for m in models if m.valid and m.times]
+    if not valid:
+        return {"times": [], "hour_labels": [], "models": [], "consensus": {}}
+
+    # Establish the common axis from the LATEST first-timestamp across models
+    # (so every model has data at the start) parsed to datetimes.
+    def _parse(ts):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", ""))
+        except (ValueError, AttributeError):
+            return None
+
+    first_times = []
+    for m in valid:
+        t0 = _parse(m.times[0])
+        if t0 is not None:
+            first_times.append(t0)
+    if not first_times:
+        return {"times": [], "hour_labels": [], "models": [], "consensus": {}}
+
+    axis_start = max(first_times) + timedelta(hours=start_offset)
+    # Snap to the top of the hour
+    axis_start = axis_start.replace(minute=0, second=0, microsecond=0)
+    axis = [axis_start + timedelta(hours=i) for i in range(n_hours)]
+    axis_iso = [t.strftime("%Y-%m-%dT%H:%M") for t in axis]
+    hour_labels = [t.strftime("%HZ") for t in axis]
+
+    # For each model, build a lookup from its timestamps to index, then sample
+    # onto the common axis.
+    def _index_map(m):
+        out = {}
+        for i, ts in enumerate(m.times):
+            dt = _parse(ts)
+            if dt is not None:
+                out[dt.replace(minute=0, second=0, microsecond=0)] = i
+        return out
+
+    matrix_models = []
+    for m in valid:
+        imap = _index_map(m)
+
+        def _sample(arr):
+            row = []
+            for t in axis:
+                idx = imap.get(t)
+                if idx is not None and idx < len(arr) and arr[idx] is not None:
+                    row.append(arr[idx])
+                else:
+                    row.append(None)
+            return row
+
+        matrix_models.append({
+            "name": m.name,
+            "wind_kt": _sample(m.wind_kt),
+            "wind_dir": _sample(m.wind_dir),
+            "gust_kt": _sample(m.gust_kt),
+            "temp_c": _sample(m.temp_c),
+            "rh": _sample(m.rh),
+            "visibility_sm": _sample(m.visibility_sm) if m.visibility_sm else [None] * n_hours,
+        })
+
+    # Per-hour consensus stats across models (for highlighting agreement /
+    # divergence in the UI without re-deriving in app code).
+    def _col_values(key, hour_i):
+        vals = [mm[key][hour_i] for mm in matrix_models
+                if mm[key][hour_i] is not None]
+        return vals
+
+    def _circ_spread(dirs):
+        """Max pairwise angular separation (0-180) among a set of bearings."""
+        if len(dirs) < 2:
+            return 0.0
+        max_sep = 0.0
+        for i in range(len(dirs)):
+            for j in range(i + 1, len(dirs)):
+                d = abs(dirs[i] - dirs[j]) % 360
+                d = min(d, 360 - d)
+                max_sep = max(max_sep, d)
+        return max_sep
+
+    wind_spread, temp_spread, dir_spread, vis_min = [], [], [], []
+    for hi in range(n_hours):
+        wv = _col_values("wind_kt", hi)
+        tv = _col_values("temp_c", hi)
+        dv = _col_values("wind_dir", hi)
+        vv = _col_values("visibility_sm", hi)
+        wind_spread.append(round(max(wv) - min(wv), 1) if len(wv) >= 2 else 0.0)
+        temp_spread.append(round(max(tv) - min(tv), 1) if len(tv) >= 2 else 0.0)
+        dir_spread.append(round(_circ_spread(dv), 0) if len(dv) >= 2 else 0.0)
+        vis_min.append(round(min(vv), 1) if vv else None)
+
+    return {
+        "times": axis_iso,
+        "hour_labels": hour_labels,
+        "models": matrix_models,
+        "consensus": {
+            "wind_spread": wind_spread,
+            "temp_spread": temp_spread,
+            "dir_spread": dir_spread,
+            "vis_min": vis_min,
+        },
+    }
+
+
+def summarize_matrix(matrix: dict) -> list:
+    """Produces a short list of notable agreement/divergence callouts for the
+    side-by-side view. Returns a list of (severity, text) tuples — kept terse
+    so the UI shows only a couple of points, per design.
+
+    severity is one of: "alert" (large divergence), "info" (notable agreement
+    or moderate divergence).
+    """
+    if not matrix.get("models"):
+        return []
+
+    cons = matrix["consensus"]
+    labels = matrix["hour_labels"]
+    notes = []
+
+    # Find the worst wind divergence hour
+    ws = cons.get("wind_spread", [])
+    if ws:
+        max_w = max(ws)
+        max_w_i = ws.index(max_w)
+        if max_w >= 10:
+            notes.append(("alert",
+                f"Large wind disagreement at {labels[max_w_i]} "
+                f"(\u00b1{max_w:.0f} kt across models) \u2014 low confidence, "
+                f"recheck before committing."))
+        elif max_w >= 6:
+            notes.append(("info",
+                f"Moderate wind spread peaks at {labels[max_w_i]} "
+                f"(\u00b1{max_w:.0f} kt)."))
+
+    # Direction divergence
+    ds = cons.get("dir_spread", [])
+    if ds:
+        max_d = max(ds)
+        max_d_i = ds.index(max_d)
+        if max_d >= 90:
+            notes.append(("alert",
+                f"Wind direction splits badly at {labels[max_d_i]} "
+                f"({max_d:.0f}\u00b0 spread) \u2014 models disagree on flow regime."))
+
+    # Temperature divergence
+    ts = cons.get("temp_spread", [])
+    if ts:
+        max_t = max(ts)
+        max_t_i = ts.index(max_t)
+        if max_t >= 5:
+            notes.append(("info",
+                f"Temperature spread reaches {max_t:.0f}\u00b0C at {labels[max_t_i]}."))
+
+    # Strong agreement window (first 12h with consistently low spread)
+    if ws and len(ws) >= 6:
+        early = ws[:12]
+        if early and max(early) <= 3:
+            notes.append(("info",
+                "Strong model agreement through the first 12 h "
+                "(wind within \u00b13 kt) \u2014 high confidence near-term."))
+
+    # Visibility concern
+    vm = cons.get("vis_min", [])
+    vm_valid = [(i, v) for i, v in enumerate(vm) if v is not None]
+    if vm_valid:
+        worst_i, worst_v = min(vm_valid, key=lambda x: x[1])
+        if worst_v < 3.0:
+            notes.append(("alert",
+                f"At least one model drops visibility to {worst_v:.1f} SM "
+                f"at {labels[worst_i]}."))
+
+    return notes[:4]   # keep it to a few points, per design
 
 
 # =============================================================================
