@@ -120,6 +120,44 @@ def _build_model_routes() -> dict:
 
 MODEL_ROUTES = _build_model_routes()
 
+# Approximate native horizontal grid resolution (km) for each model, used to
+# order the comparison matrix from highest-resolution (finest) to lowest.
+# Finer-resolution mesoscale models resolve terrain and convection better and
+# generally lead near-term; operators expect them at the top of the stack.
+# MIX is a multi-model blend with no single native grid; we place it just
+# below the true mesoscale models since its effective skill is mesoscale-class.
+MODEL_RESOLUTION_KM = {
+    "HRRR":   3.0,    # NOAA HRRR CONUS 3 km
+    "NAM":    3.0,    # NAM CONUS nest 3 km
+    "HRDPS":  2.5,    # ECCC HRDPS 2.5 km (finest)
+    "HARMONIE": 2.0,
+    "AROME":  1.3,
+    "MIX":    4.0,    # Meteomatics blend — mesoscale-class effective skill
+    "ICON-EU": 7.0,   # DWD ICON-EU regional
+    "ICON":   11.0,   # DWD ICON global ~11 km
+    "GFS":    13.0,   # NOAA GFS ~13 km
+    "AIFS":   28.0,   # ECMWF AIFS ~0.25deg
+    "ECMWF":  9.0,    # ECMWF IFS HRES ~9 km
+    "GEM":    15.0,
+    "ACCESS-G": 12.0,
+}
+# Default for any model not in the table (treat as coarse so it sorts last).
+_DEFAULT_RES_KM = 25.0
+
+
+def _resolution_rank(model_name: str) -> float:
+    """Returns the sort key (km) for a model name. Lower = finer = sorts first.
+    Tolerates name variants (e.g. 'HRDPS (regional)') by prefix match."""
+    if model_name in MODEL_RESOLUTION_KM:
+        return MODEL_RESOLUTION_KM[model_name]
+    # Prefix / contains match for decorated names
+    up = model_name.upper()
+    for key, val in MODEL_RESOLUTION_KM.items():
+        if key.upper() in up:
+            return val
+    return _DEFAULT_RES_KM
+
+
 # Backward-compat for any external code that still imports MODEL_ENDPOINTS.
 # Resolves to the URL portion of routes that go through Open-Meteo (for the
 # meteomatics:// scheme tag) so legacy callers can still construct fetches.
@@ -621,7 +659,10 @@ def build_model_matrix(models: list, n_hours: int = 24,
         return out
 
     matrix_models = []
-    for m in valid:
+    # Order rows by native resolution, finest (smallest km) first, so the
+    # mesoscale models lead the stack and the global models follow.
+    valid_sorted = sorted(valid, key=lambda m: _resolution_rank(m.name))
+    for m in valid_sorted:
         imap = _index_map(m)
 
         def _sample(arr):
