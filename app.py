@@ -2848,21 +2848,33 @@ else:
         st.markdown(_rh_html, unsafe_allow_html=True)
 
         # ============ VISIBILITY TABLE ======================================
-        # Only render if at least one model returned visibility data.
-        _has_vis = any(
-            any(v is not None for v in _mm["visibility_sm"][:_ncol])
-            for _mm in _mtx_models
-        )
-        if _has_vis:
+        # Visibility is a diagnostic field most NWP models don't output. On our
+        # providers only a subset carry it: NAM/ICON/GFS via Open-Meteo's own
+        # derivation, and MIX via Meteomatics. ECMWF-IFS, AIFS, HRDPS and the
+        # raw Meteomatics models return no visibility. Rather than show a table
+        # full of dashes, we render ONLY the models that actually have vis data
+        # so the table stays dense and honest.
+        _vis_models = [
+            _mm for _mm in _mtx_models
+            if any(v is not None for v in _mm["visibility_sm"][:_ncol])
+        ]
+        if _vis_models:
+            _omitted = [_mm["name"] for _mm in _mtx_models if _mm not in _vis_models]
+            _omit_note = ""
+            if _omitted:
+                _omit_note = (
+                    f'<span style="color:#4B5563;text-transform:none;letter-spacing:0;'
+                    f'font-weight:400;"> \u00b7 not output by {", ".join(_omitted)}</span>'
+                )
             st.markdown(
-                '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
-                'letter-spacing:0.5px;margin:16px 0 6px;font-weight:500;">Visibility '
-                '<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
-                '(SM)</span></div>',
+                f'<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
+                f'letter-spacing:0.5px;margin:16px 0 6px;font-weight:500;">Visibility '
+                f'<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
+                f'(SM)</span>{_omit_note}</div>',
                 unsafe_allow_html=True,
             )
             _vis_html = _hdr_row("Model")
-            for _mm in _mtx_models:
+            for _mm in _vis_models:
                 _row = _model_name_cell(_mm["name"])
                 for _hi in range(_ncol):
                     _v = _mm["visibility_sm"][_hi]
