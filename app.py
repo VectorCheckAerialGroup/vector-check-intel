@@ -26,6 +26,7 @@ from modules.climate_ingest import get_climate_context
 from modules.ensemble_analysis import (
     fetch_all_models, compute_ensemble_blocks,
     identify_risk_windows, generate_briefing,
+    build_model_matrix, summarize_matrix,
 )
 from modules.model_performance import (
     compute_performance_scorecard,
@@ -2580,7 +2581,8 @@ st.subheader("Model Analysis")
 
 @st.cache_data(ttl=3600, show_spinner="Fetching multi-model ensemble...")
 def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
-    """Fetches 4 NWP models and computes ensemble analysis. Cached 1 hour."""
+    """Fetches all NWP models and computes ensemble analysis + comparison
+    matrix. Cached 1 hour."""
     models = fetch_all_models(e_lat, e_lon)
     if not models:
         return {"error": "No models returned data."}
@@ -2588,9 +2590,16 @@ def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
     blocks = compute_ensemble_blocks(models)
     risks = identify_risk_windows(blocks)
 
+    # Build the side-by-side comparison matrix (24 hourly columns) and its
+    # terse agreement/divergence callouts.
+    matrix = build_model_matrix(models, n_hours=24, start_offset=0)
+    matrix_notes = summarize_matrix(matrix)
+
     return {
         "model_count": len(models),
         "models_used": [m.name for m in models],
+        "matrix": matrix,
+        "matrix_notes": matrix_notes,
         "blocks": [
             {
                 "block_label": b.block_label, "start_hour": b.start_hour,
@@ -2659,123 +2668,230 @@ else:
         unsafe_allow_html=True,
     )
 
-    # Two columns: 12-hour forecast block table on left, narrative on right
-    _ma_left, _ma_right = st.columns([1, 1])
+    # =========================================================================
+    # SIDE-BY-SIDE MODEL COMPARISON MATRIX
+    # One table per variable. Hours run left→right as columns; each model is a
+    # row. Wind shows a direction arrow + speed; temp/RH/vis show the value
+    # with deviation-based coloring. Brief callouts sit above the tables.
+    # =========================================================================
+    _mtx = _ens.get("matrix") or {}
+    _mtx_models = _mtx.get("models") or []
+    _hour_labels = _mtx.get("hour_labels") or []
+    _consensus = _mtx.get("consensus") or {}
 
-    with _ma_left:
+    if not _mtx_models or not _hour_labels:
+        st.info("Comparison matrix unavailable — insufficient aligned model data.")
+    else:
+        # ---- Terse callouts (a couple points only, per design) ----
+        _notes = _ens.get("matrix_notes") or []
+        if _notes:
+            _note_html = ""
+            for _sev, _txt in _notes:
+                _n_clr = "#ff6b4a" if _sev == "alert" else "#9CA3AF"
+                _n_icon = "\u26a0" if _sev == "alert" else "\u25cf"
+                _note_html += (
+                    f'<div style="font-size:0.78rem;color:{_n_clr};margin:3px 0;line-height:1.4;">'
+                    f'<span style="font-size:0.6rem;margin-right:7px;vertical-align:middle;">{_n_icon}</span>'
+                    f'{_txt}</div>'
+                )
+            st.markdown(
+                f'<div style="margin-bottom:16px;padding:10px 14px;background:#13171C;'
+                f'border-radius:6px;">{_note_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Number of hourly columns to display. 24 is a lot horizontally; show
+        # an operator-selectable horizon so it stays readable.
+        _mtx_hours = st.select_slider(
+            "Forecast horizon",
+            options=[6, 12, 18, 24],
+            value=12,
+            format_func=lambda x: f"{x} h",
+            key="matrix_horizon",
+        )
+        _ncol = min(_mtx_hours, len(_hour_labels))
+
+        # Shared column template: model-name column + N hour columns.
+        _name_w = 78
+        _col_w = max(34, int((1100 - _name_w) / _ncol))   # responsive-ish
+        _grid = f"{_name_w}px repeat({_ncol}, minmax(30px, 1fr))"
+
+        def _wind_arrow(deg):
+            """Unicode arrow pointing in the direction the wind is blowing TO.
+            Meteorological convention: wind_dir is the direction FROM, so the
+            arrow points toward (deg + 180)."""
+            if deg is None:
+                return "\u00b7"
+            # 8-point compass arrows. Arrow shows flow direction (FROM+180).
+            arrows = ["\u2193", "\u2199", "\u2190", "\u2196",
+                      "\u2191", "\u2197", "\u2192", "\u2198"]
+            # deg is FROM direction; index by (deg) since ↓ at 0° = wind from N blowing S
+            idx = int(((deg % 360) + 22.5) // 45) % 8
+            return arrows[idx]
+
+        def _hdr_row(title):
+            cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
+                     f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;">{title}</div>')
+            for hl in _hour_labels[:_ncol]:
+                cells += (f'<div style="font-size:0.58rem;color:#6B7280;text-align:center;'
+                          f'padding:4px 2px;font-variant-numeric:tabular-nums;">{hl}</div>')
+            return (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                    f'margin-bottom:1px;">{cells}</div>')
+
+        def _model_name_cell(name):
+            return (f'<div style="font-size:0.72rem;color:#D1D5DB;padding:4px 4px;'
+                    f'background:#161A1F;white-space:nowrap;overflow:hidden;'
+                    f'text-overflow:ellipsis;">{name}</div>')
+
+        # ============ WIND TABLE (arrow + speed, gust on hover via title) ====
         st.markdown(
-            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-bottom:8px;font-weight:500;">12-hour forecast blocks</div>',
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
+            'letter-spacing:0.5px;margin:6px 0 6px;font-weight:500;">Wind '
+            '<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
+            '(arrow = flow direction, number = kt)</span></div>',
             unsafe_allow_html=True,
         )
+        _wind_html = _hdr_row("Model")
+        for _mm in _mtx_models:
+            _row = _model_name_cell(_mm["name"])
+            for _hi in range(_ncol):
+                _w = _mm["wind_kt"][_hi]
+                _d = _mm["wind_dir"][_hi]
+                _g = _mm["gust_kt"][_hi]
+                _spread = _consensus.get("wind_spread", [0] * _ncol)
+                _sp = _spread[_hi] if _hi < len(_spread) else 0
+                # Color the cell background subtly by cross-model spread at this
+                # hour: green calm agreement, amber moderate, red high.
+                if _sp >= 10:    _bg = "rgba(255,107,74,0.14)"
+                elif _sp >= 6:   _bg = "rgba(229,142,38,0.12)"
+                else:            _bg = "#161A1F"
+                if _w is None:
+                    _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                             f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                else:
+                    _arr = _wind_arrow(_d)
+                    _ttl = f"{_w:.0f} kt" + (f" G{_g:.0f}" if _g is not None else "")
+                    _w_clr = "#ff6b4a" if _w >= 25 else "#E58E26" if _w >= 15 else "#D1D5DB"
+                    _cell = (f'<div title="{_ttl}" style="background:{_bg};padding:4px 2px;'
+                             f'text-align:center;font-variant-numeric:tabular-nums;">'
+                             f'<span style="font-size:0.78rem;color:#7DA3C9;">{_arr}</span>'
+                             f'<span style="font-size:0.72rem;color:{_w_clr};margin-left:1px;">{_w:.0f}</span>'
+                             f'</div>')
+                _row += _cell
+            _wind_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                           f'margin-bottom:1px;">{_row}</div>')
+        st.markdown(_wind_html, unsafe_allow_html=True)
 
-        # Block table — sized to fit comfortably in a half-width column
-        _blk_grid = "120px 80px 60px 55px 80px 55px 50px"
-        _blk_header = (
-            f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;margin-bottom:1px;">'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;letter-spacing:0.3px;">Block</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Wind</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Spread</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Gust</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Temp</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Precip</div>'
-            f'<div style="font-size:0.66rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Conf</div>'
-            f'</div>'
-        )
-        st.markdown(_blk_header, unsafe_allow_html=True)
-
-        for _b in _ens["blocks"]:
-            _w_spr_clr = "#ff6b4a" if _b["wind_spread"] >= 10 else "#E58E26" if _b["wind_spread"] >= 6 else "#9CA3AF"
-            _conf_badge_clr = _conf_colors.get(_b["confidence"], "#9CA3AF")
-            _pp_str = f'{_b["precip_prob_max"]:.0f}%' if _b["precip_prob_max"] >= 10 else "\u2014"
-            _pp_clr = "#E58E26" if _b["precip_prob_max"] >= 50 else "#9CA3AF"
-
-            _blk_row = (
-                f'<div style="display:grid;grid-template-columns:{_blk_grid};gap:1px;">'
-                f'<div style="font-size:0.78rem;color:#D1D5DB;padding:5px 6px;background:#161A1F;">{_b["block_label"]}</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["wind_min"]:.0f}-{_b["wind_max"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:{_w_spr_clr};padding:5px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">'
-                f'\u00b1{_b["wind_spread"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["gust_max"]:.0f} kt</div>'
-                f'<div style="font-size:0.78rem;color:#E5E7EB;padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">'
-                f'{_b["temp_min"]:.0f}-{_b["temp_max"]:.0f}\u00b0C</div>'
-                f'<div style="font-size:0.78rem;color:{_pp_clr};padding:5px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_pp_str}</div>'
-                f'<div style="font-size:0.72rem;color:{_conf_badge_clr};padding:5px 6px;background:#161A1F;font-weight:600;">'
-                f'{_b["confidence"][:3]}</div>'
-                f'</div>'
-            )
-            st.markdown(_blk_row, unsafe_allow_html=True)
-
-    with _ma_right:
+        # ============ TEMPERATURE TABLE =====================================
         st.markdown(
-            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-bottom:8px;font-weight:500;">Consensus &amp; risk</div>',
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
+            'letter-spacing:0.5px;margin:16px 0 6px;font-weight:500;">Temperature '
+            '<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
+            '(\u00b0C)</span></div>',
             unsafe_allow_html=True,
         )
+        _temp_html = _hdr_row("Model")
+        for _mm in _mtx_models:
+            _row = _model_name_cell(_mm["name"])
+            for _hi in range(_ncol):
+                _t = _mm["temp_c"][_hi]
+                _tspread = _consensus.get("temp_spread", [0] * _ncol)
+                _tsp = _tspread[_hi] if _hi < len(_tspread) else 0
+                if _tsp >= 5:    _bg = "rgba(229,142,38,0.12)"
+                else:            _bg = "#161A1F"
+                if _t is None:
+                    _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                             f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                else:
+                    # Color by absolute temperature (cold blue → hot red)
+                    if _t <= 0:     _t_clr = "#7DA3C9"
+                    elif _t <= 10:  _t_clr = "#9CB8D4"
+                    elif _t <= 20:  _t_clr = "#D1D5DB"
+                    elif _t <= 28:  _t_clr = "#E58E26"
+                    else:           _t_clr = "#ff6b4a"
+                    _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                             f'font-size:0.72rem;color:{_t_clr};font-variant-numeric:tabular-nums;">'
+                             f'{_t:.0f}</div>')
+                _row += _cell
+            _temp_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                           f'margin-bottom:1px;">{_row}</div>')
+        st.markdown(_temp_html, unsafe_allow_html=True)
 
-        # Plain-English consensus paragraph
-        if _ens_brief.consensus_summary:
+        # ============ RELATIVE HUMIDITY TABLE ===============================
+        st.markdown(
+            '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
+            'letter-spacing:0.5px;margin:16px 0 6px;font-weight:500;">Relative Humidity '
+            '<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
+            '(%)</span></div>',
+            unsafe_allow_html=True,
+        )
+        _rh_html = _hdr_row("Model")
+        for _mm in _mtx_models:
+            _row = _model_name_cell(_mm["name"])
+            for _hi in range(_ncol):
+                _r = _mm["rh"][_hi]
+                if _r is None:
+                    _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
+                             f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                else:
+                    # High RH (fog/precip risk) amber→red; dry neutral
+                    if _r >= 95:    _r_clr = "#ff6b4a"
+                    elif _r >= 85:  _r_clr = "#E58E26"
+                    elif _r >= 60:  _r_clr = "#D1D5DB"
+                    else:           _r_clr = "#9CA3AF"
+                    _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
+                             f'font-size:0.72rem;color:{_r_clr};font-variant-numeric:tabular-nums;">'
+                             f'{_r:.0f}</div>')
+                _row += _cell
+            _rh_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                         f'margin-bottom:1px;">{_row}</div>')
+        st.markdown(_rh_html, unsafe_allow_html=True)
+
+        # ============ VISIBILITY TABLE ======================================
+        # Only render if at least one model returned visibility data.
+        _has_vis = any(
+            any(v is not None for v in _mm["visibility_sm"][:_ncol])
+            for _mm in _mtx_models
+        )
+        if _has_vis:
             st.markdown(
-                f'<div style="font-size:0.85rem;color:#D1D5DB;line-height:1.55;margin-bottom:12px;">'
-                f'{_ens_brief.consensus_summary}</div>',
+                '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
+                'letter-spacing:0.5px;margin:16px 0 6px;font-weight:500;">Visibility '
+                '<span style="color:#4B5563;text-transform:none;letter-spacing:0;">'
+                '(SM)</span></div>',
                 unsafe_allow_html=True,
             )
+            _vis_html = _hdr_row("Model")
+            for _mm in _mtx_models:
+                _row = _model_name_cell(_mm["name"])
+                for _hi in range(_ncol):
+                    _v = _mm["visibility_sm"][_hi]
+                    if _v is None:
+                        _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
+                                 f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                    else:
+                        # Aviation-relevant thresholds: <1 red, <3 amber, else ok
+                        if _v < 1.0:    _v_clr = "#ff6b4a"
+                        elif _v < 3.0:  _v_clr = "#E58E26"
+                        else:           _v_clr = "#9CA3AF"
+                        _vtxt = f"{_v:.0f}" if _v >= 10 else f"{_v:.1f}"
+                        _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
+                                 f'font-size:0.72rem;color:{_v_clr};font-variant-numeric:tabular-nums;">'
+                                 f'{_vtxt}</div>')
+                    _row += _cell
+                _vis_html += (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
+                              f'margin-bottom:1px;">{_row}</div>')
+            st.markdown(_vis_html, unsafe_allow_html=True)
 
-        # Wind + precip summary
-        _summary_parts = []
-        if _ens_brief.wind_summary:
-            _summary_parts.append(_ens_brief.wind_summary)
-        if _ens_brief.precip_summary:
-            _summary_parts.append(_ens_brief.precip_summary)
-        if _summary_parts:
-            st.markdown(
-                f'<div style="font-size:0.8rem;color:#9CA3AF;line-height:1.55;margin-bottom:12px;">'
-                f'{"<br>".join(_summary_parts)}</div>',
-                unsafe_allow_html=True,
-            )
-
-        # Risk windows
-        if _ens["risks"]:
-            st.markdown(
-                '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-                'margin-top:8px;margin-bottom:6px;font-weight:500;">Risk Windows</div>',
-                unsafe_allow_html=True,
-            )
-            for _r in _ens["risks"]:
-                _r_icon = "\u26a0" if _r["severity"] == "ALERT" else "\u25cf"
-                _r_clr = "#ff6b4a" if _r["severity"] == "ALERT" else "#E58E26"
-                st.markdown(
-                    f'<div style="font-size:0.78rem;color:{_r_clr};margin:4px 0;line-height:1.4;">'
-                    f'<span style="font-size:0.65rem;margin-right:6px;">{_r_icon}</span>'
-                    f'<span style="font-weight:500;">{_r["label"]}</span>'
-                    f' \u2014 <span style="color:#9CA3AF;">{_r["detail"]}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-        # Climate anomalies
-        if _ens_brief.anomaly_flags:
-            st.markdown(
-                '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-                'margin-top:10px;margin-bottom:6px;font-weight:500;">Climate Anomalies</div>',
-                unsafe_allow_html=True,
-            )
-            for _af in _ens_brief.anomaly_flags[:5]:
-                st.markdown(
-                    f'<div style="font-size:0.78rem;color:#E58E26;margin:3px 0;line-height:1.4;">\u25cf {_af}</div>',
-                    unsafe_allow_html=True,
-                )
-
-        # Confidence footer
-        if _ens_brief.confidence_summary:
-            st.markdown(
-                f'<div style="font-size:0.72rem;color:#6B7280;margin-top:12px;line-height:1.5;'
-                f'padding-top:10px;border-top:1px solid #2A3038;">'
-                f'{_ens_brief.confidence_summary}</div>',
-                unsafe_allow_html=True,
-            )
+        # Legend
+        st.markdown(
+            '<div style="font-size:0.64rem;color:#6B7280;margin-top:14px;line-height:1.5;">'
+            'Columns are forecast hours (Z). Highlighted cells flag cross-model '
+            'disagreement at that hour (wind \u2265 6 kt amber / \u2265 10 kt red spread; '
+            'temp \u2265 5\u00b0C amber). Hover a wind cell for exact speed and gust.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
