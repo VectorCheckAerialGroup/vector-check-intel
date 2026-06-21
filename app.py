@@ -2580,7 +2580,7 @@ st.divider()
 st.subheader("Model Analysis")
 
 @st.cache_data(ttl=3600, show_spinner="Fetching multi-model ensemble...")
-def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
+def _fetch_ensemble_cached(e_lat: float, e_lon: float, e_tz: str = None) -> dict:
     """Fetches all NWP models and computes ensemble analysis + comparison
     matrix. Cached 1 hour."""
     models = fetch_all_models(e_lat, e_lon)
@@ -2591,8 +2591,8 @@ def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
     risks = identify_risk_windows(blocks)
 
     # Build the side-by-side comparison matrix (24 hourly columns) and its
-    # terse agreement/divergence callouts.
-    matrix = build_model_matrix(models, n_hours=24, start_offset=0)
+    # terse agreement/divergence callouts. tz_str enables local-time labels.
+    matrix = build_model_matrix(models, n_hours=24, start_offset=0, tz_str=e_tz)
     matrix_notes = summarize_matrix(matrix)
 
     return {
@@ -2628,7 +2628,7 @@ def _fetch_ensemble_cached(e_lat: float, e_lon: float) -> dict:
         "overall_confidence": "HIGH",
     }
 
-_ens = _fetch_ensemble_cached(lat, lon)
+_ens = _fetch_ensemble_cached(lat, lon, tz_str)
 
 if _ens.get("error"):
     st.warning(f"Model analysis unavailable: {_ens['error']}")
@@ -2729,12 +2729,33 @@ else:
             idx = int(((deg % 360) + 22.5) // 45) % 8
             return arrows[idx]
 
+        _local_labels = _mtx.get("local_labels") or []
+        _local_abbr = _mtx.get("local_tz_abbr") or ""
+        _has_local = len(_local_labels) >= _ncol
+
         def _hdr_row(title):
-            cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
-                     f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;">{title}</div>')
-            for hl in _hour_labels[:_ncol]:
-                cells += (f'<div style="font-size:0.58rem;color:#6B7280;text-align:center;'
-                          f'padding:4px 2px;font-variant-numeric:tabular-nums;">{hl}</div>')
+            # Header label cell. When local time is available, show two lines:
+            # local hour on top, Zulu beneath, so operators can read either.
+            if _has_local:
+                _title_sub = f'{_local_abbr}/Z' if _local_abbr else 'Local/Z'
+                cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
+                         f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;'
+                         f'line-height:1.25;">{title}'
+                         f'<div style="font-size:0.5rem;color:#4B5563;font-weight:400;">'
+                         f'{_title_sub}</div></div>')
+                for _ci in range(_ncol):
+                    _loc = _local_labels[_ci]
+                    _zul = _hour_labels[_ci].replace("Z", "")
+                    cells += (f'<div style="font-size:0.58rem;color:#6B7280;text-align:center;'
+                              f'padding:4px 2px;font-variant-numeric:tabular-nums;line-height:1.25;">'
+                              f'<span style="color:#9CA3AF;">{_loc}</span>'
+                              f'<div style="font-size:0.5rem;color:#4B5563;">{_zul}z</div></div>')
+            else:
+                cells = (f'<div style="font-size:0.62rem;color:#9CA3AF;font-weight:600;'
+                         f'text-transform:uppercase;letter-spacing:0.3px;padding:4px 4px;">{title}</div>')
+                for hl in _hour_labels[:_ncol]:
+                    cells += (f'<div style="font-size:0.58rem;color:#6B7280;text-align:center;'
+                              f'padding:4px 2px;font-variant-numeric:tabular-nums;">{hl}</div>')
             return (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
                     f'margin-bottom:1px;">{cells}</div>')
 
