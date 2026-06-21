@@ -74,21 +74,26 @@ def _build_model_routes() -> dict:
     # fall back to Open-Meteo's raw ECMWF
     routes["ECMWF"] = ("meteomatics", "ecmwf-ifs") if mm else ("open-meteo", _om_url("ecmwf"))
 
-    # GFS — prefer Meteomatics, fall back to Open-Meteo
-    routes["GFS"] = ("meteomatics", "ncep-gfs") if mm else ("open-meteo", _om_url("gfs"))
+    # GFS — route to Open-Meteo unconditionally, even when Meteomatics
+    # credentials exist. Rationale: GFS is raw NOAA data identical on both
+    # providers (no MIX-style bias correction), so Meteomatics adds zero
+    # quality. Open-Meteo additionally exposes derived VISIBILITY for GFS,
+    # while Meteomatics blocklists visibility:m for ncep-gfs (it 404s). Routing
+    # here gains a visibility row in the comparison matrix and saves quota.
+    routes["GFS"] = ("open-meteo", _om_url("gfs"))
 
-    # HRRR — prefer Meteomatics, fall back to Open-Meteo.
+    # HRRR — route to Open-Meteo unconditionally. Same reasoning as GFS: HRRR
+    # is raw NOAA data, no Meteomatics quality benefit, and Open-Meteo exposes
+    # derived VISIBILITY while Meteomatics blocklists visibility:m for ncep-hrrr.
     #
     # IMPORTANT: Open-Meteo's HRRR (ncep_hrrr_conus) is CONUS-only and only
     # carries ~2 days of forecast. When a requested hour has no HRRR data,
     # Open-Meteo's seamless model nesting SILENTLY substitutes GFS (a 25km
     # global model) for that hour. Mixing 3km HRRR and 25km GFS in one series
-    # produces inconsistent, erroneous winds — this was the source of the
-    # bad fallback wind speeds. We add &cell_selection=nearest to pin the grid
-    # cell and rely on the scorecard's _detect_model_contamination check to
-    # flag any series where the realized resolution doesn't match HRRR.
-    routes["HRRR"] = ("meteomatics", "ncep-hrrr") if mm else (
-        "open-meteo", _om_url("gfs?models=ncep_hrrr_conus&cell_selection=nearest"))
+    # produces inconsistent winds. We add &cell_selection=nearest to pin the
+    # grid cell; the model_performance wind sanitizer also catches any spikes.
+    routes["HRRR"] = ("open-meteo",
+                       _om_url("gfs?models=ncep_hrrr_conus&cell_selection=nearest"))
 
     # ICON Global — Open-Meteo only (vectorcheck subscription doesn't include
     # DWD ICON via Meteomatics)
