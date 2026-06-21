@@ -20,7 +20,7 @@ from modules.atmosphere     import evaluate_blsn
 from modules.visualizations import plot_convective_profile
 from modules.sounding import extract_high_res_profile, render_sounding_plotly
 from modules.telemetry      import log_action
-from modules.astronomy      import get_astronomical_data
+from modules.astronomy      import get_astronomical_data, get_light_planning_window
 from modules.space_weather  import get_kp_index
 from modules.climate_ingest import get_climate_context
 from modules.ensemble_analysis import (
@@ -443,6 +443,36 @@ def format_dir(d: float, spd: float) -> int:
     return r
 
 
+# Minimum excursion (kt) for a gust to be operationally meaningful. A gust is
+# a short-duration peak ABOVE the sustained wind; a reported "gust" only a
+# knot or two over sustained isn't a real gust, it's measurement noise. We
+# only surface a gust when it exceeds the sustained wind by at least this much.
+GUST_FACTOR_MIN_KT = 3.0
+
+
+def resolve_gust(w_spd: float, raw_gust) -> float:
+    """Returns the gust value to display, or the sustained wind if no
+    meaningful gust exists.
+
+    Rule: a gust is shown only when the model's reported gust exceeds the
+    sustained wind by >= GUST_FACTOR_MIN_KT. Otherwise we return w_spd (i.e.
+    "no gust"), which callers render as no G-value. This:
+      - kills the old w_spd*1.25 synthetic-gust fabrication (fake gusts)
+      - suppresses nonsense like 4 kt sustained / 5 kt gust (1 kt excursion)
+      - still surfaces a genuine excursion from calm (0 sustained / 5 gust = real)
+    raw_gust may be None (model gave no gust) -> returns w_spd.
+    """
+    if raw_gust is None:
+        return w_spd
+    try:
+        rg = float(raw_gust)
+    except (TypeError, ValueError):
+        return w_spd
+    if rg >= w_spd + GUST_FACTOR_MIN_KT:
+        return rg
+    return w_spd
+
+
 def hazard_lvl(h_str: str) -> float:
     """FIX: Previous ordering checked 'SEV' before 'MOD-SEV', causing MOD-SEV
     to always return 3.0. Longest-match-first ordering is now correct."""
@@ -821,8 +851,8 @@ def compute_impact_matrix(
         sfc_dir_mat = float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0
 
         g_raw_list = h_data.get('wind_gusts_10m')
-        g_raw      = (float(g_raw_list[mat_i]) * k_conv) if (g_raw_list and len(g_raw_list) > mat_i and g_raw_list[mat_i] is not None) else w_spd
-        gst        = (w_spd * 1.25) if g_raw <= w_spd else g_raw
+        g_raw      = (float(g_raw_list[mat_i]) * k_conv) if (g_raw_list and len(g_raw_list) > mat_i and g_raw_list[mat_i] is not None) else None
+        gst        = resolve_gust(w_spd, g_raw)
 
         # --- Weather code ---
         wx_raw = h_data.get('weather_code', [0])
@@ -1847,8 +1877,8 @@ c_base_disp = f"{c_base_agl:,} ft {c_amt}" if c_amt != "CLR" else "CLR"
 
 # --- GUST & BLSN/DRSN ---
 raw_gst_list = h.get('wind_gusts_10m')
-raw_gst      = (float(raw_gst_list[forecast_idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > forecast_idx and raw_gst_list[forecast_idx] is not None) else w_spd
-gst          = (w_spd * 1.25) if raw_gst <= w_spd else raw_gst
+raw_gst      = (float(raw_gst_list[forecast_idx]) * k_conv) if (raw_gst_list and len(raw_gst_list) > forecast_idx and raw_gst_list[forecast_idx] is not None) else None
+gst          = resolve_gust(w_spd, raw_gst)
 
 # BLSN / DRSN kinetic gate — single authoritative implementation in
 # modules/atmosphere.py. Returns trigger flags + a vis_sm adjusted for blowing
@@ -1946,9 +1976,11 @@ c[0].metric("Temp",        f"{t_temp}\u00b0C")
 c[1].metric("RH",          f"{rh}%")
 c[2].metric("Wind Dir",    sfc_dir_disp)
 c[3].metric("Wind Spd",    f"{sfc_spd_disp} {raw_wind_unit}")
-# Gust column. Uses the same gust value the rest of the dashboard already
-# computes (raw obs gust if provided, otherwise wind × 1.25 floor).
-c[4].metric("Gust",        f"{int(gst)} {raw_wind_unit}")
+# Gust column. resolve_gust() returns w_spd when there's no meaningful gust
+# (gust factor below the 3 kt threshold), so when gst == w_spd we show no
+# gust rather than echoing the sustained wind.
+_gust_disp = f"{int(gst)} {raw_wind_unit}" if gst > w_spd else "\u2014"
+c[4].metric("Gust",        _gust_disp)
 c[5].metric("Weather",     weather_str)
 c[6].metric("Visibility",  vis_disp)
 c[7].metric("Freezing LVL", frz_disp)
@@ -1993,7 +2025,7 @@ for alt in [400, 300, 200, 100]:
         "Alt (AGL)": f"{alt}ft",
         "Dir": mat_dir,
         f"Spd ({raw_wind_unit})": mat_spd,
-        f"Gust ({raw_wind_unit})": str(int(g_c)),
+        f"Gust ({raw_wind_unit})": (str(int(g_c)) if gust_delta > 0 else "\u2014"),
         "Temp (\u00b0C)": f"{alt_t:.0f}" if alt_t is not None else "N/A",
         "Turbulence": turb,
         "Icing": ice,
@@ -2056,7 +2088,7 @@ else:
             "Alt (AGL)": f"{alt}ft",
             "Dir": mat_dir_ext,
             f"Spd ({raw_wind_unit})": mat_spd_ext,
-            f"Gust ({raw_wind_unit})": str(int(g_e)),
+            f"Gust ({raw_wind_unit})": (str(int(g_e)) if gust_delta > 0 else "\u2014"),
             "Temp (\u00b0C)": f"{alt_t:.0f}" if alt_t is not None else "N/A",
             "Turbulence": turb,
             "Icing": ice,
@@ -2081,6 +2113,140 @@ mc2.metric("Moonset",      astro['moonset'])
 mc3.metric("Illumination", f"{astro['moon_ill']}%")
 mc4.metric("Moon Pos",     moon_pos_display)
 mc5.empty()
+
+# ---------------------------------------------------------------------------
+# 7-DAY LIGHT PLANNING — cycle of darkness, civil twilight, moon up/down
+# ---------------------------------------------------------------------------
+st.markdown(
+    '<div style="font-size:0.78rem;color:#9CA3AF;text-transform:uppercase;'
+    'letter-spacing:0.5px;margin:14px 0 8px;font-weight:500;">Light Planning</div>',
+    unsafe_allow_html=True,
+)
+
+_lp_c1, _lp_c2, _lp_c3 = st.columns([1.2, 1, 2.4])
+with _lp_c1:
+    _lp_start = st.date_input(
+        "Start date",
+        value=datetime.now(local_tz).date(),
+        key="lightplan_start",
+        help="First night of the planning window. The chart spans this date "
+             "forward.",
+    )
+with _lp_c2:
+    _lp_days = st.selectbox(
+        "Nights",
+        options=[7, 10, 14],
+        index=0,
+        key="lightplan_days",
+    )
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _light_plan_cached(lp_lat: float, lp_lon: float, lp_start_iso: str,
+                       lp_n: int, lp_tz: str) -> list:
+    """Computes the multi-night light-planning window. Cached 1h per
+    (site, start date, length, tz)."""
+    _tz = pytz.timezone(lp_tz) if lp_tz else timezone.utc
+    _start = datetime.fromisoformat(lp_start_iso).date()
+    return get_light_planning_window(lp_lat, lp_lon, _start, lp_n, _tz)
+
+_lp_rows = _light_plan_cached(
+    lat, lon, _lp_start.isoformat(), int(_lp_days), tz_str or "UTC"
+)
+
+# Build the sleek SVG timeline (18:00 → 06:00 frame). Renders via components
+# so the gradients/markers display exactly as designed.
+def _render_light_plan_svg(rows: list, tz_abbr_str: str) -> str:
+    import json as _json
+    data_js = _json.dumps([
+        {
+            "d": r["day_abbr"], "n": r["day_num"],
+            "ll": r["last_light"], "fl": r["first_light"],
+            "mr": r["moonrise"], "ms": r["moonset"],
+            "ill": r["moon_ill"], "allnight": r["moon_up_all_night"],
+        }
+        for r in rows
+    ])
+    n_rows = len(rows)
+    # Height: rows * (rowH+gap) + top + axis label band
+    svg_h = 6 + n_rows * (26 + 5) + 20
+    total_h = svg_h + 60   # + legend
+    return f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<div id="lpwrap" style="width:100%;"></div>
+<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:11px;color:#9CA3AF;margin-top:10px;padding-left:4px;">
+<span style="display:flex;align-items:center;gap:6px;"><span style="width:20px;height:7px;border-radius:4px;background:linear-gradient(90deg,#85B7EB,#0a0a0f);"></span>first / last light</span>
+<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;border-radius:4px;background:#050507;border:0.5px solid #2A3038;"></span>cycle of darkness</span>
+<span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:7px;border-radius:4px;background:#EADfae;"></span>moon up</span>
+<span style="color:#6B7280;margin-left:auto;">local time ({tz_abbr_str})</span>
+</div>
+</div>
+<script>
+(function(){{
+  const days={data_js};
+  const W0=18,W1=30,span=W1-W0;
+  const L=56,R=16,top=6,rowH=26,gap=5;
+  const VBW=680;
+  const innerW=VBW-L-R;
+  const xc=(h)=>L+((h-W0)/span)*innerW;
+  const H={svg_h};
+  let svg='<svg viewBox="0 0 '+VBW+' '+H+'" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Light planning timeline">';
+  svg+='<defs>';
+  days.forEach((r,i)=>{{
+    if(r.ll==null||r.fl==null){{ svg+='<linearGradient id="g'+i+'"><stop offset="0" stop-color="#85B7EB" stop-opacity="0.42"/></linearGradient>'; return; }}
+    const llo=((xc(r.ll)-L)/innerW), flo=((xc(r.fl)-L)/innerW);
+    svg+='<linearGradient id="g'+i+'" x1="0" x2="1" y1="0" y2="0">'+
+      '<stop offset="0" stop-color="#85B7EB" stop-opacity="0.42"/>'+
+      '<stop offset="'+Math.max(0,llo-0.05).toFixed(3)+'" stop-color="#85B7EB" stop-opacity="0.5"/>'+
+      '<stop offset="'+Math.max(0,llo).toFixed(3)+'" stop-color="#0a0a12"/>'+
+      '<stop offset="'+Math.min(1,flo).toFixed(3)+'" stop-color="#050507"/>'+
+      '<stop offset="'+Math.min(1,flo+0.05).toFixed(3)+'" stop-color="#85B7EB" stop-opacity="0.5"/>'+
+      '<stop offset="1" stop-color="#85B7EB" stop-opacity="0.42"/></linearGradient>';
+  }});
+  svg+='</defs>';
+  const tickH=[18,19,20,21,22,23,24,25,26,27,28,29,30];
+  const tickL=['18','19','20','21','22','23','00','01','02','03','04','05','06'];
+  tickH.forEach((th,i)=>{{
+    const px=xc(th); const major=(th%3===0);
+    svg+='<line x1="'+px+'" y1="'+top+'" x2="'+px+'" y2="'+(top+days.length*(rowH+gap)-gap)+'" stroke="rgba(128,128,128,'+(major?0.14:0.06)+')" stroke-width="1"/>';
+    svg+='<text x="'+px+'" y="'+(H-5)+'" text-anchor="middle" font-size="'+(major?9.5:8.5)+'" fill="rgba(150,150,150,'+(major?0.8:0.55)+')">'+tickL[i]+'</text>';
+  }});
+  days.forEach((r,i)=>{{
+    const y=top+i*(rowH+gap); const cy=y+rowH/2;
+    svg+='<rect x="'+L+'" y="'+y+'" width="'+innerW+'" height="'+rowH+'" rx="7" fill="url(#g'+i+')"/>';
+    if(r.mr!=null||r.ms!=null){{
+      const mrx=xc(Math.max(r.mr==null?W0:r.mr,W0));
+      const msx=xc(Math.min(r.ms==null?W1:r.ms,W1));
+      if(msx>mrx){{
+        const op=(r.ill/100*0.55+0.15).toFixed(2);
+        svg+='<rect x="'+mrx+'" y="'+(y+rowH-6)+'" width="'+(msx-mrx)+'" height="3.5" rx="1.75" fill="#EADfae" opacity="'+op+'"/>';
+        if(r.mr!=null && r.mr>=W0 && r.mr<=W1){{
+          const rad=2.2+r.ill/100*3;
+          svg+='<circle cx="'+mrx+'" cy="'+(y+rowH-4.25)+'" r="'+rad+'" fill="#EADfae" opacity="'+(r.ill/100*0.6+0.3).toFixed(2)+'"/>';
+        }}
+        if(r.ms!=null && r.ll!=null && r.ms>r.ll && r.ms<r.fl){{
+          svg+='<line x1="'+msx+'" y1="'+(y+2)+'" x2="'+msx+'" y2="'+(y+rowH-2)+'" stroke="#EADfae" stroke-width="1" stroke-dasharray="2 2" opacity="0.4"/>';
+        }}
+      }}
+    }}
+    svg+='<text x="'+(L-10)+'" y="'+(cy-1)+'" text-anchor="end" font-size="11" font-weight="500" fill="#E5E7EB">'+r.n+'</text>';
+    svg+='<text x="'+(L-10)+'" y="'+(cy+10)+'" text-anchor="end" font-size="8" fill="#6B7280" letter-spacing="0.5">'+r.d+'</text>';
+  }});
+  svg+='</svg>';
+  document.getElementById('lpwrap').innerHTML=svg;
+}})();
+</script>
+"""
+
+with _lp_c3:
+    st.empty()
+
+if _lp_rows:
+    import streamlit.components.v1 as _components
+    _lp_html = _render_light_plan_svg(_lp_rows, astro['tz'])
+    _lp_height = 6 + len(_lp_rows) * (26 + 5) + 20 + 50
+    _components.html(_lp_html, height=_lp_height, scrolling=False)
+else:
+    st.caption("Light planning data unavailable for this location/date.")
 
 st.divider()
 st.subheader("Space Weather (GNSS & C2 Link)")
@@ -2200,10 +2366,11 @@ def generate_pdf_report() -> bytes:
 
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(0, 8, "FORECASTED SURFACE CONDITIONS", border=0, new_x="LMARGIN", new_y="NEXT")
+    _pdf_gust_clause = f" (Gusts: {int(gst)} {raw_wind_unit})" if gst > w_spd else ""
     pdf.set_font("helvetica", "", 10)
     pdf.multi_cell(0, 6, safe_txt(
         f"Temperature: {t_temp}C | RH: {rh}% | Dewpoint: {td:.1f}C\n"
-        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit} (Gusts: {int(gst)} {raw_wind_unit})\n"
+        f"Wind: {sfc_dir_disp} @ {sfc_spd_disp} {raw_wind_unit}{_pdf_gust_clause}\n"
         f"Weather: {weather_str} | Visibility: {vis_disp}\n"
         f"Cloud Base: {c_base_disp} | Freezing Level: {frz_disp}"
     ))
@@ -2802,7 +2969,7 @@ else:
                              f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
                 else:
                     _arr = _wind_arrow(_d)
-                    _ttl = f"{_w:.0f} kt" + (f" G{_g:.0f}" if _g is not None else "")
+                    _ttl = f"{_w:.0f} kt" + (f" G{_g:.0f}" if (_g is not None and _g >= _w + 3) else "")
                     _w_clr = "#ff6b4a" if _w >= 25 else "#E58E26" if _w >= 15 else "#D1D5DB"
                     _cell = (f'<div title="{_ttl}" style="background:{_bg};padding:4px 2px;'
                              f'text-align:center;font-variant-numeric:tabular-nums;">'
