@@ -23,7 +23,7 @@ SIGN CONVENTION:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger("arms.geomag")
 
@@ -124,11 +124,14 @@ def get_magnetic_declination(lat: float, lon: float, date: datetime = None) -> f
         Without pygeomag: typical accuracy 2-5°.
     """
     if date is None:
-        date = datetime.utcnow()
+        date = datetime.now(timezone.utc)
 
-    # Convert to decimal year for WMM
-    year_start = datetime(date.year, 1, 1)
-    year_end = datetime(date.year + 1, 1, 1)
+    # Convert to decimal year for WMM. Normalize to tz-aware UTC first so the
+    # anchor subtraction below never mixes naive and aware datetimes.
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    year_start = datetime(date.year, 1, 1, tzinfo=timezone.utc)
+    year_end = datetime(date.year + 1, 1, 1, tzinfo=timezone.utc)
     year_frac = date.year + (date - year_start).total_seconds() / (year_end - year_start).total_seconds()
 
     if _geomag_available and _geomag_instance is not None:
