@@ -1395,7 +1395,8 @@ if _workspace == "Spatial":
                                   list(MODEL_PRECIP_LAYERS.keys()),
                                   key="spq_precip")
     with _q4:
-        _sp_sat = st.radio("Satellite", ["GeoColor", "Band 13 IR"],
+        _sp_sat = st.radio("Satellite",
+                           ["GeoColor", "Visible hi-res", "Band 13 IR"],
                            horizontal=True, key="spq_sat")
 
     _PANE_H = 380
@@ -1421,7 +1422,8 @@ if _workspace == "Spatial":
     with _row1b:
         _pane_label(f"Satellite \u00b7 GOES-East {_sp_sat}")
         _st_folium(
-            build_satellite_map(lat, lon, min(_sp_zoom, 7),
+            build_satellite_map(lat, lon,
+                                min(_sp_zoom, 8 if _sp_sat == "Visible hi-res" else 7),
                                 product=_sp_sat, minimal=True),
             height=_PANE_H, use_container_width=True,
             returned_objects=[], key="spq_sat_map",
