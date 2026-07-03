@@ -49,11 +49,14 @@ GIBS_WMTS = ("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/"
 
 
 def _base_map(lat: float, lon: float, zoom: int = 7,
-              tiles: str = "dark") -> folium.Map:
-    """Folium map centred on the site with the ARMS dark base (or topo)."""
+              tiles: str = "dark", minimal: bool = False) -> folium.Map:
+    """Folium map centred on the site with the ARMS dark base (or topo).
+    minimal=True strips zoom buttons and the scale bar for clean quad panes
+    (Windy/Pivotal-style chrome-free imagery)."""
     m = folium.Map(
         location=[lat, lon], zoom_start=zoom,
-        tiles=None, control_scale=True, prefer_canvas=True,
+        tiles=None, control_scale=not minimal, prefer_canvas=True,
+        zoom_control=not minimal,
     )
     if tiles == "dark":
         TileLayer(_DARK_TILES, attr=_DARK_ATTR, name="Base (dark)",
@@ -94,9 +97,10 @@ def build_radar_map(lat: float, lon: float, zoom: int,
                     rainviewer_path: str | None,
                     show_geomet: bool = True,
                     show_rainviewer: bool = True,
-                    opacity: float = 0.75) -> folium.Map:
+                    opacity: float = 0.75,
+                    minimal: bool = False) -> folium.Map:
     """Radar composite: ECCC 1 km rain rate + RainViewer global smooth."""
-    m = _base_map(lat, lon, zoom, tiles="dark")
+    m = _base_map(lat, lon, zoom, tiles="dark", minimal=minimal)
     if show_geomet:
         WmsTileLayer(
             url=GEOMET_WMS,
@@ -111,16 +115,18 @@ def build_radar_map(lat: float, lon: float, zoom: int,
             attr="RainViewer.com", name="RainViewer composite",
             opacity=opacity, max_zoom=12, overlay=True,
         ).add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
+    if not minimal:
+        folium.LayerControl(collapsed=True).add_to(m)
     return m
 
 
 def build_satellite_map(lat: float, lon: float, zoom: int,
                         product: str = "GeoColor",
-                        opacity: float = 1.0) -> folium.Map:
+                        opacity: float = 1.0,
+                        minimal: bool = False) -> folium.Map:
     """GOES-East via NASA GIBS. GeoColor = day-vis/night-IR blend (the
     operational 'sandwich'); Band 13 = clean IR window."""
-    m = _base_map(lat, lon, zoom, tiles="dark")
+    m = _base_map(lat, lon, zoom, tiles="dark", minimal=minimal)
     if product == "GeoColor":
         gibs_layer, maxz, nm = "GOES-East_ABI_GeoColor", 7, "GOES-East GeoColor"
     else:
@@ -130,14 +136,16 @@ def build_satellite_map(lat: float, lon: float, zoom: int,
         attr="NASA GIBS / NOAA GOES-East", name=nm,
         opacity=opacity, max_zoom=12, max_native_zoom=maxz, overlay=True,
     ).add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
+    if not minimal:
+        folium.LayerControl(collapsed=True).add_to(m)
     return m
 
 
 def build_topo_map(lat: float, lon: float, zoom: int,
-                   show_toporama: bool = True) -> folium.Map:
+                   show_toporama: bool = True,
+                   minimal: bool = False) -> folium.Map:
     """Topographic base: OpenTopoMap, with NRCan Toporama WMS overlay."""
-    m = _base_map(lat, lon, zoom, tiles="opentopo")
+    m = _base_map(lat, lon, zoom, tiles="opentopo", minimal=minimal)
     if show_toporama:
         WmsTileLayer(
             url="https://maps.geogratis.gc.ca/wms/toporama_en",
@@ -146,17 +154,19 @@ def build_topo_map(lat: float, lon: float, zoom: int,
             opacity=0.65, name="NRCan Toporama",
             attr="Natural Resources Canada",
         ).add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
+    if not minimal:
+        folium.LayerControl(collapsed=True).add_to(m)
     return m
 
 
 def build_model_precip_map(lat: float, lon: float, zoom: int,
                            layer: str = "HRDPS.CONTINENTAL_PR",
-                           opacity: float = 0.7) -> folium.Map:
+                           opacity: float = 0.7,
+                           minimal: bool = False) -> folium.Map:
     """NWP model precipitation served as WMS imagery from ECCC GeoMet.
     Default HRDPS.CONTINENTAL_PR = HRDPS 2.5 km precipitation rate for the
     latest run; GeoMet resolves the current reference time automatically."""
-    m = _base_map(lat, lon, zoom, tiles="dark")
+    m = _base_map(lat, lon, zoom, tiles="dark", minimal=minimal)
     WmsTileLayer(
         url=GEOMET_WMS,
         layers=layer,
@@ -164,7 +174,8 @@ def build_model_precip_map(lat: float, lon: float, zoom: int,
         opacity=opacity, name=layer,
         attr="ECCC GeoMet — model guidance",
     ).add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
+    if not minimal:
+        folium.LayerControl(collapsed=True).add_to(m)
     return m
 
 
