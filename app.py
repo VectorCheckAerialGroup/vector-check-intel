@@ -3753,206 +3753,214 @@ st.divider()
 
 st.subheader("Data Capture Verification")
 
-_vf_left, _vf_right = st.columns([1, 2])
+_dc_type = st.radio(
+    "Upload type",
+    ["Kestrel", "Drone Sounding", "MWS Station"],
+    horizontal=True,
+    key="dc_upload_type",
+    label_visibility="collapsed",
+)
 
-with _vf_left:
-    st.markdown(
-        '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
-        'Upload a Kestrel 5500 CSV to compare ground-truth measurements against the active NWP forecast.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    _kestrel_file = st.file_uploader(
-        "Kestrel 5500 CSV",
-        type=["csv"],
-        key="kestrel_upload",
-        label_visibility="collapsed",
-    )
+if _dc_type == "Kestrel":
+    _vf_left, _vf_right = st.columns([1, 2])
 
-    # Magnetic declination — auto-computed from current coordinates using IGRF.
-    # Operators can manually override if they have a more precise local value.
-    _auto_dec = get_magnetic_declination(lat, lon)
-    _mag_dec = st.number_input(
-        "Magnetic declination (°, East positive)",
-        value=float(_auto_dec),
-        step=0.5,
-        format="%.1f",
-        help=(f"Auto-computed for {lat:.2f}, {lon:.2f} via IGRF model. "
-              f"Applied to Kestrel wind direction for true north correction. "
-              f"Override if you have a more precise local value."),
-    )
-
-if _kestrel_file is not None:
-    try:
-        _file_bytes = _kestrel_file.getvalue()
-        _file_text = _file_bytes.decode("utf-8", errors="replace")
-        _file_hash = compute_file_hash(_file_bytes)
-
-        # Parse Kestrel CSV
-        _observations = parse_kestrel_csv(_file_text, magnetic_declination=_mag_dec)
-
-        if not _observations or len(_observations) < 3:
-            st.warning("Could not parse enough data points from the CSV. Check the file format.")
-        else:
-            # Average the session
-            _session = average_session(_observations, magnetic_declination=_mag_dec)
-            _session.file_hash = _file_hash
-
-            # Match against forecast
-            _match = match_forecast_hour(_session, h["time"], h)
-
-            if _match is None:
-                st.warning("No forecast hour within 90 minutes of the Kestrel session. Ensure the forecast is loaded for the same date.")
-            else:
-                # Determine model name from model_choice
-                _model_label = model_choice.split("/")[-1].replace("_", " ").upper() if model_choice else "NWP"
-
-                # Compute verification
-                _vr = compute_verification(
-                    session=_session,
-                    forecast=_match,
-                    elevation_ft=sfc_elevation,
-                    operator=st.session_state.get("active_operator", "UNKNOWN"),
-                    lat=lat, lon=lon,
-                    model_name=_model_label,
-                )
-
-                # Store in Supabase
-                _sb = _safe_get_supabase()
-                if _sb:
-                    _stored = store_verification(_sb, _vr)
-                    if _stored:
-                        st.toast("Verification stored.", icon="\u2705")
-
-                # --- DISPLAY RESULT ---
-                with _vf_right:
-                    # MVS Score and grade
-                    _grade_colors = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
-                    _gc = _grade_colors.get(_vr.grade, "#94a3b8")
-
-                    st.markdown(
-                        f'<div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;">'
-                        f'<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;'
-                        f'width:64px;height:64px;border:2px solid {_gc};border-radius:8px;">'
-                        f'<div style="font-size:1.4rem;font-weight:700;color:{_gc};font-variant-numeric:tabular-nums;">{_vr.mvs}</div>'
-                        f'<div style="font-size:0.55rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;">MVS</div>'
-                        f'</div>'
-                        f'<div>'
-                        f'<div style="font-size:0.85rem;color:#E5E7EB;font-weight:500;">{_vr.assessment}</div>'
-                        f'<div style="font-size:0.65rem;color:#6B7280;margin-top:2px;">'
-                        f'{_session.sample_count} samples \u00b7 {_session.duration_seconds}s session \u00b7 '
-                        f'{_model_label} +{_vr.lead_time_hours}h</div>'
-                        f'</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    # Delta table
-                    _vars = [
-                        ("Wind Speed",  f"{_vr.actual_wind_kt:.0f} kt",  f"{_vr.fcst_wind_kt:.0f} kt",  f"{_vr.delta_wind_kt:+.1f} kt"),
-                        ("Wind Dir",    f"{_vr.actual_wind_dir:.0f}\u00b0", f"{_vr.fcst_wind_dir:.0f}\u00b0", f"{_vr.delta_wind_dir:+.0f}\u00b0"),
-                        ("Temperature", f"{_vr.actual_temp_c:.1f}\u00b0C",  f"{_vr.fcst_temp_c:.1f}\u00b0C",  f"{_vr.delta_temp_c:+.1f}\u00b0C"),
-                        ("RH",          f"{_vr.actual_rh:.0f}%",          f"{_vr.fcst_rh:.0f}%",          f"{_vr.delta_rh:+.0f}%"),
-                        ("Pressure",    f"{_vr.actual_pressure_hpa:.0f} hPa", f"{_vr.fcst_pressure_hpa:.0f} hPa", f"{_vr.delta_pressure_hpa:+.1f} hPa"),
-                        ("Density Alt", f"{_vr.actual_density_alt_ft:,} ft", f"{_vr.fcst_density_alt_ft:,} ft", f"{_vr.delta_density_alt_ft:+,} ft"),
-                    ]
-
-                    _tbl_header = (
-                        '<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;margin-bottom:1px;">'
-                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;"></div>'
-                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Kestrel</div>'
-                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Forecast</div>'
-                        '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Delta</div>'
-                        '</div>'
-                    )
-                    st.markdown(_tbl_header, unsafe_allow_html=True)
-
-                    for _vname, _actual, _fcst, _delta_str in _vars:
-                        # Parse delta magnitude for coloring
-                        try:
-                            _dval = float(_delta_str.split()[0].replace(",", "").replace("\u00b0", ""))
-                        except (ValueError, IndexError):
-                            _dval = 0
-                        if _vname == "Wind Speed":
-                            _d_clr = "#ff6b4a" if abs(_dval) >= 5 else "#E58E26" if abs(_dval) >= 3 else "#9CA3AF"
-                        elif _vname == "Wind Dir":
-                            _d_clr = "#ff6b4a" if abs(_dval) >= 30 else "#E58E26" if abs(_dval) >= 15 else "#9CA3AF"
-                        elif _vname == "Temperature":
-                            _d_clr = "#ff6b4a" if abs(_dval) >= 3 else "#E58E26" if abs(_dval) >= 2 else "#9CA3AF"
-                        else:
-                            _d_clr = "#9CA3AF"
-
-                        _tbl_row = (
-                            f'<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;">'
-                            f'<div style="font-size:0.72rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_vname}</div>'
-                            f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_actual}</div>'
-                            f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_fcst}</div>'
-                            f'<div style="font-size:0.72rem;color:{_d_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">{_delta_str}</div>'
-                            f'</div>'
-                        )
-                        st.markdown(_tbl_row, unsafe_allow_html=True)
-
-                    # Flags
-                    if _vr.flags:
-                        _flags_html = '<div style="margin-top:10px;">'
-                        for _flag in _vr.flags:
-                            _flags_html += (
-                                f'<div style="font-size:0.65rem;color:#E58E26;margin:2px 0;display:flex;align-items:center;gap:5px;">'
-                                f'<span style="font-size:0.5rem;">\u26a0</span> {_flag}</div>'
-                            )
-                        _flags_html += '</div>'
-                        st.markdown(_flags_html, unsafe_allow_html=True)
-
-    except UnicodeDecodeError:
-        st.error("File encoding error. The Kestrel CSV should be UTF-8 or ASCII.")
-    except Exception as e:
-        st.error(f"Verification failed: {e}")
-
-# --- Trailing MVS History (shows even without upload) ---
-_sb_vf = _safe_get_supabase()
-if _sb_vf:
-    _recent = load_recent_verifications(_sb_vf, lat, lon, days=90)
-    if _recent:
+    with _vf_left:
         st.markdown(
-            '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
-            'margin-top:16px;margin-bottom:8px;">Recent Verifications</div>',
+            '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
+            'Upload a Kestrel 5500 CSV to compare ground-truth measurements against the active NWP forecast.'
+            '</div>',
             unsafe_allow_html=True,
         )
-        _hist_rows = ""
-        for _rv in _recent[:10]:
-            _rv_gc = _grade_colors.get(_rv.get("grade", "B"), "#94a3b8") if '_grade_colors' in dir() else "#94a3b8"
-            _rv_ts = _rv.get("timestamp", "")[:16].replace("T", " ")
-            _rv_mvs = _rv.get("mvs", 0)
-            _rv_dw = _rv.get("delta_wind_kt", 0) or 0
-            _rv_dt = _rv.get("delta_temp_c", 0) or 0
-            _rv_model = _rv.get("model_name", "")
-            _rv_op = _rv.get("operator", "")
-
-            _gc_map = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
-            _rv_clr = _gc_map.get(_rv.get("grade", "B"), "#94a3b8")
-
-            _hist_rows += (
-                f'<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
-                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_ts}</div>'
-                f'<div style="font-size:0.65rem;color:{_rv_clr};padding:3px 6px;background:#161A1F;font-weight:600;font-variant-numeric:tabular-nums;">{_rv_mvs}</div>'
-                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_model}</div>'
-                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394w {_rv_dw:+.0f}kt</div>'
-                f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394t {_rv_dt:+.1f}\u00b0</div>'
-                f'</div>'
-            )
-
-        _hist_header = (
-            '<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
-            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Time</div>'
-            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">MVS</div>'
-            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Model</div>'
-            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Wind</div>'
-            '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Temp</div>'
-            '</div>'
+        _kestrel_file = st.file_uploader(
+            "Kestrel 5500 CSV",
+            type=["csv"],
+            key="kestrel_upload",
+            label_visibility="collapsed",
         )
-        st.markdown(_hist_header + _hist_rows, unsafe_allow_html=True)
 
-st.divider()
+        # Magnetic declination — auto-computed from current coordinates using IGRF.
+        # Operators can manually override if they have a more precise local value.
+        _auto_dec = get_magnetic_declination(lat, lon)
+        _mag_dec = st.number_input(
+            "Magnetic declination (°, East positive)",
+            value=float(_auto_dec),
+            step=0.5,
+            format="%.1f",
+            help=(f"Auto-computed for {lat:.2f}, {lon:.2f} via IGRF model. "
+                  f"Applied to Kestrel wind direction for true north correction. "
+                  f"Override if you have a more precise local value."),
+        )
+
+    if _kestrel_file is not None:
+        try:
+            _file_bytes = _kestrel_file.getvalue()
+            _file_text = _file_bytes.decode("utf-8", errors="replace")
+            _file_hash = compute_file_hash(_file_bytes)
+
+            # Parse Kestrel CSV
+            _observations = parse_kestrel_csv(_file_text, magnetic_declination=_mag_dec)
+
+            if not _observations or len(_observations) < 3:
+                st.warning("Could not parse enough data points from the CSV. Check the file format.")
+            else:
+                # Average the session
+                _session = average_session(_observations, magnetic_declination=_mag_dec)
+                _session.file_hash = _file_hash
+
+                # Match against forecast
+                _match = match_forecast_hour(_session, h["time"], h)
+
+                if _match is None:
+                    st.warning("No forecast hour within 90 minutes of the Kestrel session. Ensure the forecast is loaded for the same date.")
+                else:
+                    # Determine model name from model_choice
+                    _model_label = model_choice.split("/")[-1].replace("_", " ").upper() if model_choice else "NWP"
+
+                    # Compute verification
+                    _vr = compute_verification(
+                        session=_session,
+                        forecast=_match,
+                        elevation_ft=sfc_elevation,
+                        operator=st.session_state.get("active_operator", "UNKNOWN"),
+                        lat=lat, lon=lon,
+                        model_name=_model_label,
+                    )
+
+                    # Store in Supabase
+                    _sb = _safe_get_supabase()
+                    if _sb:
+                        _stored = store_verification(_sb, _vr)
+                        if _stored:
+                            st.toast("Verification stored.", icon="\u2705")
+
+                    # --- DISPLAY RESULT ---
+                    with _vf_right:
+                        # MVS Score and grade
+                        _grade_colors = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
+                        _gc = _grade_colors.get(_vr.grade, "#94a3b8")
+
+                        st.markdown(
+                            f'<div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;">'
+                            f'<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;'
+                            f'width:64px;height:64px;border:2px solid {_gc};border-radius:8px;">'
+                            f'<div style="font-size:1.4rem;font-weight:700;color:{_gc};font-variant-numeric:tabular-nums;">{_vr.mvs}</div>'
+                            f'<div style="font-size:0.55rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;">MVS</div>'
+                            f'</div>'
+                            f'<div>'
+                            f'<div style="font-size:0.85rem;color:#E5E7EB;font-weight:500;">{_vr.assessment}</div>'
+                            f'<div style="font-size:0.65rem;color:#6B7280;margin-top:2px;">'
+                            f'{_session.sample_count} samples \u00b7 {_session.duration_seconds}s session \u00b7 '
+                            f'{_model_label} +{_vr.lead_time_hours}h</div>'
+                            f'</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # Delta table
+                        _vars = [
+                            ("Wind Speed",  f"{_vr.actual_wind_kt:.0f} kt",  f"{_vr.fcst_wind_kt:.0f} kt",  f"{_vr.delta_wind_kt:+.1f} kt"),
+                            ("Wind Dir",    f"{_vr.actual_wind_dir:.0f}\u00b0", f"{_vr.fcst_wind_dir:.0f}\u00b0", f"{_vr.delta_wind_dir:+.0f}\u00b0"),
+                            ("Temperature", f"{_vr.actual_temp_c:.1f}\u00b0C",  f"{_vr.fcst_temp_c:.1f}\u00b0C",  f"{_vr.delta_temp_c:+.1f}\u00b0C"),
+                            ("RH",          f"{_vr.actual_rh:.0f}%",          f"{_vr.fcst_rh:.0f}%",          f"{_vr.delta_rh:+.0f}%"),
+                            ("Pressure",    f"{_vr.actual_pressure_hpa:.0f} hPa", f"{_vr.fcst_pressure_hpa:.0f} hPa", f"{_vr.delta_pressure_hpa:+.1f} hPa"),
+                            ("Density Alt", f"{_vr.actual_density_alt_ft:,} ft", f"{_vr.fcst_density_alt_ft:,} ft", f"{_vr.delta_density_alt_ft:+,} ft"),
+                        ]
+
+                        _tbl_header = (
+                            '<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;margin-bottom:1px;">'
+                            '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;"></div>'
+                            '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Kestrel</div>'
+                            '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Forecast</div>'
+                            '<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:4px 6px;letter-spacing:0.5px;">Delta</div>'
+                            '</div>'
+                        )
+                        st.markdown(_tbl_header, unsafe_allow_html=True)
+
+                        for _vname, _actual, _fcst, _delta_str in _vars:
+                            # Parse delta magnitude for coloring
+                            try:
+                                _dval = float(_delta_str.split()[0].replace(",", "").replace("\u00b0", ""))
+                            except (ValueError, IndexError):
+                                _dval = 0
+                            if _vname == "Wind Speed":
+                                _d_clr = "#ff6b4a" if abs(_dval) >= 5 else "#E58E26" if abs(_dval) >= 3 else "#9CA3AF"
+                            elif _vname == "Wind Dir":
+                                _d_clr = "#ff6b4a" if abs(_dval) >= 30 else "#E58E26" if abs(_dval) >= 15 else "#9CA3AF"
+                            elif _vname == "Temperature":
+                                _d_clr = "#ff6b4a" if abs(_dval) >= 3 else "#E58E26" if abs(_dval) >= 2 else "#9CA3AF"
+                            else:
+                                _d_clr = "#9CA3AF"
+
+                            _tbl_row = (
+                                f'<div style="display:grid;grid-template-columns:100px 90px 90px 90px;gap:1px;">'
+                                f'<div style="font-size:0.72rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_vname}</div>'
+                                f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_actual}</div>'
+                                f'<div style="font-size:0.72rem;color:#E5E7EB;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">{_fcst}</div>'
+                                f'<div style="font-size:0.72rem;color:{_d_clr};padding:3px 6px;background:#161A1F;font-weight:500;font-variant-numeric:tabular-nums;">{_delta_str}</div>'
+                                f'</div>'
+                            )
+                            st.markdown(_tbl_row, unsafe_allow_html=True)
+
+                        # Flags
+                        if _vr.flags:
+                            _flags_html = '<div style="margin-top:10px;">'
+                            for _flag in _vr.flags:
+                                _flags_html += (
+                                    f'<div style="font-size:0.65rem;color:#E58E26;margin:2px 0;display:flex;align-items:center;gap:5px;">'
+                                    f'<span style="font-size:0.5rem;">\u26a0</span> {_flag}</div>'
+                                )
+                            _flags_html += '</div>'
+                            st.markdown(_flags_html, unsafe_allow_html=True)
+
+        except UnicodeDecodeError:
+            st.error("File encoding error. The Kestrel CSV should be UTF-8 or ASCII.")
+        except Exception as e:
+            st.error(f"Verification failed: {e}")
+
+    # --- Trailing MVS History (shows even without upload) ---
+    _sb_vf = _safe_get_supabase()
+    if _sb_vf:
+        _recent = load_recent_verifications(_sb_vf, lat, lon, days=90)
+        if _recent:
+            st.markdown(
+                '<div style="font-size:0.7rem;color:#6B7280;text-transform:uppercase;letter-spacing:0.5px;'
+                'margin-top:16px;margin-bottom:8px;">Recent Verifications</div>',
+                unsafe_allow_html=True,
+            )
+            _hist_rows = ""
+            for _rv in _recent[:10]:
+                _rv_gc = _grade_colors.get(_rv.get("grade", "B"), "#94a3b8") if '_grade_colors' in dir() else "#94a3b8"
+                _rv_ts = _rv.get("timestamp", "")[:16].replace("T", " ")
+                _rv_mvs = _rv.get("mvs", 0)
+                _rv_dw = _rv.get("delta_wind_kt", 0) or 0
+                _rv_dt = _rv.get("delta_temp_c", 0) or 0
+                _rv_model = _rv.get("model_name", "")
+                _rv_op = _rv.get("operator", "")
+
+                _gc_map = {"A": "#4ade80", "B": "#94a3b8", "C": "#E58E26", "F": "#ff6b4a"}
+                _rv_clr = _gc_map.get(_rv.get("grade", "B"), "#94a3b8")
+
+                _hist_rows += (
+                    f'<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
+                    f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_ts}</div>'
+                    f'<div style="font-size:0.65rem;color:{_rv_clr};padding:3px 6px;background:#161A1F;font-weight:600;font-variant-numeric:tabular-nums;">{_rv_mvs}</div>'
+                    f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;">{_rv_model}</div>'
+                    f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394w {_rv_dw:+.0f}kt</div>'
+                    f'<div style="font-size:0.65rem;color:#9CA3AF;padding:3px 6px;background:#161A1F;font-variant-numeric:tabular-nums;">\u0394t {_rv_dt:+.1f}\u00b0</div>'
+                    f'</div>'
+                )
+
+            _hist_header = (
+                '<div style="display:grid;grid-template-columns:130px 50px 80px 70px 70px;gap:1px;margin-bottom:1px;">'
+                '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Time</div>'
+                '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">MVS</div>'
+                '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Model</div>'
+                '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Wind</div>'
+                '<div style="font-size:0.55rem;color:#6B7280;padding:3px 6px;text-transform:uppercase;">Temp</div>'
+                '</div>'
+            )
+            st.markdown(_hist_header + _hist_rows, unsafe_allow_html=True)
+
 
 
 # =============================================================================
@@ -3963,216 +3971,307 @@ st.divider()
 # Kestrel surface comparison, this scores the model's VERTICAL STRUCTURE —
 # whether it captures boundary-layer wind shear, not just the surface value.
 
-st.subheader("Drone Sounding Verification")
+elif _dc_type == "Drone Sounding":
+    _ds_left, _ds_right = st.columns([1, 2])
 
-_ds_left, _ds_right = st.columns([1, 2])
+    with _ds_left:
+        st.markdown(
+            '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
+            'Upload a meteo-drone ascent CSV (MM-670 series) to verify the full '
+            'vertical profile against all models, layer by layer. Captures '
+            'boundary-layer structure that surface comparison misses.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        _sounding_file = st.file_uploader(
+            "Drone sounding CSV",
+            type=["csv"],
+            key="sounding_upload",
+            label_visibility="collapsed",
+        )
+        _ds_bin = st.select_slider(
+            "Layer bin size",
+            options=[25, 50, 100, 150],
+            value=50,
+            format_func=lambda x: f"{x} ft",
+            help="Vertical resolution of the comparison. Smaller bins = finer "
+                 "structure but fewer drone samples per layer.",
+        )
 
-with _ds_left:
-    st.markdown(
-        '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
-        'Upload a meteo-drone ascent CSV (MM-670 series) to verify the full '
-        'vertical profile against all models, layer by layer. Captures '
-        'boundary-layer structure that surface comparison misses.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    _sounding_file = st.file_uploader(
-        "Drone sounding CSV",
-        type=["csv"],
-        key="sounding_upload",
-        label_visibility="collapsed",
-    )
-    _ds_bin = st.select_slider(
-        "Layer bin size",
-        options=[25, 50, 100, 150],
-        value=50,
-        format_func=lambda x: f"{x} ft",
-        help="Vertical resolution of the comparison. Smaller bins = finer "
-             "structure but fewer drone samples per layer.",
-    )
+    if _sounding_file is not None:
+        try:
+            _ds_bytes = _sounding_file.getvalue()
+            _ds_text = _ds_bytes.decode("utf-8", errors="replace")
 
-if _sounding_file is not None:
-    try:
-        _ds_bytes = _sounding_file.getvalue()
-        _ds_text = _ds_bytes.decode("utf-8", errors="replace")
+            # Parse first so we can show profile metadata even if model fetch is slow
+            _profile = parse_sounding_csv(_ds_text)
 
-        # Parse first so we can show profile metadata even if model fetch is slow
-        _profile = parse_sounding_csv(_ds_text)
+            if _profile is None:
+                with _ds_right:
+                    st.error("Could not parse this CSV as a drone sounding. Expected "
+                             "an MM-670-style semicolon-delimited file with altitude, "
+                             "temperature, wind, and position columns.")
+            else:
+                # Determine CONUS coverage for HRRR/NAM gating at this location
+                _ds_in_conus = (24.0 <= _profile.lat <= 50.0) and (-125.0 <= _profile.lon <= -66.0)
 
-        if _profile is None:
-            with _ds_right:
-                st.error("Could not parse this CSV as a drone sounding. Expected "
-                         "an MM-670-style semicolon-delimited file with altitude, "
-                         "temperature, wind, and position columns.")
-        else:
-            # Determine CONUS coverage for HRRR/NAM gating at this location
-            _ds_in_conus = (24.0 <= _profile.lat <= 50.0) and (-125.0 <= _profile.lon <= -66.0)
+                with st.spinner(f"Verifying {_profile.n_samples}-sample ascent "
+                                f"against all models..."):
+                    _pv = verify_sounding_csv(_ds_text, in_conus=_ds_in_conus, bin_ft=float(_ds_bin))
 
-            with st.spinner(f"Verifying {_profile.n_samples}-sample ascent "
-                            f"against all models..."):
-                _pv = verify_sounding_csv(_ds_text, in_conus=_ds_in_conus, bin_ft=float(_ds_bin))
+                # Stash the result so the Model Performance page can reference the
+                # most recent sounding verification this session.
+                if _pv is not None and _pv.model_scores:
+                    st.session_state["_last_sounding_verification"] = {
+                        "aircraft": _pv.aircraft,
+                        "launch_time": _pv.launch_time.isoformat(),
+                        "lat": _pv.lat, "lon": _pv.lon,
+                        "best_model": _pv.best_model,
+                        "n_layers": _pv.n_layers,
+                        "span_ft": _profile.span_ft,
+                        "model_scores": _pv.model_scores,
+                    }
 
-            # Stash the result so the Model Performance page can reference the
-            # most recent sounding verification this session.
-            if _pv is not None and _pv.model_scores:
-                st.session_state["_last_sounding_verification"] = {
-                    "aircraft": _pv.aircraft,
-                    "launch_time": _pv.launch_time.isoformat(),
-                    "lat": _pv.lat, "lon": _pv.lon,
-                    "best_model": _pv.best_model,
-                    "n_layers": _pv.n_layers,
-                    "span_ft": _profile.span_ft,
-                    "model_scores": _pv.model_scores,
-                }
-
-            with _ds_right:
-                if _pv is None:
-                    st.error("Verification failed during processing.")
-                else:
-                    # Profile metadata banner
-                    _launch_str = _pv.launch_time.strftime("%d %b %Y %H:%M UTC")
-                    st.markdown(
-                        f'<div style="background:#161A1F;border-radius:6px;padding:10px 14px;'
-                        f'margin-bottom:12px;">'
-                        f'<div style="font-size:0.75rem;color:#D1D5DB;font-weight:600;">'
-                        f'{_pv.aircraft} \u00b7 {_launch_str}</div>'
-                        f'<div style="font-size:0.66rem;color:#6B7280;margin-top:3px;">'
-                        f'{_pv.lat:.4f}, {_pv.lon:.4f} \u00b7 '
-                        f'{_profile.span_ft:.0f} ft ascent \u00b7 {_pv.n_layers} layers '
-                        f'\u00b7 {_pv.bin_ft:.0f} ft bins</div>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    if not _pv.model_scores:
-                        st.warning("Profile parsed successfully, but no model data "
-                                   "could be fetched for this location/time. The "
-                                   "models may not have archived data for this date, "
-                                   "or the launch time is too far in the past.")
+                with _ds_right:
+                    if _pv is None:
+                        st.error("Verification failed during processing.")
                     else:
-                        # Best model badge
-                        if _pv.best_model:
+                        # Profile metadata banner
+                        _launch_str = _pv.launch_time.strftime("%d %b %Y %H:%M UTC")
+                        st.markdown(
+                            f'<div style="background:#161A1F;border-radius:6px;padding:10px 14px;'
+                            f'margin-bottom:12px;">'
+                            f'<div style="font-size:0.75rem;color:#D1D5DB;font-weight:600;">'
+                            f'{_pv.aircraft} \u00b7 {_launch_str}</div>'
+                            f'<div style="font-size:0.66rem;color:#6B7280;margin-top:3px;">'
+                            f'{_pv.lat:.4f}, {_pv.lon:.4f} \u00b7 '
+                            f'{_profile.span_ft:.0f} ft ascent \u00b7 {_pv.n_layers} layers '
+                            f'\u00b7 {_pv.bin_ft:.0f} ft bins</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        if not _pv.model_scores:
+                            st.warning("Profile parsed successfully, but no model data "
+                                       "could be fetched for this location/time. The "
+                                       "models may not have archived data for this date, "
+                                       "or the launch time is too far in the past.")
+                        else:
+                            # Best model badge
+                            if _pv.best_model:
+                                st.markdown(
+                                    f'<span style="display:inline-block;background:rgba(74,222,128,0.12);'
+                                    f'border:1px solid #4ade80;border-radius:4px;padding:3px 10px;'
+                                    f'font-size:0.7rem;color:#4ade80;font-weight:600;margin-bottom:10px;">'
+                                    f'Best profile fit: {_pv.best_model}</span>',
+                                    unsafe_allow_html=True,
+                                )
+
+                            # Profile-aggregate MAE table, ranked by composite
+                            def _ds_composite(s):
+                                sc = 0.0
+                                if s["wind_mae"] is not None:  sc += s["wind_mae"] * 3.0
+                                if s["temp_mae"] is not None:  sc += s["temp_mae"] * 1.0
+                                if s["pressure_mae"] is not None: sc += s["pressure_mae"] * 0.5
+                                if s["dir_mae"] is not None:   sc += s["dir_mae"] * 0.05
+                                if s["rh_mae"] is not None:    sc += s["rh_mae"] * 0.05
+                                return sc if any(s[k] is not None for k in ["wind_mae", "temp_mae"]) else float("inf")
+
+                            _ranked = sorted(
+                                _pv.model_scores.items(),
+                                key=lambda kv: _ds_composite(kv[1])
+                            )
+
+                            def _ds_cell(val, unit, good, warn):
+                                if val is None:
+                                    return '<div style="font-size:0.74rem;color:#4B5563;padding:5px 6px;text-align:center;">\u2014</div>'
+                                clr = "#4ade80" if val <= good else ("#E58E26" if val <= warn else "#ff6b4a")
+                                return (f'<div style="font-size:0.78rem;color:{clr};padding:5px 6px;'
+                                        f'text-align:center;font-variant-numeric:tabular-nums;">{val:.1f}</div>')
+
+                            _ds_grid = "minmax(70px,1.2fr) repeat(4, minmax(48px,1fr))"
+                            _ds_header = (
+                                f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
+                                f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Model</div>'
+                                f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Wind</div>'
+                                f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Dir</div>'
+                                f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Temp</div>'
+                                f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">RH</div>'
+                                f'</div>'
+                            )
+                            _ds_rows = ""
+                            for _rank, (_m, _s) in enumerate(_ranked, 1):
+                                _is_best = (_m == _pv.best_model)
+                                _bg = "#1E2530" if _is_best else "#161A1F"
+                                _nm_clr = "#4ade80" if _is_best else "#D1D5DB"
+                                _ds_rows += (
+                                    f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
+                                    f'<div style="font-size:0.78rem;color:{_nm_clr};padding:5px 6px;background:{_bg};">'
+                                    f'<span style="color:#6B7280;font-size:0.68rem;margin-right:5px;">{_rank}.</span>{_m}</div>'
+                                    f'<div style="background:{_bg};">{_ds_cell(_s["wind_mae"], "kt", 2.0, 4.0)}</div>'
+                                    f'<div style="background:{_bg};">{_ds_cell(_s["dir_mae"], "deg", 15, 30)}</div>'
+                                    f'<div style="background:{_bg};">{_ds_cell(_s["temp_mae"], "C", 1.5, 3.0)}</div>'
+                                    f'<div style="background:{_bg};">{_ds_cell(_s["rh_mae"], "pct", 5, 12)}</div>'
+                                    f'</div>'
+                                )
+                            st.markdown(_ds_header + _ds_rows, unsafe_allow_html=True)
+                            st.markdown(
+                                '<div style="font-size:0.62rem;color:#6B7280;margin-top:8px;">'
+                                'Profile-mean MAE across all layers. Wind kt \u00b7 Dir \u00b0 '
+                                '\u00b7 Temp \u00b0C \u00b7 RH %. Ranked by UAS-operational '
+                                'composite (wind-weighted). This scores vertical structure: '
+                                'a model can nail the surface yet miss the shear aloft.'
+                                '</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                            # Wind profile chart: observed vs best model, by altitude
+                            try:
+                                import plotly.graph_objects as _go
+                                _layers = bin_profile_by_alt(_profile, bin_ft=float(_ds_bin))
+                                _obs_alt = [l.alt_agl_ft for l in _layers]
+                                _obs_wind = [l.wind_speed_kt for l in _layers]
+
+                                _fig_prof = _go.Figure()
+                                _fig_prof.add_trace(_go.Scatter(
+                                    x=_obs_wind, y=_obs_alt, mode="lines+markers",
+                                    name="Drone obs", line=dict(color="#4ade80", width=3),
+                                    marker=dict(size=6),
+                                ))
+                                # Best model's interpolated wind per layer
+                                if _pv.best_model:
+                                    _bm_wind = [
+                                        ld.model_wind for ld in _pv.layer_details
+                                        if ld.model == _pv.best_model and ld.model_wind is not None
+                                    ]
+                                    _bm_alt = [
+                                        ld.alt_agl_ft for ld in _pv.layer_details
+                                        if ld.model == _pv.best_model and ld.model_wind is not None
+                                    ]
+                                    if _bm_wind:
+                                        _fig_prof.add_trace(_go.Scatter(
+                                            x=_bm_wind, y=_bm_alt, mode="lines+markers",
+                                            name=_pv.best_model,
+                                            line=dict(color="#3b82f6", width=2, dash="dot"),
+                                            marker=dict(size=5),
+                                        ))
+                                _fig_prof.update_layout(
+                                    title=dict(text="Wind speed profile \u2014 obs vs model",
+                                               font=dict(size=12, color="#9CA3AF")),
+                                    xaxis_title="Wind speed (kt)",
+                                    yaxis_title="Altitude (ft AGL)",
+                                    height=320, margin=dict(l=10, r=10, t=36, b=10),
+                                    paper_bgcolor="rgba(0,0,0,0)",
+                                    plot_bgcolor="rgba(0,0,0,0)",
+                                    font=dict(color="#9CA3AF", size=10),
+                                    legend=dict(font=dict(size=9), orientation="h",
+                                                yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                    xaxis=dict(gridcolor="#2A2F36"),
+                                    yaxis=dict(gridcolor="#2A2F36"),
+                                )
+                                st.plotly_chart(_fig_prof, use_container_width=True,
+                                                config={'displayModeBar': False})
+                            except Exception as _chart_e:
+                                st.caption(f"Profile chart unavailable: {_chart_e}")
+
+        except UnicodeDecodeError:
+            with _ds_right:
+                st.error("File encoding error. The drone CSV should be UTF-8 or ASCII.")
+        except Exception as _ds_err:
+            with _ds_right:
+                st.error(f"Sounding verification failed: {_ds_err}")
+
+elif _dc_type == "MWS Station":
+    # MWS (Meteomatics Weather Station) surface time-series verification.
+    # Same semicolon CSV family as the MM-670 drone export, but stationary —
+    # the sounding pipeline handles it naturally: parsing yields a single
+    # near-surface layer (time-averaged), which is then verified against all
+    # models at the station's exact coordinates. ARMS matches the model hour
+    # nearest the series start; hour-length exports verify most cleanly.
+    _mws_left, _mws_right = st.columns([1, 2])
+    with _mws_left:
+        st.markdown(
+            '<div style="font-size:0.7rem;color:#6B7280;margin-bottom:8px;">'
+            'Upload an MWS station CSV export to verify the surface state '
+            'against all models at the station coordinates. The observation '
+            'series is time-averaged and scored per model.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        _mws_file = st.file_uploader(
+            "MWS station CSV",
+            type=["csv"],
+            key="mws_upload",
+            label_visibility="collapsed",
+        )
+    if _mws_file is not None:
+        try:
+            _mws_text = _mws_file.getvalue().decode("utf-8", errors="replace")
+            _mws_prof = parse_sounding_csv(_mws_text)
+            if _mws_prof is None:
+                with _mws_right:
+                    st.error("Could not parse this CSV as an MWS export. Expected "
+                             "a semicolon-delimited Meteomatics-format file with "
+                             "time, position, temperature, RH, and wind columns.")
+            else:
+                _mws_conus = (24.0 <= _mws_prof.lat <= 50.0) and (-125.0 <= _mws_prof.lon <= -66.0)
+                with st.spinner(f"Verifying {_mws_prof.n_samples}-sample station series "
+                                f"against all models..."):
+                    _mv = verify_sounding_csv(_mws_text, in_conus=_mws_conus, bin_ft=150.0)
+                with _mws_right:
+                    if _mv is None or not _mv.model_scores:
+                        st.warning("Series parsed, but no model data could be fetched "
+                                   "for this location/time.")
+                    else:
+                        _mv_launch = _mv.launch_time.strftime("%d %b %Y %H:%M UTC")
+                        st.markdown(
+                            f'<div style="background:#161A1F;border-radius:6px;padding:10px 14px;'
+                            f'margin-bottom:12px;">'
+                            f'<div style="font-size:0.75rem;color:#D1D5DB;font-weight:600;">'
+                            f'{_mv.aircraft} \u00b7 {_mv_launch}</div>'
+                            f'<div style="font-size:0.66rem;color:#6B7280;margin-top:3px;">'
+                            f'{_mv.lat:.4f}, {_mv.lon:.4f} \u00b7 surface station series '
+                            f'\u00b7 time-averaged</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        if _mv.best_model:
                             st.markdown(
                                 f'<span style="display:inline-block;background:rgba(74,222,128,0.12);'
                                 f'border:1px solid #4ade80;border-radius:4px;padding:3px 10px;'
                                 f'font-size:0.7rem;color:#4ade80;font-weight:600;margin-bottom:10px;">'
-                                f'Best profile fit: {_pv.best_model}</span>',
+                                f'Best surface fit: {_mv.best_model}</span>',
                                 unsafe_allow_html=True,
                             )
-
-                        # Profile-aggregate MAE table, ranked by composite
-                        def _ds_composite(s):
-                            sc = 0.0
-                            if s["wind_mae"] is not None:  sc += s["wind_mae"] * 3.0
-                            if s["temp_mae"] is not None:  sc += s["temp_mae"] * 1.0
-                            if s["pressure_mae"] is not None: sc += s["pressure_mae"] * 0.5
-                            if s["dir_mae"] is not None:   sc += s["dir_mae"] * 0.05
-                            if s["rh_mae"] is not None:    sc += s["rh_mae"] * 0.05
-                            return sc if any(s[k] is not None for k in ["wind_mae", "temp_mae"]) else float("inf")
-
-                        _ranked = sorted(
-                            _pv.model_scores.items(),
-                            key=lambda kv: _ds_composite(kv[1])
+                        _mws_rows = ""
+                        _mws_grid = "minmax(70px,1.2fr) repeat(4, minmax(48px,1fr))"
+                        _mws_hdr = (
+                            f'<div style="display:grid;grid-template-columns:{_mws_grid};gap:1px;margin-bottom:1px;">'
+                            + "".join(f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">{h}</div>'
+                                      for h in ["Model", "Wind", "Dir", "Temp", "RH"])
+                            + '</div>'
                         )
-
-                        def _ds_cell(val, unit, good, warn):
-                            if val is None:
+                        def _mws_cell(v):
+                            if v is None:
                                 return '<div style="font-size:0.74rem;color:#4B5563;padding:5px 6px;text-align:center;">\u2014</div>'
-                            clr = "#4ade80" if val <= good else ("#E58E26" if val <= warn else "#ff6b4a")
-                            return (f'<div style="font-size:0.78rem;color:{clr};padding:5px 6px;'
-                                    f'text-align:center;font-variant-numeric:tabular-nums;">{val:.1f}</div>')
-
-                        _ds_grid = "minmax(70px,1.2fr) repeat(4, minmax(48px,1fr))"
-                        _ds_header = (
-                            f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
-                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;">Model</div>'
-                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Wind</div>'
-                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Dir</div>'
-                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">Temp</div>'
-                            f'<div style="font-size:0.6rem;color:#6B7280;text-transform:uppercase;padding:5px 6px;text-align:center;">RH</div>'
-                            f'</div>'
-                        )
-                        _ds_rows = ""
-                        for _rank, (_m, _s) in enumerate(_ranked, 1):
-                            _is_best = (_m == _pv.best_model)
-                            _bg = "#1E2530" if _is_best else "#161A1F"
-                            _nm_clr = "#4ade80" if _is_best else "#D1D5DB"
-                            _ds_rows += (
-                                f'<div style="display:grid;grid-template-columns:{_ds_grid};gap:1px;margin-bottom:1px;">'
-                                f'<div style="font-size:0.78rem;color:{_nm_clr};padding:5px 6px;background:{_bg};">'
-                                f'<span style="color:#6B7280;font-size:0.68rem;margin-right:5px;">{_rank}.</span>{_m}</div>'
-                                f'<div style="background:{_bg};">{_ds_cell(_s["wind_mae"], "kt", 2.0, 4.0)}</div>'
-                                f'<div style="background:{_bg};">{_ds_cell(_s["dir_mae"], "deg", 15, 30)}</div>'
-                                f'<div style="background:{_bg};">{_ds_cell(_s["temp_mae"], "C", 1.5, 3.0)}</div>'
-                                f'<div style="background:{_bg};">{_ds_cell(_s["rh_mae"], "pct", 5, 12)}</div>'
+                            return (f'<div style="font-size:0.78rem;color:#D1D5DB;padding:5px 6px;'
+                                    f'text-align:center;font-variant-numeric:tabular-nums;">{v:.1f}</div>')
+                        for _m, _s in sorted(_mv.model_scores.items(),
+                                             key=lambda kv: (kv[1]["wind_mae"] or 99) * 3 + (kv[1]["temp_mae"] or 99)):
+                            _hl = (_m == _mv.best_model)
+                            _bg2 = "#1E2530" if _hl else "#161A1F"
+                            _mws_rows += (
+                                f'<div style="display:grid;grid-template-columns:{_mws_grid};gap:1px;margin-bottom:1px;">'
+                                f'<div style="font-size:0.78rem;color:{"#4ade80" if _hl else "#D1D5DB"};padding:5px 6px;background:{_bg2};">{_m}</div>'
+                                f'<div style="background:{_bg2};">{_mws_cell(_s["wind_mae"])}</div>'
+                                f'<div style="background:{_bg2};">{_mws_cell(_s["dir_mae"])}</div>'
+                                f'<div style="background:{_bg2};">{_mws_cell(_s["temp_mae"])}</div>'
+                                f'<div style="background:{_bg2};">{_mws_cell(_s["rh_mae"])}</div>'
                                 f'</div>'
                             )
-                        st.markdown(_ds_header + _ds_rows, unsafe_allow_html=True)
-                        st.markdown(
-                            '<div style="font-size:0.62rem;color:#6B7280;margin-top:8px;">'
-                            'Profile-mean MAE across all layers. Wind kt \u00b7 Dir \u00b0 '
-                            '\u00b7 Temp \u00b0C \u00b7 RH %. Ranked by UAS-operational '
-                            'composite (wind-weighted). This scores vertical structure: '
-                            'a model can nail the surface yet miss the shear aloft.'
-                            '</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                        # Wind profile chart: observed vs best model, by altitude
-                        try:
-                            import plotly.graph_objects as _go
-                            _layers = bin_profile_by_alt(_profile, bin_ft=float(_ds_bin))
-                            _obs_alt = [l.alt_agl_ft for l in _layers]
-                            _obs_wind = [l.wind_speed_kt for l in _layers]
-
-                            _fig_prof = _go.Figure()
-                            _fig_prof.add_trace(_go.Scatter(
-                                x=_obs_wind, y=_obs_alt, mode="lines+markers",
-                                name="Drone obs", line=dict(color="#4ade80", width=3),
-                                marker=dict(size=6),
-                            ))
-                            # Best model's interpolated wind per layer
-                            if _pv.best_model:
-                                _bm_wind = [
-                                    ld.model_wind for ld in _pv.layer_details
-                                    if ld.model == _pv.best_model and ld.model_wind is not None
-                                ]
-                                _bm_alt = [
-                                    ld.alt_agl_ft for ld in _pv.layer_details
-                                    if ld.model == _pv.best_model and ld.model_wind is not None
-                                ]
-                                if _bm_wind:
-                                    _fig_prof.add_trace(_go.Scatter(
-                                        x=_bm_wind, y=_bm_alt, mode="lines+markers",
-                                        name=_pv.best_model,
-                                        line=dict(color="#3b82f6", width=2, dash="dot"),
-                                        marker=dict(size=5),
-                                    ))
-                            _fig_prof.update_layout(
-                                title=dict(text="Wind speed profile \u2014 obs vs model",
-                                           font=dict(size=12, color="#9CA3AF")),
-                                xaxis_title="Wind speed (kt)",
-                                yaxis_title="Altitude (ft AGL)",
-                                height=320, margin=dict(l=10, r=10, t=36, b=10),
-                                paper_bgcolor="rgba(0,0,0,0)",
-                                plot_bgcolor="rgba(0,0,0,0)",
-                                font=dict(color="#9CA3AF", size=10),
-                                legend=dict(font=dict(size=9), orientation="h",
-                                            yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                xaxis=dict(gridcolor="#2A2F36"),
-                                yaxis=dict(gridcolor="#2A2F36"),
-                            )
-                            st.plotly_chart(_fig_prof, use_container_width=True,
-                                            config={'displayModeBar': False})
-                        except Exception as _chart_e:
-                            st.caption(f"Profile chart unavailable: {_chart_e}")
-
-    except UnicodeDecodeError:
-        with _ds_right:
-            st.error("File encoding error. The drone CSV should be UTF-8 or ASCII.")
-    except Exception as _ds_err:
-        with _ds_right:
-            st.error(f"Sounding verification failed: {_ds_err}")
+                        st.markdown(_mws_hdr + _mws_rows, unsafe_allow_html=True)
+        except Exception as _mws_err:
+            with _mws_right:
+                st.error(f"MWS verification failed: {_mws_err}")
 
 st.divider()
 
