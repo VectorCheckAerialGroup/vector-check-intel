@@ -2334,7 +2334,9 @@ def _render_light_plan_svg(rows: list, tz_abbr_str: str) -> str:
         f'<span style="color:#6B7280;margin-left:auto;">local time ({tz_abbr_str})</span>'
         f'</div>'
     )
-    return svg + legend
+    # Cap the rendered width so the chart sits proportionate to the metric
+    # rows above it rather than spanning the full page width.
+    return f'<div style="max-width:82%;">{svg}{legend}</div>'
 
 
 if _lp_rows:
@@ -3045,6 +3047,12 @@ else:
             unsafe_allow_html=True,
         )
         _wind_html = _hdr_row("Model")
+        # Per-hour count of reporting models — green (agreement) is only
+        # meaningful when 3+ models actually report at that hour.
+        _wind_counts = [
+            sum(1 for _m2 in _mtx_models if _m2["wind_kt"][_hi2] is not None)
+            for _hi2 in range(_ncol)
+        ]
         for _mm in _mtx_models:
             _row = _model_name_cell(_mm["name"])
             for _hi in range(_ncol):
@@ -3053,11 +3061,15 @@ else:
                 _g = _mm["gust_kt"][_hi]
                 _spread = _consensus.get("wind_spread", [0] * _ncol)
                 _sp = _spread[_hi] if _hi < len(_spread) else 0
-                # Color the cell background subtly by cross-model spread at this
-                # hour: green calm agreement, amber moderate, red high.
-                if _sp >= 10:    _bg = "rgba(255,107,74,0.14)"
-                elif _sp >= 6:   _bg = "rgba(229,142,38,0.12)"
-                else:            _bg = "#161A1F"
+                # Intuitive confidence coloring: light red = models diverge at
+                # this hour (low confidence), light green = models tightly
+                # agree (high confidence), neutral in between.
+                if _sp >= 6:
+                    _bg = "rgba(255,107,74,0.16)"      # light red — divergence
+                elif _sp <= 3 and _wind_counts[_hi] >= 3:
+                    _bg = "rgba(74,222,128,0.10)"      # light green — agreement
+                else:
+                    _bg = "#161A1F"
                 if _w is None:
                     _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
                              f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
@@ -3083,14 +3095,22 @@ else:
             unsafe_allow_html=True,
         )
         _temp_html = _hdr_row("Model")
+        _temp_counts = [
+            sum(1 for _m2 in _mtx_models if _m2["temp_c"][_hi2] is not None)
+            for _hi2 in range(_ncol)
+        ]
         for _mm in _mtx_models:
             _row = _model_name_cell(_mm["name"])
             for _hi in range(_ncol):
                 _t = _mm["temp_c"][_hi]
                 _tspread = _consensus.get("temp_spread", [0] * _ncol)
                 _tsp = _tspread[_hi] if _hi < len(_tspread) else 0
-                if _tsp >= 5:    _bg = "rgba(229,142,38,0.12)"
-                else:            _bg = "#161A1F"
+                if _tsp >= 5:
+                    _bg = "rgba(255,107,74,0.16)"      # light red — divergence
+                elif _tsp <= 1.5 and _temp_counts[_hi] >= 3:
+                    _bg = "rgba(74,222,128,0.10)"      # light green — agreement
+                else:
+                    _bg = "#161A1F"
                 if _t is None:
                     _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
                              f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
@@ -3189,8 +3209,11 @@ else:
             '<div style="font-size:0.64rem;color:#6B7280;margin-top:14px;line-height:1.5;">'
             '48-hour horizon \u2014 scroll horizontally to see later hours. Columns show '
             'local time over Zulu. Models are ordered finest resolution first. '
-            'Highlighted cells flag cross-model disagreement at that hour '
-            '(wind \u2265 6 kt amber / \u2265 10 kt red spread; temp \u2265 5\u00b0C amber). '
+            'Cell shading is cross-model confidence at that hour: '
+            '<span style="color:#ff6b4a;">light red = models diverge (low confidence'
+            '; wind spread \u2265 6 kt, temp \u2265 5\u00b0C)</span> \u00b7 '
+            '<span style="color:#4ade80;">light green = models tightly agree (high '
+            'confidence; wind within 3 kt, temp within 1.5\u00b0C, 3+ models reporting)</span>. '
             'Hover a wind cell for exact speed and gust.'
             '</div>',
             unsafe_allow_html=True,
