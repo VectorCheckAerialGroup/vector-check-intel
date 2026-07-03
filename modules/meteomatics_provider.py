@@ -37,8 +37,11 @@ from modules.http_client import fetch_json, HttpFetchError
 logger = logging.getLogger("arms.meteomatics")
 
 METEOMATICS_BASE = "https://api.meteomatics.com"
-DEFAULT_TIMEOUT_S = 12.0     # per-attempt; kept moderate so a dead server costs
-                             # at most ~25 s once before the circuit opens
+DEFAULT_TIMEOUT_S = 20.0     # Meteomatics batched queries (esp. MIX) are large
+                             # and legitimately slow; 12 s caused false timeouts
+                             # that tripped the breaker on a healthy service.
+                             # A genuinely dead server costs ~42 s once, then the
+                             # circuit fails everything fast for the cooldown.
 
 # =============================================================================
 # CIRCUIT BREAKER
@@ -73,11 +76,23 @@ def mm_record_success() -> None:
 
 
 def _mm_fetch_json(url: str, timeout: float = DEFAULT_TIMEOUT_S,
-                   retries: int = 1, basic_auth=None):
+                   retries: int = 1, basic_auth=None, can_trip: bool = True):
     """All Meteomatics JSON fetches route through here so the circuit breaker
     sees every call. Raises MeteomaticsCircuitOpen instantly while the
-    circuit is open; records success/failure otherwise."""
-    from modules.http_client import fetch_json as _fj
+    circuit is open.
+
+    CRITICAL CLASSIFICATION RULE: the circuit only trips on failures that
+    indicate the SERVICE is unreachable — network/timeout errors (status None)
+    and 5xx. A 4xx (404/401/...) is the service being alive and answering;
+    Meteomatics 404s are a routine, designed event in ARMS (all-or-nothing
+    parameter semantics), and treating them as outages previously caused the
+    breaker to fabricate provider-down states on a healthy service.
+
+    can_trip=False exempts low-value probe calls (e.g. elevation lookup) from
+    opening the circuit, so a single slow micro-request cannot take down the
+    provider for the whole app.
+    """
+    from modules.http_client import fetch_json as _fj, HttpFetchError
     if mm_circuit_open():
         raise MeteomaticsCircuitOpen(
             "Meteomatics circuit open (recent failure) — failing fast")
@@ -85,8 +100,20 @@ def _mm_fetch_json(url: str, timeout: float = DEFAULT_TIMEOUT_S,
         result = _fj(url, timeout=timeout, retries=retries, basic_auth=basic_auth)
         mm_record_success()
         return result
+    except HttpFetchError as e:
+        status = getattr(e, "status", None)
+        if status is not None and 400 <= status < 500:
+            # Service answered — it's ALIVE. Do not trip; a 4xx even closes
+            # the circuit (proof of reachability). Re-raise for the caller's
+            # own 404/param handling.
+            mm_record_success()
+        elif can_trip:
+            mm_record_failure()
+        raise
     except Exception:
-        mm_record_failure()
+        # Non-HTTP exception (raw socket/timeout leak) — network-class.
+        if can_trip:
+            mm_record_failure()
         raise
 
 
@@ -336,7 +363,7 @@ def fetch_meteomatics_elevation(lat: float, lon: float) -> float:
     timestamp = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     url = f"{METEOMATICS_BASE}/{timestamp}/elevation:m/{lat:.4f},{lon:.4f}/json"
     try:
-        payload = _mm_fetch_json(url, timeout=5, retries=1, basic_auth=creds)
+        payload = _mm_fetch_json(url, timeout=5, retries=1, basic_auth=creds, can_trip=False)
         data = payload.get("data") or []
         if data and data[0].get("coordinates"):
             dates = data[0]["coordinates"][0].get("dates") or []
