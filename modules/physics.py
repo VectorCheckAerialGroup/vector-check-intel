@@ -8,7 +8,7 @@ SNOWPACK_BLSN_THRESHOLD_M: float = 0.05
 
 # Authoritative unit conversion constants — use ONLY these, never magic numbers.
 METERS_TO_FEET: float = 3.28084
-METERS_TO_SM: float = 1609.34
+METERS_TO_SM: float = 1609.344
 KMH_TO_KT: float = 0.539957
 
 # Standard atmosphere constants
