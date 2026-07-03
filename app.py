@@ -1442,36 +1442,68 @@ if data is None:
     st.stop()
 elif "error" in data and data["error"]:
     _err_msg = data.get('message', 'Unknown Error')
-    st.error(f"⚠️ CRITICAL API REJECTION: {_err_msg}")
     _route_for_msg = _all_models.get(model_choice, (None, None, None))[0]
     _has_fallback = _route_for_msg is not None and _route_for_msg.fallback is not None
-    if data.get("_primary_failed") and _has_fallback:
-        # Both providers failed
-        st.caption(
-            f"Model **{model_choice}** failed to return data from both its primary "
-            "provider and the configured fallback. This usually indicates a wider "
-            "outage across multiple weather data services rather than a problem "
-            "with a single provider. Try selecting a different model from the "
-            "sidebar — models routed through different providers will be unaffected."
-        )
-    elif data.get("_primary_failed"):
-        # No fallback configured — Meteomatics-only model failed
-        st.caption(
-            f"Model **{model_choice}** is served exclusively by Meteomatics and "
-            "has no Open-Meteo fallback. Meteomatics returned an error for this "
-            "request. Try a different model (e.g. ECMWF IFS or GFS) which can "
-            "fail over to Open-Meteo."
+
+    # ---- EMERGENCY SUBSTITUTION ----------------------------------------
+    # If the selected model is Meteomatics-exclusive (no configured fallback)
+    # and Meteomatics is down, do NOT leave the operator without a forecast.
+    # Automatically substitute the best available Open-Meteo-served model for
+    # this site (HRDPS in Canada, else ECMWF via Open-Meteo best-match) and
+    # continue with a prominent banner. Only if the substitute ALSO fails do
+    # we fall through to the fatal-error stop.
+    _substituted_from = None
+    if data.get("_primary_failed") and not _has_fallback:
+        _sub_candidates = ["HRDPS (Canada 2.5km)", "ECMWF IFS (Global 9km)",
+                           "GFS (Global 13km)", "ICON (Global 13km)"]
+        for _sub in _sub_candidates:
+            if _sub == model_choice or _sub not in _all_models:
+                continue
+            _sub_data = fetch_weather_payload(lat, lon, _sub)
+            if _sub_data and "error" not in _sub_data and "hourly" in _sub_data:
+                _substituted_from = model_choice
+                data = _sub_data
+                model_choice = _sub
+                break
+
+    if _substituted_from:
+        st.warning(
+            f"⚠ **Emergency model substitution active.** "
+            f"**{_substituted_from}** is unavailable (its provider is down and it "
+            f"has no fallback route). ARMS has automatically substituted "
+            f"**{model_choice}** so this brief remains operational. Verify against "
+            f"the Model Performance scorecard, and reselect {_substituted_from} "
+            f"once its provider recovers."
         )
     else:
-        # Generic / Open-Meteo-primary failure
-        st.caption(
-            f"Model **{model_choice}** failed to return data for these coordinates. "
-            "This may be due to (1) a temporary outage in that model's data feed, "
-            "(2) the location falling outside the model's resolved grid, or "
-            "(3) a specific variable being unsupported by this model. "
-            "Try selecting a different model from the sidebar (e.g. ECMWF or GFS as a stable fallback)."
-        )
-    st.stop()
+        st.error(f"⚠️ CRITICAL API REJECTION: {_err_msg}")
+        if data.get("_primary_failed") and _has_fallback:
+            # Both providers failed
+            st.caption(
+                f"Model **{model_choice}** failed to return data from both its primary "
+                "provider and the configured fallback. This usually indicates a wider "
+                "outage across multiple weather data services rather than a problem "
+                "with a single provider. Try selecting a different model from the "
+                "sidebar — models routed through different providers will be unaffected."
+            )
+        elif data.get("_primary_failed"):
+            # No fallback configured AND emergency substitution also failed
+            st.caption(
+                f"Model **{model_choice}** is served exclusively by Meteomatics and "
+                "has no Open-Meteo fallback. Automatic substitution was attempted "
+                "but no alternative model returned data either — this indicates a "
+                "wider multi-provider outage. Check network status and retry."
+            )
+        else:
+            # Generic / Open-Meteo-primary failure
+            st.caption(
+                f"Model **{model_choice}** failed to return data for these coordinates. "
+                "This may be due to (1) a temporary outage in that model's data feed, "
+                "(2) the location falling outside the model's resolved grid, or "
+                "(3) a specific variable being unsupported by this model. "
+                "Try selecting a different model from the sidebar (e.g. ECMWF or GFS as a stable fallback)."
+            )
+        st.stop()
 elif "hourly" not in data:
     st.error("⚠️ CRITICAL: Malformed data payload received from server.")
     st.stop()
