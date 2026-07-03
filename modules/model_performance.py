@@ -150,7 +150,8 @@ def _fetch_model_history_meteomatics_mos(station_id: str, lat: float, lon: float
 
     try:
         from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
-        payload = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2, basic_auth=creds)
+        from modules.meteomatics_provider import _mm_fetch_json as _mmfj
+        payload = _mmfj(url, timeout=REQUEST_TIMEOUT_S, retries=1, basic_auth=creds)
     except _HttpFetchError as e:
         logger.info("MOS history fetch failed for %s: %s", display_name, e)
         return None
@@ -293,7 +294,8 @@ def _fetch_model_history_meteomatics(model: str, lat: float, lon: float,
 
     try:
         from modules.http_client import fetch_json as _fetch_json, HttpFetchError as _HttpFetchError
-        payload = _fetch_json(url, timeout=REQUEST_TIMEOUT_S, retries=2, basic_auth=creds)
+        from modules.meteomatics_provider import _mm_fetch_json as _mmfj
+        payload = _mmfj(url, timeout=REQUEST_TIMEOUT_S, retries=1, basic_auth=creds)
     except _HttpFetchError as e:
         logger.warning("Meteomatics history fetch failed for %s: %s", display_name, e)
         return None
