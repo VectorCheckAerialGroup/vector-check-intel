@@ -636,8 +636,12 @@ def build_model_matrix(models: list, n_hours: int = 24,
     local_tz_abbr = ""
     if tz_str:
         try:
-            import pytz
-            _ltz = pytz.timezone(tz_str)
+            try:
+                from zoneinfo import ZoneInfo
+                _ltz = ZoneInfo(tz_str)
+            except Exception:
+                import pytz
+                _ltz = pytz.timezone(tz_str)
             for t in axis:
                 t_utc = t.replace(tzinfo=timezone.utc)
                 t_loc = t_utc.astimezone(_ltz)
@@ -731,63 +735,104 @@ def build_model_matrix(models: list, n_hours: int = 24,
 
 
 def summarize_matrix(matrix: dict) -> list:
-    """Produces a short list of notable agreement/divergence callouts for the
-    side-by-side view. Returns a list of (severity, text) tuples — kept terse
-    so the UI shows only a couple of points, per design.
-
-    severity is one of: "alert" (large divergence), "info" (notable agreement
-    or moderate divergence).
+    """Produces a short list of callouts for the side-by-side view, kept in
+    strict lockstep with the cell-shading logic so text and highlights always
+    describe the same hours:
+        light red  = wind spread >= 6 kt or temp spread >= 5 C  -> "alert"
+        light green = wind spread <= 3 kt with 3+ models        -> "info"
+    Labels cite local time first (matching the table headers) with Zulu in
+    parentheses. Contiguous runs are reported as ranges, not single peaks.
     """
     if not matrix.get("models"):
         return []
 
     cons = matrix["consensus"]
-    labels = matrix["hour_labels"]
+    z_labels = matrix.get("hour_labels") or []
+    l_labels = matrix.get("local_labels") or []
+    tz_abbr = matrix.get("local_tz_abbr") or ""
     notes = []
 
-    # Find the worst wind divergence hour
+    def _lab(i):
+        z = z_labels[i] if i < len(z_labels) else "?"
+        if i < len(l_labels):
+            return f"{l_labels[i]} {tz_abbr} ({z})".strip()
+        return z
+
+    def _range_lab(i0, i1):
+        if i0 == i1:
+            return _lab(i0)
+        z0 = z_labels[i0] if i0 < len(z_labels) else "?"
+        z1 = z_labels[i1] if i1 < len(z_labels) else "?"
+        if i0 < len(l_labels) and i1 < len(l_labels):
+            return (f"{l_labels[i0]}\u2013{l_labels[i1]} {tz_abbr} "
+                    f"({z0}\u2013{z1})").strip()
+        return f"{z0}\u2013{z1}"
+
+    def _runs(mask):
+        """Contiguous index runs where mask[i] is True -> [(i0, i1), ...]."""
+        out, s = [], None
+        for i, m in enumerate(mask):
+            if m and s is None:
+                s = i
+            elif not m and s is not None:
+                out.append((s, i - 1)); s = None
+        if s is not None:
+            out.append((s, len(mask) - 1))
+        return out
+
+    # Per-hour reporting-model counts (same gate the green cells use)
+    mdl = matrix["models"]
+    n_hours = len(z_labels)
+    wind_counts = [sum(1 for m in mdl if m["wind_kt"][i] is not None)
+                   for i in range(n_hours)]
+
     ws = cons.get("wind_spread", [])
+
+    # --- Wind divergence: exactly the red-cell condition (spread >= 6) ---
     if ws:
-        max_w = max(ws)
-        max_w_i = ws.index(max_w)
-        if max_w >= 10:
+        red_runs = _runs([s >= 6 for s in ws])
+        if red_runs:
+            # Report the run containing the overall peak; mention count if more
+            peak_i = ws.index(max(ws))
+            main = next((r for r in red_runs if r[0] <= peak_i <= r[1]), red_runs[0])
+            extra = len(red_runs) - 1
+            extra_txt = f" (+{extra} more window{'s' if extra > 1 else ''})" if extra > 0 else ""
             notes.append(("alert",
-                f"Large wind disagreement at {labels[max_w_i]} "
-                f"(\u00b1{max_w:.0f} kt across models) \u2014 low confidence, "
-                f"recheck before committing."))
-        elif max_w >= 6:
-            notes.append(("info",
-                f"Moderate wind spread peaks at {labels[max_w_i]} "
-                f"(\u00b1{max_w:.0f} kt)."))
+                f"Models diverge on wind {_range_lab(*main)} \u2014 red cells, "
+                f"spread peaks \u00b1{max(ws):.0f} kt at {_lab(peak_i)}. "
+                f"Low confidence{extra_txt}."))
 
-    # Direction divergence
-    ds = cons.get("dir_spread", [])
-    if ds:
-        max_d = max(ds)
-        max_d_i = ds.index(max_d)
-        if max_d >= 90:
-            notes.append(("alert",
-                f"Wind direction splits badly at {labels[max_d_i]} "
-                f"({max_d:.0f}\u00b0 spread) \u2014 models disagree on flow regime."))
+    # --- Wind agreement: exactly the green-cell condition (<=3 kt, 3+ models) ---
+    if ws:
+        green_mask = [s <= 3 and wind_counts[i] >= 3 for i, s in enumerate(ws)]
+        green_runs = _runs(green_mask)
+        if green_runs:
+            longest = max(green_runs, key=lambda r: r[1] - r[0])
+            if longest[1] - longest[0] >= 3:   # only note meaningful windows (4+ h)
+                notes.append(("info",
+                    f"Models tightly agree on wind {_range_lab(*longest)} "
+                    f"\u2014 green cells, within \u00b13 kt. High confidence."))
 
-    # Temperature divergence
+    # --- Temperature divergence: red-cell condition (spread >= 5 C) ---
     ts = cons.get("temp_spread", [])
     if ts:
-        max_t = max(ts)
-        max_t_i = ts.index(max_t)
-        if max_t >= 5:
-            notes.append(("info",
-                f"Temperature spread reaches {max_t:.0f}\u00b0C at {labels[max_t_i]}."))
+        t_runs = _runs([s >= 5 for s in ts])
+        if t_runs:
+            peak_i = ts.index(max(ts))
+            main = next((r for r in t_runs if r[0] <= peak_i <= r[1]), t_runs[0])
+            notes.append(("alert",
+                f"Temperature spread reaches {max(ts):.0f}\u00b0C "
+                f"{_range_lab(*main)} \u2014 red cells."))
 
-    # Strong agreement window (first 12h with consistently low spread)
-    if ws and len(ws) >= 6:
-        early = ws[:12]
-        if early and max(early) <= 3:
-            notes.append(("info",
-                "Strong model agreement through the first 12 h "
-                "(wind within \u00b13 kt) \u2014 high confidence near-term."))
+    # --- Direction split (no cell shading; threshold unchanged) ---
+    ds = cons.get("dir_spread", [])
+    if ds and max(ds) >= 90:
+        di = ds.index(max(ds))
+        notes.append(("alert",
+            f"Wind direction splits at {_lab(di)} ({max(ds):.0f}\u00b0 spread) "
+            f"\u2014 models disagree on flow regime."))
 
-    # Visibility concern
+    # --- Visibility concern ---
     vm = cons.get("vis_min", [])
     vm_valid = [(i, v) for i, v in enumerate(vm) if v is not None]
     if vm_valid:
@@ -795,7 +840,7 @@ def summarize_matrix(matrix: dict) -> list:
         if worst_v < 3.0:
             notes.append(("alert",
                 f"At least one model drops visibility to {worst_v:.1f} SM "
-                f"at {labels[worst_i]}."))
+                f"at {_lab(worst_i)}."))
 
     return notes[:4]   # keep it to a few points, per design
 
