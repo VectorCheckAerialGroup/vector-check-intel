@@ -1362,9 +1362,9 @@ if _workspace == "Spatial":
     try:
         from streamlit_folium import st_folium as _st_folium
         from modules.spatial_products import (
-            build_radar_map, build_satellite_map, build_topo_map,
-            build_model_precip_map, fetch_rainviewer_frame,
-            MODEL_PRECIP_LAYERS,
+            build_radar_map, build_satellite_map, build_elevation_map,
+            build_mix_precip_map, fetch_rainviewer_frames,
+            fetch_mix_precip_overlay,
         )
     except ImportError as _sp_err:
         st.info("Spatial workspace requires folium + streamlit-folium in "
@@ -1372,31 +1372,46 @@ if _workspace == "Spatial":
         st.stop()
 
     @st.cache_data(ttl=300, show_spinner=False)
-    def _rainviewer_frame_cached() -> str | None:
-        return fetch_rainviewer_frame()
+    def _rv_frames_cached() -> list:
+        return fetch_rainviewer_frames(5)
 
-    # --- Slim header + single shared control strip ---
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _goes_times_cached(now_iso: str) -> list:
+        """Four GOES frame timestamps at 15-min steps ending ~30 min ago
+        (publication latency margin). now_iso keys the cache per 10-min."""
+        _now = datetime.fromisoformat(now_iso)
+        _anchor = _now.replace(minute=(_now.minute // 15) * 15,
+                               second=0, microsecond=0) - timedelta(minutes=30)
+        return [(_anchor - timedelta(minutes=15 * k)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for k in range(3, -1, -1)]
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _mix_overlay_cached(ov_lat: float, ov_lon: float, ov_zoom: int):
+        try:
+            _mm = st.secrets.get("meteomatics", {})
+            _u, _p = _mm.get("user"), _mm.get("password")
+            if not (_u and _p):
+                return None, None
+            return fetch_mix_precip_overlay(ov_lat, ov_lon, ov_zoom, _u, _p)
+        except Exception:
+            return None, None
+
     st.markdown(
         f'<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:2px;">'
         f'<span style="font-size:1.05rem;font-weight:600;color:#E5E7EB;'
         f'letter-spacing:0.5px;">SPATIAL</span>'
-        f'<span style="font-size:0.7rem;color:#6B7280;">{lat:.3f}, {lon:.3f}</span>'
-        f'</div>',
+        f'<span style="font-size:0.7rem;color:#6B7280;">{lat:.3f}, {lon:.3f} '
+        f'\u00b7 radar + satellite looping</span></div>',
         unsafe_allow_html=True,
     )
-    _q1, _q2, _q3, _q4 = st.columns([1, 1, 1.6, 1.4])
+    _q1, _q2, _q3 = st.columns([1, 1, 1.4])
     with _q1:
         _sp_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9, 10],
                                     value=7, key="spq_zoom")
     with _q2:
         _sp_op = st.slider("Radar opacity", 0.3, 1.0, 0.8, 0.05, key="spq_op")
     with _q3:
-        _sp_precip = st.selectbox("Model precip layer",
-                                  list(MODEL_PRECIP_LAYERS.keys()),
-                                  key="spq_precip")
-    with _q4:
-        _sp_sat = st.radio("Satellite",
-                           ["GeoColor", "Visible hi-res", "Band 13 IR"],
+        _sp_sat = st.radio("Satellite", ["GeoColor", "Band 13 IR"],
                            horizontal=True, key="spq_sat")
 
     _PANE_H = 380
@@ -1408,51 +1423,44 @@ if _workspace == "Spatial":
             unsafe_allow_html=True,
         )
 
-    _rv_path = _rainviewer_frame_cached()
+    _rv = _rv_frames_cached()
+    _goes_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _goes_t = _goes_times_cached(
+        _goes_now.replace(minute=(_goes_now.minute // 10) * 10,
+                          second=0, microsecond=0).isoformat()
+    )
+    _mix_uri, _mix_bounds = _mix_overlay_cached(lat, lon, int(_sp_zoom))
 
     _row1a, _row1b = st.columns(2, gap="small")
     with _row1a:
-        _pane_label("Radar \u00b7 ECCC 1 km + RainViewer")
-        _st_folium(
-            build_radar_map(lat, lon, _sp_zoom, _rv_path,
-                            opacity=_sp_op, minimal=True),
-            height=_PANE_H, use_container_width=True,
-            returned_objects=[], key="spq_radar",
-        )
+        _pane_label("Radar \u00b7 15-min loop")
+        _st_folium(build_radar_map(lat, lon, _sp_zoom, rv_frames=_rv,
+                                   opacity=_sp_op, minimal=True, loop=True),
+                   height=_PANE_H, use_container_width=True,
+                   returned_objects=[], key="spq_radar")
     with _row1b:
-        _pane_label(f"Satellite \u00b7 GOES-East {_sp_sat}")
-        _st_folium(
-            build_satellite_map(lat, lon,
-                                min(_sp_zoom, 8 if _sp_sat == "Visible hi-res" else 7),
-                                product=_sp_sat, minimal=True),
-            height=_PANE_H, use_container_width=True,
-            returned_objects=[], key="spq_sat_map",
-        )
+        _pane_label(f"Satellite \u00b7 GOES-East {_sp_sat} \u00b7 loop")
+        _st_folium(build_satellite_map(lat, lon, _sp_zoom, product=_sp_sat,
+                                       times=_goes_t, minimal=True),
+                   height=_PANE_H, use_container_width=True,
+                   returned_objects=[], key="spq_sat_map")
 
     _row2a, _row2b = st.columns(2, gap="small")
     with _row2a:
-        _pane_label("Topo \u00b7 OpenTopoMap + Toporama")
-        _st_folium(
-            build_topo_map(lat, lon, max(_sp_zoom, 9), minimal=True),
-            height=_PANE_H, use_container_width=True,
-            returned_objects=[], key="spq_topo",
-        )
+        _pane_label("Elevation \u00b7 hypsometric relief")
+        _st_folium(build_elevation_map(lat, lon, max(_sp_zoom, 9),
+                                       minimal=True),
+                   height=_PANE_H, use_container_width=True,
+                   returned_objects=[], key="spq_topo")
     with _row2b:
-        _pane_label(f"Model precip \u00b7 {_sp_precip}")
-        _st_folium(
-            build_model_precip_map(lat, lon, _sp_zoom,
-                                   layer=MODEL_PRECIP_LAYERS[_sp_precip],
-                                   minimal=True),
-            height=_PANE_H, use_container_width=True,
-            returned_objects=[], key="spq_precip_map",
-        )
-
-    st.caption(
-        "All panes share the site centre and zoom for direct comparison. "
-        "Layers are live external services (ECCC GeoMet \u00b7 NASA GIBS \u00b7 "
-        "RainViewer \u00b7 NRCan). Satellite zoom is capped at the sensor's "
-        "native resolution."
-    )
+        _pane_label("Meteomatics MIX \u00b7 1h precip"
+                    + ("" if _mix_uri else " \u00b7 fallback: HRDPS"))
+        _st_folium(build_mix_precip_map(lat, lon, _sp_zoom,
+                                        overlay_uri=_mix_uri,
+                                        overlay_bounds=_mix_bounds,
+                                        minimal=True),
+                   height=_PANE_H, use_container_width=True,
+                   returned_objects=[], key="spq_precip_map")
     st.stop()
 
 
