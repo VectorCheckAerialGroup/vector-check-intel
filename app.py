@@ -53,7 +53,7 @@ from modules.physics import calc_td, calculate_density_altitude, SNOWPACK_BLSN_T
 # CONSTANTS & PREFERENCES
 # =============================================================================
 CONVECTIVE_CCL_MULTIPLIER          = 400
-METERS_TO_SM                       = 1609.34
+METERS_TO_SM                       = 1609.344
 ALL_P_LEVELS                       = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400, 300, 250, 200, 150]
 PREFS_FILE                         = "user_prefs.json"   # JSON fallback only
 PREFS_TABLE                        = "user_preferences"  # Supabase primary store
@@ -384,7 +384,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
                     st.session_state['input_ice']  = ice
 
                     try: log_action(user, 0.0, 0.0, "SYS", "AUTH_AND_EULA_SUCCESS")
-                    except: pass
+                    except Exception: pass
                     st.rerun()
             else:
                 # Record the failed attempt
@@ -396,7 +396,7 @@ This Agreement shall be governed by and construed in accordance with the laws of
                 else:
                     st.error("⚠️ UNAUTHORIZED: Account locked for 15 minutes.")
                 try: log_action(user or "UNKNOWN", 0.0, 0.0, "SYS", "AUTH_FAIL")
-                except: pass
+                except Exception: pass
 
     return False
 
@@ -486,7 +486,7 @@ def hazard_lvl(h_str: str) -> float:
 
 def calc_tactical_visibility(vis_raw_m, rh: int, w_spd: float, wx: int) -> float:
     if vis_raw_m is not None:
-        vis_sm = float(vis_raw_m) / 1609.34
+        vis_sm = float(vis_raw_m) / 1609.344
     else:
         if rh >= 95:   vis_sm = 1.5
         elif rh >= 90: vis_sm = 3.0
@@ -841,27 +841,36 @@ def compute_impact_matrix(
     color_vals:  list = []
     hover_texts: list = []
 
+    def _hd_at(key, idx, default=None):
+        """Safe hourly access: missing key or short array degrades to default,
+        never IndexError (the old `h_data.get(key, [0])[idx]` crashed when the
+        key was absent and idx > 0)."""
+        arr = h_data.get(key)
+        if arr and len(arr) > idx:
+            return arr[idx]
+        return default
+
     for mat_i in range(nearest_idx, max_idx + 1):
         failures: list = []
 
         # --- Surface wind ---
-        w_raw  = h_data.get('wind_speed_10m', [0])[mat_i]
+        w_raw  = _hd_at('wind_speed_10m', mat_i)
         w_spd  = (float(w_raw) if w_raw is not None else 0.0) * k_conv
-        sfc_dir_raw = h_data.get('wind_direction_10m', [0])[mat_i]
+        sfc_dir_raw = _hd_at('wind_direction_10m', mat_i)
         sfc_dir_mat = float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0
 
-        g_raw_list = h_data.get('wind_gusts_10m')
-        g_raw      = (float(g_raw_list[mat_i]) * k_conv) if (g_raw_list and len(g_raw_list) > mat_i and g_raw_list[mat_i] is not None) else None
-        gst        = resolve_gust(w_spd, g_raw)
+        g_raw  = _hd_at('wind_gusts_10m', mat_i)
+        g_raw  = float(g_raw) * k_conv if g_raw is not None else None
+        gst    = resolve_gust(w_spd, g_raw)
 
         # --- Weather code ---
-        wx_raw = h_data.get('weather_code', [0])
-        wx     = int(wx_raw[mat_i]) if (wx_raw and len(wx_raw) > mat_i and wx_raw[mat_i] is not None) else 0
+        wx_raw = _hd_at('weather_code', mat_i)
+        wx     = int(wx_raw) if wx_raw is not None else 0
 
         # --- Temperature / moisture ---
-        t_temp_raw = h_data.get('temperature_2m', [0])[mat_i]
+        t_temp_raw = _hd_at('temperature_2m', mat_i)
         t_temp     = float(t_temp_raw) if t_temp_raw is not None else 0.0
-        rh_raw_mat = h_data.get('relative_humidity_2m', [0])[mat_i]
+        rh_raw_mat = _hd_at('relative_humidity_2m', mat_i)
         rh_v       = int(rh_raw_mat) if rh_raw_mat is not None else 0
         td_mat     = calc_td(t_temp, rh_v)
         sfc_spread = t_temp - td_mat
@@ -1723,29 +1732,38 @@ st.sidebar.divider()
 
 
 # --- 1. CORE EXTRACTIONS ---
-t_temp_raw = h.get('temperature_2m', [0])[forecast_idx]
+# Safe hourly accessor: a provider payload missing a key, or returning a
+# shorter-than-expected array, must degrade to a default — never crash the
+# dashboard with an IndexError. (The old `h.get(key, [0])[forecast_idx]`
+# pattern crashed whenever forecast_idx > 0 and the key was absent.)
+def _h_at(key, default=None):
+    arr = h.get(key)
+    if arr and len(arr) > forecast_idx:
+        return arr[forecast_idx]
+    return default
+
+t_temp_raw = _h_at('temperature_2m')
 t_temp     = float(t_temp_raw) if t_temp_raw is not None else 0.0
 
-rh_raw = h.get('relative_humidity_2m', [0])[forecast_idx]
+rh_raw = _h_at('relative_humidity_2m')
 rh     = int(rh_raw) if rh_raw is not None else 0
 
-w_spd_raw = h.get('wind_speed_10m', [0])[forecast_idx]
+w_spd_raw = _h_at('wind_speed_10m')
 w_spd     = (float(w_spd_raw) if w_spd_raw is not None else 0.0) * k_conv
 
-wx_list = h.get('weather_code', [0])
-wx      = int(wx_list[forecast_idx]) if (wx_list and len(wx_list) > forecast_idx and wx_list[forecast_idx] is not None) else 0
+wx_raw = _h_at('weather_code')
+wx     = int(wx_raw) if wx_raw is not None else 0
 
 td         = calc_td(t_temp, rh)
 sfc_spread = t_temp - td
 
-sn_depth_raw = h.get('snow_depth', [0])
-sn_depth     = float(sn_depth_raw[forecast_idx]) if sn_depth_raw and len(sn_depth_raw) > forecast_idx and sn_depth_raw[forecast_idx] is not None else 0.0
+sn_depth_raw = _h_at('snow_depth')
+sn_depth     = float(sn_depth_raw) if sn_depth_raw is not None else 0.0
 
-sfc_dir_raw = h.get('wind_direction_10m', [0])[forecast_idx]
+sfc_dir_raw = _h_at('wind_direction_10m')
 sfc_dir     = format_dir(float(sfc_dir_raw) if sfc_dir_raw is not None else 0.0, w_spd)
 
-vis_raw_list = h.get('visibility')
-vis_raw_val  = vis_raw_list[forecast_idx] if vis_raw_list and len(vis_raw_list) > forecast_idx else None
+vis_raw_val  = _h_at('visibility')
 vis_sm       = calc_tactical_visibility(vis_raw_val, rh, w_spd, wx)
 
 
@@ -1940,16 +1958,18 @@ else:
     u_v_list = h.get('wind_speed_1000hPa')
     if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
         u_v   = float(u_v_list[forecast_idx]) * k_conv
-        u_dir = int(h.get('wind_direction_1000hPa', [0])[forecast_idx])
-        u_h_list = h.get('geopotential_height_1000hPa')
-        u_h   = float(u_h_list[forecast_idx]) if (u_h_list and len(u_h_list) > forecast_idx and u_h_list[forecast_idx] is not None) else 110.0
+        _ud_raw = _h_at('wind_direction_1000hPa')
+        u_dir = int(_ud_raw) if _ud_raw is not None else int(sfc_dir)
+        _uh_raw = _h_at('geopotential_height_1000hPa')
+        u_h   = float(_uh_raw) if _uh_raw is not None else 110.0
     else:
         u_v_list = h.get('wind_speed_925hPa')
         if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
             u_v   = float(u_v_list[forecast_idx]) * k_conv
-            u_dir = int(h.get('wind_direction_925hPa', [0])[forecast_idx])
-            u_h_list = h.get('geopotential_height_925hPa')
-            u_h   = float(u_h_list[forecast_idx]) if (u_h_list and len(u_h_list) > forecast_idx and u_h_list[forecast_idx] is not None) else 760.0
+            _ud_raw = _h_at('wind_direction_925hPa')
+            u_dir = int(_ud_raw) if _ud_raw is not None else int(sfc_dir)
+            _uh_raw = _h_at('geopotential_height_925hPa')
+            u_h   = float(_uh_raw) if _uh_raw is not None else 760.0
         else:
             u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
 
@@ -4115,11 +4135,14 @@ st.subheader("Vertical Profile Trend")
 def _extract_sfc_at(idx_v):
     """Extract surface temp / dewpoint / pressure / wind at a given hourly index."""
     try:
-        t_v = h.get('temperature_2m', [0])[idx_v]
-        rh_v = h.get('relative_humidity_2m', [0])[idx_v]
-        p_v = h.get('surface_pressure', [0])[idx_v]
-        ws_v = h.get('wind_speed_10m', [0])[idx_v]
-        wd_v = h.get('wind_direction_10m', [0])[idx_v]
+        def _hv(key):
+            arr = h.get(key)
+            return arr[idx_v] if (arr and len(arr) > idx_v) else None
+        t_v = _hv('temperature_2m')
+        rh_v = _hv('relative_humidity_2m')
+        p_v = _hv('surface_pressure')
+        ws_v = _hv('wind_speed_10m')
+        wd_v = _hv('wind_direction_10m')
         t_c = float(t_v) if t_v is not None else 0.0
         rh_p = int(rh_v) if rh_v is not None else 0
         td_c = calc_td(t_c, rh_p)
