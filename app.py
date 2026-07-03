@@ -3222,6 +3222,115 @@ else:
     st.divider()
 
     # =========================================================================
+    # SPATIAL PRODUCTS — radar, satellite, topo, model precip
+    # =========================================================================
+    # Live map products centred on the selected site. Layers are external
+    # tile/WMS services (ECCC GeoMet, NASA GIBS, RainViewer, NRCan, OpenTopo);
+    # availability follows the provider. Rendered via folium; if the optional
+    # streamlit-folium dependency is missing the section degrades to a notice
+    # rather than breaking the dashboard.
+    st.subheader("Spatial Products")
+    try:
+        from streamlit_folium import st_folium as _st_folium
+        from modules.spatial_products import (
+            build_radar_map, build_satellite_map, build_topo_map,
+            build_model_precip_map, fetch_rainviewer_frame,
+            MODEL_PRECIP_LAYERS,
+        )
+        _spatial_ok = True
+    except ImportError as _sp_imp_err:
+        _spatial_ok = False
+        st.info(
+            "Spatial products require the folium + streamlit-folium packages. "
+            f"Add them to requirements.txt and redeploy. ({_sp_imp_err})"
+        )
+
+    if _spatial_ok:
+        @st.cache_data(ttl=300, show_spinner=False)
+        def _rainviewer_frame_cached() -> str | None:
+            return fetch_rainviewer_frame()
+
+        _sp_tab_radar, _sp_tab_sat, _sp_tab_topo, _sp_tab_precip = st.tabs(
+            ["Radar", "Satellite", "Topo", "Model Precip"]
+        )
+
+        with _sp_tab_radar:
+            _r_c1, _r_c2, _r_c3 = st.columns([1, 1, 2])
+            with _r_c1:
+                _r_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9, 10],
+                                           value=8, key="sp_radar_zoom")
+            with _r_c2:
+                _r_op = st.slider("Opacity", 0.3, 1.0, 0.75, 0.05,
+                                  key="sp_radar_op")
+            _rv_path = _rainviewer_frame_cached()
+            _r_map = build_radar_map(lat, lon, _r_zoom, _rv_path,
+                                     opacity=_r_op)
+            _st_folium(_r_map, height=540, use_container_width=True,
+                       returned_objects=[], key="sp_radar_map")
+            st.caption(
+                "ECCC 1 km composite rain rate (highest-resolution public radar "
+                "over Canada) layered with the RainViewer global composite "
+                "(10-minute updates). Toggle layers via the control, top-right."
+            )
+
+        with _sp_tab_sat:
+            _s_c1, _s_c2, _s_c3 = st.columns([1.4, 1, 1.6])
+            with _s_c1:
+                _s_prod = st.radio("Product", ["GeoColor", "Band 13 IR"],
+                                   horizontal=True, key="sp_sat_prod")
+            with _s_c2:
+                _s_zoom = st.select_slider("Zoom", options=[4, 5, 6, 7],
+                                           value=6, key="sp_sat_zoom")
+            _s_map = build_satellite_map(lat, lon, _s_zoom, product=_s_prod)
+            _st_folium(_s_map, height=540, use_container_width=True,
+                       returned_objects=[], key="sp_sat_map")
+            st.caption(
+                "GOES-East via NASA GIBS. GeoColor is the CIRA day-visible / "
+                "night-IR blend — the operational equivalent of the College of "
+                "DuPage sandwich product. Native resolution limits maximum zoom."
+            )
+
+        with _sp_tab_topo:
+            _t_c1, _t_c2 = st.columns([1, 3])
+            with _t_c1:
+                _t_zoom = st.select_slider("Zoom", options=[8, 9, 10, 11, 12, 13],
+                                           value=11, key="sp_topo_zoom")
+                _t_toporama = st.checkbox("NRCan Toporama overlay", value=True,
+                                          key="sp_topo_nrcan")
+            _t_map = build_topo_map(lat, lon, _t_zoom, show_toporama=_t_toporama)
+            _st_folium(_t_map, height=540, use_container_width=True,
+                       returned_objects=[], key="sp_topo_map")
+            st.caption(
+                "OpenTopoMap contour base with the authoritative NRCan Toporama "
+                "layer over Canada. Use for terrain-channelling and launch-site "
+                "assessment."
+            )
+
+        with _sp_tab_precip:
+            _p_c1, _p_c2, _p_c3 = st.columns([1.8, 1, 1.2])
+            with _p_c1:
+                _p_layer_name = st.selectbox(
+                    "Model layer", list(MODEL_PRECIP_LAYERS.keys()),
+                    key="sp_precip_layer",
+                )
+            with _p_c2:
+                _p_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9],
+                                           value=7, key="sp_precip_zoom")
+            _p_map = build_model_precip_map(
+                lat, lon, _p_zoom,
+                layer=MODEL_PRECIP_LAYERS[_p_layer_name],
+            )
+            _st_folium(_p_map, height=540, use_container_width=True,
+                       returned_objects=[], key="sp_precip_map")
+            st.caption(
+                "Raw NWP precipitation fields served as imagery by ECCC GeoMet "
+                "for the latest model run — actual model output on the map, not "
+                "a nowcast blend. HRDPS 2.5 km is the finest available."
+            )
+
+    st.divider()
+
+    # =========================================================================
     # SECTION 2 — MODEL PERFORMANCE (Retrospective)
     # How each model has scored against actual observations in the last 24h.
     # =========================================================================
