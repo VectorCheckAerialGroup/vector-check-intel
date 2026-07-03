@@ -37,7 +37,58 @@ from modules.http_client import fetch_json, HttpFetchError
 logger = logging.getLogger("arms.meteomatics")
 
 METEOMATICS_BASE = "https://api.meteomatics.com"
-DEFAULT_TIMEOUT_S = 20.0     # Meteomatics can be slower than Open-Meteo on complex queries
+DEFAULT_TIMEOUT_S = 12.0     # per-attempt; kept moderate so a dead server costs
+                             # at most ~25 s once before the circuit opens
+
+# =============================================================================
+# CIRCUIT BREAKER
+# =============================================================================
+# When Meteomatics is unreachable, every section that touches it (primary
+# forecast, ensemble, scorecard, soundings) would otherwise independently pay
+# a full timeout x retry chain — turning one provider outage into a multi-
+# minute page load. The breaker converts that into: pay the timeout ONCE,
+# then fail-fast (0 s) everywhere for a cooldown, then a single probe re-tests.
+# Module-level state deliberately spans sessions and threads.
+import time as _time
+
+_MM_CIRCUIT = {"open_until": 0.0}
+MM_CIRCUIT_COOLDOWN_S = 180.0   # fail-fast window after a failure
+
+
+class MeteomaticsCircuitOpen(Exception):
+    """Raised (fail-fast) when Meteomatics recently failed and the cooldown
+    has not elapsed. Callers treat this exactly like a fetch failure."""
+
+
+def mm_circuit_open() -> bool:
+    return _time.time() < _MM_CIRCUIT["open_until"]
+
+
+def mm_record_failure() -> None:
+    _MM_CIRCUIT["open_until"] = _time.time() + MM_CIRCUIT_COOLDOWN_S
+
+
+def mm_record_success() -> None:
+    _MM_CIRCUIT["open_until"] = 0.0
+
+
+def _mm_fetch_json(url: str, timeout: float = DEFAULT_TIMEOUT_S,
+                   retries: int = 1, basic_auth=None):
+    """All Meteomatics JSON fetches route through here so the circuit breaker
+    sees every call. Raises MeteomaticsCircuitOpen instantly while the
+    circuit is open; records success/failure otherwise."""
+    from modules.http_client import fetch_json as _fj
+    if mm_circuit_open():
+        raise MeteomaticsCircuitOpen(
+            "Meteomatics circuit open (recent failure) — failing fast")
+    try:
+        result = _fj(url, timeout=timeout, retries=retries, basic_auth=basic_auth)
+        mm_record_success()
+        return result
+    except Exception:
+        mm_record_failure()
+        raise
+
 
 # =============================================================================
 # MODEL CATALOG
@@ -285,7 +336,7 @@ def fetch_meteomatics_elevation(lat: float, lon: float) -> float:
     timestamp = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     url = f"{METEOMATICS_BASE}/{timestamp}/elevation:m/{lat:.4f},{lon:.4f}/json"
     try:
-        payload = fetch_json(url, timeout=5, retries=1, basic_auth=creds)
+        payload = _mm_fetch_json(url, timeout=5, retries=1, basic_auth=creds)
         data = payload.get("data") or []
         if data and data[0].get("coordinates"):
             dates = data[0]["coordinates"][0].get("dates") or []
@@ -359,7 +410,7 @@ def fetch_meteomatics_mos(station_id: str, hours_ahead: int = 96) -> dict:
     url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
            f"/json?source=mm-mos")
     try:
-        payload = fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=2,
+        payload = _mm_fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=1,
                               basic_auth=creds)
     except HttpFetchError as e:
         msg = e.message
@@ -428,7 +479,7 @@ def fetch_meteomatics_station_obs(station_id: str, hours_back: int = 24) -> list
     url = (f"{METEOMATICS_BASE}/{validdate}/{param_str}/{station_id}"
            f"/json?source=mix-obs&on_invalid=fill_with_invalid")
     try:
-        payload = fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=2,
+        payload = _mm_fetch_json(url, timeout=DEFAULT_TIMEOUT_S, retries=1,
                               basic_auth=creds)
     except HttpFetchError as e:
         logger.info("mix-obs fetch failed for %s: %s", station_id, e)
@@ -788,12 +839,18 @@ def _fetch_one_batch(
     param_str = ",".join(mm_params)
     url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
     try:
-        return fetch_json(
+        return _mm_fetch_json(
             url,
             timeout=DEFAULT_TIMEOUT_S,
-            retries=2,
+            retries=1,
             basic_auth=creds,
         )
+    except MeteomaticsCircuitOpen as e:
+        return {
+            "_batch_error": True,
+            "message": str(e),
+            "status": None,
+        }
     except HttpFetchError as e:
         return {
             "_batch_error": True,
