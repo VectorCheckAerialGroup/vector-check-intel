@@ -99,8 +99,23 @@ def build_radar_map(lat: float, lon: float, zoom: int,
                     show_rainviewer: bool = True,
                     opacity: float = 0.75,
                     minimal: bool = False) -> folium.Map:
-    """Radar composite: ECCC 1 km rain rate + RainViewer global smooth."""
+    """Premium radar stack, best layer on top:
+
+    1. IEM NEXRAD N0Q composite (Iowa State Mesonet tile cache) — the
+       high-quality 1 km base-reflectivity XYZ tiles that most polished web
+       radars are built on. Smooth at every zoom (native slippy tiles, no WMS
+       rescaling artifacts). NEXRAD coverage extends into southern Canada.
+    2. ECCC 1 km rain rate (WMS) — fills Canadian coverage north of NEXRAD.
+       Drawn beneath IEM so NEXRAD wins where both exist.
+    3. RainViewer global composite — worldwide fallback context.
+    """
     m = _base_map(lat, lon, zoom, tiles="dark", minimal=minimal)
+    if show_rainviewer and rainviewer_path:
+        TileLayer(
+            f"https://tilecache.rainviewer.com{rainviewer_path}/512/{{z}}/{{x}}/{{y}}/4/1_1.png",
+            attr="RainViewer.com", name="RainViewer composite",
+            opacity=opacity * 0.85, max_zoom=12, overlay=True,
+        ).add_to(m)
     if show_geomet:
         WmsTileLayer(
             url=GEOMET_WMS,
@@ -109,12 +124,13 @@ def build_radar_map(lat: float, lon: float, zoom: int,
             opacity=opacity, name="ECCC 1 km rain rate",
             attr="Environment and Climate Change Canada",
         ).add_to(m)
-    if show_rainviewer and rainviewer_path:
-        TileLayer(
-            f"https://tilecache.rainviewer.com{rainviewer_path}/512/{{z}}/{{x}}/{{y}}/4/1_1.png",
-            attr="RainViewer.com", name="RainViewer composite",
-            opacity=opacity, max_zoom=12, overlay=True,
-        ).add_to(m)
+    # Top layer: IEM NEXRAD N0Q — the premium reflectivity tiles
+    TileLayer(
+        "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png",
+        attr="Iowa Environmental Mesonet / NOAA NEXRAD",
+        name="NEXRAD N0Q composite", opacity=opacity,
+        max_zoom=12, overlay=True,
+    ).add_to(m)
     if not minimal:
         folium.LayerControl(collapsed=True).add_to(m)
     return m
@@ -127,10 +143,16 @@ def build_satellite_map(lat: float, lon: float, zoom: int,
     """GOES-East via NASA GIBS. GeoColor = day-vis/night-IR blend (the
     operational 'sandwich'); Band 13 = clean IR window."""
     m = _base_map(lat, lon, zoom, tiles="dark", minimal=minimal)
-    if product == "GeoColor":
-        gibs_layer, maxz, nm = "GOES-East_ABI_GeoColor", 7, "GOES-East GeoColor"
-    else:
-        gibs_layer, maxz, nm = "GOES-East_ABI_Band13_Clean_Infrared", 7, "GOES-East Band 13 IR"
+    _SAT_PRODUCTS = {
+        "GeoColor": ("GOES-East_ABI_GeoColor", 7, "GOES-East GeoColor"),
+        "Visible hi-res": ("GOES-East_ABI_Band2_Red_Visible_1km", 8,
+                            "GOES-East Band 2 visible (1 km, daytime)"),
+        "Band 13 IR": ("GOES-East_ABI_Band13_Clean_Infrared", 7,
+                        "GOES-East Band 13 clean IR"),
+    }
+    gibs_layer, maxz, nm = _SAT_PRODUCTS.get(product, _SAT_PRODUCTS["GeoColor"])
+    # max_native_zoom + higher max_zoom = Leaflet upscales the native tiles by
+    # smooth interpolation (soft, Windy-style) instead of hard pixel blocks.
     TileLayer(
         GIBS_WMTS.format(layer=gibs_layer, maxz=maxz),
         attr="NASA GIBS / NOAA GOES-East", name=nm,
@@ -142,18 +164,41 @@ def build_satellite_map(lat: float, lon: float, zoom: int,
 
 
 def build_topo_map(lat: float, lon: float, zoom: int,
-                   show_toporama: bool = True,
+                   show_toporama: bool = False,
                    minimal: bool = False) -> folium.Map:
-    """Topographic base: OpenTopoMap, with NRCan Toporama WMS overlay."""
-    m = _base_map(lat, lon, zoom, tiles="opentopo", minimal=minimal)
+    """Terrain-relief topo: Esri World Hillshade (high-resolution shaded
+    elevation, ~10-30 m source DEMs) as the base, with the Esri topographic
+    layer blended over it so contours/names sit on visible relief. Optional
+    NRCan Toporama overlay for authoritative Canadian cartography."""
+    m = folium.Map(
+        location=[lat, lon], zoom_start=zoom,
+        tiles=None, control_scale=not minimal, prefer_canvas=True,
+        zoom_control=not minimal,
+    )
+    TileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/"
+        "World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, USGS | World Hillshade", name="Hillshade relief",
+        max_zoom=16,
+    ).add_to(m)
+    TileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri | World Topographic Map", name="Topo overlay",
+        opacity=0.55, max_zoom=16, overlay=True,
+    ).add_to(m)
     if show_toporama:
         WmsTileLayer(
             url="https://maps.geogratis.gc.ca/wms/toporama_en",
             layers="WMS-Toporama",
             fmt="image/png", transparent=False, version="1.3.0",
-            opacity=0.65, name="NRCan Toporama",
+            opacity=0.5, name="NRCan Toporama",
             attr="Natural Resources Canada",
         ).add_to(m)
+    folium.CircleMarker(
+        [lat, lon], radius=7, color="#E58E26", weight=2,
+        fill=True, fill_opacity=0.15, tooltip="Detachment",
+    ).add_to(m)
     if not minimal:
         folium.LayerControl(collapsed=True).add_to(m)
     return m
