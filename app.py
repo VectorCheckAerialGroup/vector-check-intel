@@ -1284,7 +1284,8 @@ _out_of_coverage = [name for name, (_route, _id, ok) in _all_models.items() if n
 # Priority ordering — Meteomatics MIX surfaces first as the operational default;
 # then highest-resolution regional models, then global models.
 _priority = [
-    "Meteomatics MIX",                  # default first-load (best 0-24h)
+    "Meteomatics MIX",                  # default first-load (best 0-24h);
+                                        # emergency substitution covers outages
     "HRDPS (Canada 2.5km)",             # Canada regional
     "HRRR (CONUS 3km)",                 # CONUS rapid update
     "NAM (CONUS 3km)",                  # CONUS longer horizon
@@ -1554,6 +1555,55 @@ if _health["failed_models"] and _health["last_failure_at"] is not None:
             "fallback (Meteomatics MIX, ECMWF AIFS) are temporarily unavailable. "
             "The banner clears automatically when the next Meteomatics call succeeds."
         )
+        if st.button("Run Meteomatics diagnostic", key="mm_diag_btn"):
+            # One tiny authenticated request, bypassing cache AND breaker,
+            # reporting the verbatim result. Interpretation:
+            #   200            -> account + service healthy; ARMS-side issue
+            #   401 / 403      -> credentials / trial-status problem
+            #   5xx            -> Meteomatics outage (SLA-reportable)
+            #   timeout        -> network path or hard outage
+            import base64 as _b64, time as _t
+            try:
+                _mm_sec = st.secrets.get("meteomatics", {})
+                _du, _dp = _mm_sec.get("user"), _mm_sec.get("password")
+                if not (_du and _dp):
+                    st.error("No Meteomatics credentials in secrets.")
+                else:
+                    _durl = ("https://api.meteomatics.com/"
+                             "now/t_2m:C/44.16,-77.38/json")
+                    _dreq = urllib.request.Request(_durl, headers={
+                        "Authorization": "Basic " + _b64.b64encode(
+                            f"{_du}:{_dp}".encode()).decode(),
+                        "User-Agent": "VectorCheck-ARMS-diag/1.0"})
+                    _t0 = _t.time()
+                    try:
+                        with urllib.request.urlopen(_dreq, timeout=10) as _dr:
+                            _ms = (_t.time() - _t0) * 1000
+                            st.success(f"HTTP {_dr.status} in {_ms:.0f} ms — "
+                                       "account and service are HEALTHY. If the "
+                                       "banner persists, hard-restart the app to "
+                                       "clear stale failure state.")
+                    except urllib.error.HTTPError as _de:
+                        _ms = (_t.time() - _t0) * 1000
+                        _body = ""
+                        try:
+                            _body = _de.read(300).decode("utf-8", "replace")
+                        except Exception:
+                            pass
+                        if _de.code in (401, 403):
+                            st.error(f"HTTP {_de.code} in {_ms:.0f} ms — "
+                                     f"CREDENTIALS / TRIAL-STATUS problem, not an "
+                                     f"outage. Response: {_body}")
+                        else:
+                            st.error(f"HTTP {_de.code} in {_ms:.0f} ms — "
+                                     f"service-side error. Response: {_body}")
+                    except Exception as _de:
+                        _ms = (_t.time() - _t0) * 1000
+                        st.error(f"NETWORK failure after {_ms:.0f} ms: {_de} — "
+                                 "their endpoint is unreachable from this server "
+                                 "(outage or network path).")
+            except Exception as _diag_err:
+                st.error(f"Diagnostic could not run: {_diag_err}")
 
 st.divider()
 
