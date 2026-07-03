@@ -713,7 +713,8 @@ def _build_meteomatics_column(model_id: str, lat: float, lon: float,
     url = f"{METEOMATICS_BASE}/{validdate}/{param_str}/{lat:.4f},{lon:.4f}/json?model={model_id}"
 
     try:
-        payload = fetch_json(url, timeout=20, retries=2, basic_auth=creds)
+        from modules.meteomatics_provider import _mm_fetch_json as _mmfj
+        payload = _mmfj(url, timeout=12, retries=1, basic_auth=creds)
     except Exception as e:
         logger.warning("Meteomatics column fetch failed for %s: %s", model_id, e)
         return None
