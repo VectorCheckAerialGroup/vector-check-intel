@@ -11,3 +11,5 @@ plotly>=5.18.0
 fpdf2>=2.7.9
 pygeomag>=1.1.0
 bcrypt>=4.0.0
+folium>=0.15.0
+streamlit-folium>=0.18.0
