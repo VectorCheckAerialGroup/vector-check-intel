@@ -1463,10 +1463,11 @@ if _workspace == "Spatial":
     _eccc_t = _eccc_times_cached(
         _now_utc.replace(minute=(_now_utc.minute // 6) * 6,
                          second=0, microsecond=0).isoformat())
-    # MIX loop frames: same cadence as the radar loop, 15-min steps
-    _mix_t = [(_now_utc.replace(minute=(_now_utc.minute // 15) * 15,
-                                second=0, microsecond=0)
-               - timedelta(minutes=15 * k)).strftime("%Y-%m-%dT%H:%M:00Z")
+    # MIX loop frames: 1-HOUR steps. precip_1h:mm is a sliding 1-hour
+    # accumulation — frames closer together than 60 min overlap and appear
+    # to stack on top of each other. Hourly frames are disjoint windows.
+    _mix_t = [(_now_utc.replace(minute=0, second=0, microsecond=0)
+               - timedelta(hours=k)).strftime("%Y-%m-%dT%H:%M:00Z")
               for k in range(3, -1, -1)]
     _mix_uris, _mix_bounds, _mix_times = _mix_frames_cached(
         lat, lon, int(_sp_zoom), "|".join(_mix_t))
