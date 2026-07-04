@@ -1365,7 +1365,7 @@ if _workspace == "Spatial":
         from modules.spatial_quad import (build_quad_html, nearest_stations,
                                           beam_height_ft, SAT_PRODUCTS)
         from modules.spatial_products import (fetch_rainviewer_frames,
-                                              fetch_mix_precip_overlay)
+                                              fetch_mix_precip_frames)
     except ImportError as _sp_err:
         st.info(f"Spatial workspace unavailable: {_sp_err}")
         st.stop()
@@ -1382,16 +1382,30 @@ if _workspace == "Spatial":
         return [(_anchor - timedelta(minutes=15 * k)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 for k in range(3, -1, -1)]
 
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _eccc_times_cached(now_iso: str) -> list:
+        """Four ECCC radar frame times on the 6-min product grid, ~12-min
+        steps, anchored 6 min back for publication latency."""
+        _now = datetime.fromisoformat(now_iso)
+        _anchor = _now.replace(minute=(_now.minute // 6) * 6,
+                               second=0, microsecond=0) - timedelta(minutes=6)
+        return [(_anchor - timedelta(minutes=12 * k)).strftime("%Y-%m-%dT%H:%M:00Z")
+                for k in range(3, -1, -1)]
+
     @st.cache_data(ttl=600, show_spinner=False)
-    def _mix_overlay_cached(ov_lat: float, ov_lon: float, ov_zoom: int):
+    def _mix_frames_cached(ov_lat: float, ov_lon: float, ov_zoom: int,
+                           times_key: str):
         try:
             _mm = st.secrets.get("meteomatics", {})
             _u, _p = _mm.get("user"), _mm.get("password")
             if not (_u and _p):
-                return None, None
-            return fetch_mix_precip_overlay(ov_lat, ov_lon, ov_zoom, _u, _p)
+                return [], None, []
+            _times = times_key.split("|")
+            _uris, _b = fetch_mix_precip_frames(ov_lat, ov_lon, ov_zoom,
+                                                _u, _p, _times)
+            return _uris, _b, _times
         except Exception:
-            return None, None
+            return [], None, []
 
     st.markdown(
         f'<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:2px;">'
@@ -1442,17 +1456,27 @@ if _workspace == "Spatial":
         )
 
     _rv = _rv_frames_cached()
-    _goes_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     _goes_t = _goes_times_cached(
-        _goes_now.replace(minute=(_goes_now.minute // 10) * 10,
-                          second=0, microsecond=0).isoformat())
-    _mix_uri, _mix_bounds = _mix_overlay_cached(lat, lon, int(_sp_zoom))
+        _now_utc.replace(minute=(_now_utc.minute // 10) * 10,
+                         second=0, microsecond=0).isoformat())
+    _eccc_t = _eccc_times_cached(
+        _now_utc.replace(minute=(_now_utc.minute // 6) * 6,
+                         second=0, microsecond=0).isoformat())
+    # MIX loop frames: same cadence as the radar loop, 15-min steps
+    _mix_t = [(_now_utc.replace(minute=(_now_utc.minute // 15) * 15,
+                                second=0, microsecond=0)
+               - timedelta(minutes=15 * k)).strftime("%Y-%m-%dT%H:%M:00Z")
+              for k in range(3, -1, -1)]
+    _mix_uris, _mix_bounds, _mix_times = _mix_frames_cached(
+        lat, lon, int(_sp_zoom), "|".join(_mix_t))
 
     _quad = build_quad_html(
         lat, lon, _sp_zoom, 0.8, _sat_choice,
         station_id=_sta_id, station_product=_prod_code,
         rv_path=(_rv[-1] if _rv else None), goes_times=_goes_t,
-        mix_uri=_mix_uri, mix_bounds=_mix_bounds,
+        eccc_times=_eccc_t, mix_uris=_mix_uris, mix_times=_mix_times,
+        mix_bounds=_mix_bounds,
     )
     _components.html(_quad, height=796, scrolling=False)
     st.stop()
