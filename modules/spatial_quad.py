@@ -78,8 +78,9 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
-                    rv_path=None, goes_times=None,
-                    mix_uri=None, mix_bounds=None, pane_h=380):
+                    rv_path=None, goes_times=None, eccc_times=None,
+                    mix_uris=None, mix_times=None,
+                    mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
     sat_layer, sat_maxz = SAT_PRODUCTS.get(
         sat_product, list(SAT_PRODUCTS.values())[0])
@@ -92,9 +93,11 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "lat": lat, "lon": lon, "zoom": int(zoom),
         "radarOp": radar_opacity,
         "satLayer": sat_layer, "satMaxZ": sat_maxz,
-        "goesTimes": goes_times or ["default"],
+        "goesTimes": goes_times or [],
+        "ecccTimes": eccc_times or [],
         "rvPath": rv_path, "station": sta,
-        "mixUri": mix_uri, "mixBounds": mix_bounds,
+        "mixUris": mix_uris or [], "mixTimes": mix_times or [],
+        "mixBounds": mix_bounds,
         "paneH": pane_h,
     }
     return _TEMPLATE.replace("__CFG__", json.dumps(cfg))
@@ -108,7 +111,7 @@ _TEMPLATE = r"""
  body{margin:0;background:transparent;font-family:system-ui,sans-serif;}
  .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
  .cell{position:relative;border-radius:10px;overflow:hidden;background:#0b0e12;}
- .map{width:100%;height:__H__px;}
+ .map{width:100%;height:380px;}
  .lbl{position:absolute;top:8px;left:10px;z-index:1000;font-size:10px;
       letter-spacing:1px;text-transform:uppercase;color:#cbd5e1;
       background:rgba(10,12,16,0.72);padding:3px 9px;border-radius:5px;
@@ -127,6 +130,7 @@ _TEMPLATE = r"""
 const CFG = __CFG__;
 const DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
 const GIBS = (lyr,t,mz)=>`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${lyr}/default/${t}/GoogleMapsCompatible_Level${mz}/{z}/{y}/{x}.png`;
+const GEOMET='https://geo.weather.gc.ca/geomet';
 
 function cell(id,label){
   const g=document.getElementById('grid');
@@ -142,16 +146,13 @@ function mkmap(id,zoom,maxZoom){
                  fillOpacity:0.15}).addTo(m);
   return m;
 }
-// ---------- build panes ----------
 const sta=CFG.station;
 let radarLabel='RADAR \u00b7 COMPOSITE';
-if(sta){
-  radarLabel=`RADAR \u00b7 ${sta.id}` + (sta.cc==='ca' ? ' \u00b7 ECCC COMPOSITE' : ` \u00b7 ${sta.product} 0.5\u00b0`);
-}
+if(sta){radarLabel=`RADAR \u00b7 ${sta.id}`+(sta.cc==='ca'?' \u00b7 ECCC':` \u00b7 ${sta.product} 0.5\u00b0`);}
 cell('m1',radarLabel);
 cell('m2',`SATELLITE \u00b7 ${CFG.satLayer.includes('Band2')?'VIS RED':'IR CLEAN'}`);
 cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
-cell('m4', CFG.mixUri ? 'METEOMATICS MIX \u00b7 1H PRECIP' : 'MODEL PRECIP \u00b7 HRDPS (MIX OFFLINE)');
+cell('m4', (CFG.mixUris&&CFG.mixUris.length)?'METEOMATICS MIX \u00b7 1H PRECIP':'MODEL PRECIP \u00b7 HRDPS (MIX OFFLINE)');
 
 const m1=mkmap('m1',CFG.zoom);
 const m2=mkmap('m2',Math.min(CFG.zoom,CFG.satMaxZ),CFG.satMaxZ);
@@ -159,8 +160,12 @@ const m3=mkmap('m3',Math.max(CFG.zoom,9),12);
 const m4=mkmap('m4',CFG.zoom);
 const maps=[m1,m2,m3,m4];
 
-// ---------- radar frames ----------
+// ---------- RADAR frames (no static underlay — loop owns the pane) ----------
 let radarFrames=[];
+function ecccLayer(t){
+  return L.tileLayer.wms(GEOMET,{layers:'RADAR_1KM_RRAI',format:'image/png',
+    transparent:true,version:'1.3.0',opacity:0,time:t});
+}
 if(sta && sta.cc==='us'){
   for(let fi=4;fi>=0;fi--){
     radarFrames.push(L.tileLayer(
@@ -168,22 +173,28 @@ if(sta && sta.cc==='us'){
       {opacity:0,maxZoom:12}).addTo(m1));
   }
 }else{
-  if(CFG.rvPath){
-    L.tileLayer(`https://tilecache.rainviewer.com${CFG.rvPath}/512/{z}/{x}/{y}/4/1_1.png`,
-      {opacity:CFG.radarOp*0.6,maxZoom:12}).addTo(m1);
-  }
-  ['-m45m','-m30m','-m15m',''].forEach(suf=>{
-    radarFrames.push(L.tileLayer(
+  // Composite: IEM frames + ECCC timed frames stepped together
+  const iem=['-m45m','-m30m','-m15m',''].map(suf=>L.tileLayer(
       `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${suf}/{z}/{x}/{y}.png`,
       {opacity:0,maxZoom:12}).addTo(m1));
-  });
-  if(sta && sta.cc==='ca'){
-    L.tileLayer.wms('https://geo.weather.gc.ca/geomet',
-      {layers:'RADAR_1KM_RRAI',format:'image/png',transparent:true,
-       opacity:CFG.radarOp,version:'1.3.0'}).addTo(m1);
+  const ec=(CFG.ecccTimes||[]).map(t=>ecccLayer(t).addTo(m1));
+  // pair frames: frame i = [iem[i], ec[i]]
+  const n=Math.max(iem.length,ec.length);
+  for(let i=0;i<n;i++){
+    radarFrames.push({set:function(op){
+      iem.forEach((l,j)=>l.setOpacity(j===i?op:l.options._z||0));
+      // handled jointly below
+    }});
+  }
+  radarFrames=[];
+  for(let i=0;i<n;i++){
+    (function(i){radarFrames.push({
+      setOpacity:function(op){
+        iem.forEach((l,j)=>l.setOpacity(j===i?op:0));
+        ec.forEach((l,j)=>l.setOpacity(j===i?op:0));
+      }});})(i);
   }
 }
-// station geometry: marker + range rings on any station
 if(sta){
   L.circleMarker([sta.lat,sta.lon],{radius:5,color:'#4ade80',weight:2,
     fillOpacity:0.9}).addTo(m1).bindTooltip(`${sta.id} ${sta.name}`);
@@ -191,64 +202,69 @@ if(sta){
     L.circle([sta.lat,sta.lon],{radius:rk*1000,color:'#4ade80',weight:1,
       opacity:0.35,fill:false,dashArray:'4 6'}).addTo(m1);
   });
+  if(sta.cc==='ca'){
+    // Canadian single-site: timed ECCC frames as the loop
+    const ec=(CFG.ecccTimes||[]).map(t=>ecccLayer(t).addTo(m1));
+    radarFrames=ec;
+  }
   m1.setView([(CFG.lat+sta.lat)/2,(CFG.lon+sta.lon)/2],CFG.zoom);
 }
-// ---------- satellite frames ----------
-const satFrames=CFG.goesTimes.map(t=>
+// ---------- SATELLITE: 'default' latest guaranteed when stopped ----------
+const satLatest=L.tileLayer(GIBS(CFG.satLayer,'default',CFG.satMaxZ),
+  {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
+const satFrames=(CFG.goesTimes||[]).filter(t=>t!=='default').map(t=>
   L.tileLayer(GIBS(CFG.satLayer,t,CFG.satMaxZ),{opacity:0,maxZoom:CFG.satMaxZ}).addTo(m2));
-// ---------- elevation ----------
+// ---------- ELEVATION ----------
 L.tileLayer(GIBS('ASTER_GDEM_Color_Shaded_Relief','default',12),{maxZoom:12}).addTo(m3);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
   {opacity:0.45,maxZoom:16}).addTo(m3);
-// ---------- MIX ----------
-if(CFG.mixUri && CFG.mixBounds){
-  L.imageOverlay(CFG.mixUri,CFG.mixBounds,{opacity:0.75}).addTo(m4);
+// ---------- MIX frames ----------
+let mixFrames=[];
+if(CFG.mixUris && CFG.mixUris.length && CFG.mixBounds){
+  mixFrames=CFG.mixUris.map(u=>L.imageOverlay(u,CFG.mixBounds,{opacity:0}).addTo(m4));
 }else{
-  L.tileLayer.wms('https://geo.weather.gc.ca/geomet',
-    {layers:'HRDPS.CONTINENTAL_PR',format:'image/png',transparent:true,
-     opacity:0.7,version:'1.3.0'}).addTo(m4);
+  L.tileLayer.wms(GEOMET,{layers:'HRDPS.CONTINENTAL_PR',format:'image/png',
+    transparent:true,opacity:0.7,version:'1.3.0'}).addTo(m4);
 }
-// ---------- show latest frames (visible even when not looping) ----------
-function showFrame(frames,i,op){frames.forEach((l,j)=>l.setOpacity(j===i?op:0));}
-if(radarFrames.length)showFrame(radarFrames,radarFrames.length-1,CFG.radarOp);
-if(satFrames.length)showFrame(satFrames,satFrames.length-1,1.0);
+// ---------- stopped state: latest everywhere ----------
+function show(frames,i,op){frames.forEach((l,j)=>l.setOpacity(j===i?op:0));}
+function stoppedState(){
+  if(radarFrames.length)show(radarFrames,radarFrames.length-1,CFG.radarOp);
+  satLatest.setOpacity(1.0);show(satFrames,-1,1.0);
+  if(mixFrames.length)show(mixFrames,mixFrames.length-1,0.75);
+}
+stoppedState();
 document.getElementById('m1_t').textContent=sta&&sta.cc==='us'?'last 5 scans':'T-45\u2192now';
-document.getElementById('m2_t').textContent=
-  CFG.goesTimes[0]==='default'?'latest':
-  CFG.goesTimes[0].slice(11,16)+'Z \u2192 '+CFG.goesTimes[CFG.goesTimes.length-1].slice(11,16)+'Z';
-// ---------- single unified loop ----------
+document.getElementById('m2_t').textContent='latest \u00b7 loop: '+
+  ((CFG.goesTimes&&CFG.goesTimes.length&&CFG.goesTimes[0]!=='default')?
+   CFG.goesTimes[0].slice(11,16)+'Z\u2192'+CFG.goesTimes[CFG.goesTimes.length-1].slice(11,16)+'Z':'n/a');
+if(mixFrames.length&&CFG.mixTimes)document.getElementById('m4_t').textContent=
+  CFG.mixTimes[0].slice(11,16)+'Z\u2192'+CFG.mixTimes[CFG.mixTimes.length-1].slice(11,16)+'Z';
+// ---------- ONE loop: radar + satellite + MIX in lockstep ----------
 const btn=document.createElement('button');btn.id='loopbtn';btn.textContent='\u25b6 LOOP';
 document.querySelector('.cell').appendChild(btn);
 let timer=null,idx=0;
-const nFrames=Math.max(radarFrames.length,satFrames.length,1);
 btn.onclick=function(){
   if(timer){clearInterval(timer);timer=null;btn.classList.remove('on');
-    btn.textContent='\u25b6 LOOP';
-    if(radarFrames.length)showFrame(radarFrames,radarFrames.length-1,CFG.radarOp);
-    if(satFrames.length)showFrame(satFrames,satFrames.length-1,1.0);
-    return;}
+    btn.textContent='\u25b6 LOOP';stoppedState();return;}
   btn.classList.add('on');btn.textContent='\u25a0 LOOPING';idx=0;
+  satLatest.setOpacity(satFrames.length?0:1.0);
   timer=setInterval(function(){
-    if(radarFrames.length)showFrame(radarFrames,idx%radarFrames.length,CFG.radarOp);
-    if(satFrames.length)showFrame(satFrames,idx%satFrames.length,1.0);
+    if(radarFrames.length)show(radarFrames,idx%radarFrames.length,CFG.radarOp);
+    if(satFrames.length)show(satFrames,idx%satFrames.length,1.0);
+    if(mixFrames.length)show(mixFrames,idx%mixFrames.length,0.75);
     idx++;
   },800);
 };
-// ---------- zoom/pan sync across all four panes ----------
+// ---------- sync ----------
 let syncing=false;
 maps.forEach(src=>{
   src.on('move zoom',function(){
     if(syncing)return;syncing=true;
     const c=src.getCenter(),z=src.getZoom();
-    maps.forEach(dst=>{
-      if(dst!==src){
-        const zz=Math.min(z,dst.getMaxZoom());
-        dst.setView(c,zz,{animate:false});
-      }
-    });
+    maps.forEach(dst=>{if(dst!==src){dst.setView(c,Math.min(z,dst.getMaxZoom()),{animate:false});}});
     syncing=false;
   });
 });
 </script></body></html>
 """
-_TEMPLATE = _TEMPLATE.replace("__H__", "380")
