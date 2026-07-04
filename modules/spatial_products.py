@@ -175,7 +175,8 @@ build_topo_map = build_elevation_map
 # ------------------------------------------------------------ MIX PRECIP ----
 def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
                              width=1024, height=720,
-                             parameter="precip_1h:mm"):
+                             parameter="precip_1h:mm",
+                             valid_iso=None):
     """Fetches one Meteomatics WMS GetMap image (model=mix) SERVER-SIDE with
     API credentials and returns (data_uri, bounds) for a folium ImageOverlay.
     Browsers refuse credentialed tile URLs, so tiles are not an option — a
@@ -200,6 +201,8 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
                f"&request=GetMap&layers={parameter}&model=mix"
                f"&crs=EPSG:4326&bbox={b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}"
                f"&width={width}&height={height}&format=image/png&transparent=true")
+        if valid_iso:
+            url += f"&time={valid_iso}"
         auth = base64.b64encode(f"{username}:{password}".encode()).decode()
         req = urllib.request.Request(url, headers={
             "Authorization": f"Basic {auth}",
@@ -366,3 +369,17 @@ def build_station_radar_map(site_lat: float, site_lon: float,
                         weight=2, fill=True, fill_opacity=0.15,
                         tooltip="Detachment").add_to(m)
     return m
+
+
+def fetch_mix_precip_frames(lat, lon, zoom, username, password, times):
+    """Fetches a MIX overlay per timestamp for the quad loop. Returns
+    (list_of_data_uris, bounds) — bounds identical across frames. Frames that
+    fail fetch are skipped; empty list means caller falls back."""
+    uris, bounds = [], None
+    for t in times:
+        uri, b = fetch_mix_precip_overlay(lat, lon, zoom, username, password,
+                                          valid_iso=t)
+        if uri:
+            uris.append(uri)
+            bounds = b
+    return uris, bounds
