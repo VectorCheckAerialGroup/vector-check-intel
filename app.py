@@ -1360,27 +1360,22 @@ _workspace = st.sidebar.radio(
 )
 
 if _workspace == "Spatial":
+    import streamlit.components.v1 as _components
     try:
-        from streamlit_folium import st_folium as _st_folium
-        from modules.spatial_products import (
-            build_radar_map, build_satellite_map, build_elevation_map,
-            build_mix_precip_map, fetch_rainviewer_frames,
-            fetch_mix_precip_overlay, build_station_radar_map,
-            nearest_stations, STATION_PRODUCTS, beam_height_ft,
-        )
+        from modules.spatial_quad import (build_quad_html, nearest_stations,
+                                          beam_height_ft, SAT_PRODUCTS)
+        from modules.spatial_products import (fetch_rainviewer_frames,
+                                              fetch_mix_precip_overlay)
     except ImportError as _sp_err:
-        st.info("Spatial workspace requires folium + streamlit-folium in "
-                f"requirements.txt. ({_sp_err})")
+        st.info(f"Spatial workspace unavailable: {_sp_err}")
         st.stop()
 
     @st.cache_data(ttl=300, show_spinner=False)
     def _rv_frames_cached() -> list:
-        return fetch_rainviewer_frames(5)
+        return fetch_rainviewer_frames(1)
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _goes_times_cached(now_iso: str) -> list:
-        """Four GOES frame timestamps at 15-min steps ending ~30 min ago
-        (publication latency margin). now_iso keys the cache per 10-min."""
         _now = datetime.fromisoformat(now_iso)
         _anchor = _now.replace(minute=(_now.minute // 15) * 15,
                                second=0, microsecond=0) - timedelta(minutes=30)
@@ -1403,44 +1398,46 @@ if _workspace == "Spatial":
         f'<span style="font-size:1.05rem;font-weight:600;color:#E5E7EB;'
         f'letter-spacing:0.5px;">SPATIAL</span>'
         f'<span style="font-size:0.7rem;color:#6B7280;">{lat:.3f}, {lon:.3f} '
-        f'\u00b7 radar + satellite looping</span></div>',
+        f'\u00b7 panes synced \u00b7 one loop drives radar + satellite</span></div>',
         unsafe_allow_html=True,
     )
-    _q1, _q2, _q3 = st.columns([1, 1, 1.4])
+
+    _q1, _q2, _q3, _q4 = st.columns([0.8, 0.9, 1.5, 1.1])
     with _q1:
         _sp_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9, 10],
                                     value=7, key="spq_zoom")
     with _q2:
-        _sp_op = st.slider("Radar opacity", 0.3, 1.0, 0.8, 0.05, key="spq_op")
-    with _q3:
-        _sp_sat = st.radio("Satellite", ["GeoColor", "Band 13 IR"],
-                           horizontal=True, key="spq_sat")
-
-    _q4, _q5, _q6 = st.columns([0.9, 1.4, 1.1])
-    with _q4:
-        _r_mode = st.radio("Radar mode", ["Composite", "Station"],
+        _r_mode = st.radio("Radar", ["Composite", "Station"],
                            horizontal=True, key="spq_rmode")
-    _sta_id, _prod_code, _sta_km = None, "N0Q", 0.0
+    _sta_id, _prod_code = None, "N0Q"
     if _r_mode == "Station":
-        _near = nearest_stations(lat, lon, n=8)
-        _sta_opts = {f"{sid} \u00b7 {nm} \u00b7 {km:.0f} km": (sid, km)
-                     for sid, nm, km in _near}
-        with _q5:
+        _near = nearest_stations(lat, lon, n=10)
+        _sta_opts = {}
+        for sid, nm, km, cc in _near:
+            _tag = "" if cc == "us" else " (CA composite)"
+            _sta_opts[f"{sid} \u00b7 {nm} \u00b7 {km:.0f} km{_tag}"] = (sid, km, cc)
+        with _q3:
             _sta_pick = st.selectbox("Station", list(_sta_opts.keys()),
                                      key="spq_station")
-        with _q6:
-            _prod_pick = st.selectbox("Product",
-                                      list(STATION_PRODUCTS.keys()),
-                                      key="spq_sprod")
-        _sta_id, _sta_km = _sta_opts[_sta_pick]
-        _prod_code = STATION_PRODUCTS[_prod_pick]
+        _sta_id, _sta_km, _sta_cc = _sta_opts[_sta_pick]
+        with _q4:
+            _prod_pick = st.selectbox(
+                "Product", ["Reflectivity 0.5\u00b0 (N0Q)",
+                            "Velocity 0.5\u00b0 Doppler (N0U)"],
+                key="spq_sprod", disabled=(_sta_cc == "ca"))
+            _prod_code = "N0U" if "N0U" in _prod_pick else "N0Q"
+    else:
+        with _q4:
+            pass
+    _sat_choice = st.radio("Satellite", list(SAT_PRODUCTS.keys()),
+                           horizontal=True, key="spq_sat")
 
-    _PANE_H = 380
-
-    def _pane_label(txt):
+    if _sta_id:
+        _bft = beam_height_ft(_sta_km)
         st.markdown(
-            f'<div style="font-size:0.64rem;color:#9CA3AF;text-transform:uppercase;'
-            f'letter-spacing:1px;margin:6px 0 4px;font-weight:600;">{txt}</div>',
+            f'<div style="font-size:0.68rem;color:#9CA3AF;margin:2px 0 6px;">'
+            f'{_sta_id}: {_sta_km:.0f} km from site \u00b7 0.5\u00b0 beam '
+            f'\u2248 {_bft:,.0f} ft over site</div>',
             unsafe_allow_html=True,
         )
 
@@ -1448,57 +1445,16 @@ if _workspace == "Spatial":
     _goes_now = datetime.now(timezone.utc).replace(tzinfo=None)
     _goes_t = _goes_times_cached(
         _goes_now.replace(minute=(_goes_now.minute // 10) * 10,
-                          second=0, microsecond=0).isoformat()
-    )
+                          second=0, microsecond=0).isoformat())
     _mix_uri, _mix_bounds = _mix_overlay_cached(lat, lon, int(_sp_zoom))
 
-    _now_z = datetime.now(timezone.utc).strftime("%H:%MZ")
-    _row1a, _row1b = st.columns(2, gap="small")
-    with _row1a:
-        if _r_mode == "Station" and _sta_id:
-            _beam_ft = beam_height_ft(_sta_km)
-            _pane_label(
-                f"Radar \u00b7 {_sta_id} \u00b7 {_sta_km:.0f} km from site "
-                f"\u00b7 0.5\u00b0 beam \u2248 {_beam_ft:,.0f} ft over site "
-                f"\u00b7 last 5 scans \u00b7 {_now_z}")
-            _st_folium(build_station_radar_map(
-                           lat, lon, _sta_id, product=_prod_code,
-                           opacity=_sp_op, minimal=True, loop=True),
-                       height=_PANE_H, use_container_width=True,
-                       returned_objects=[], key="spq_radar_sta")
-        else:
-            _pane_label(f"Radar \u00b7 composite \u00b7 loop T-45\u2192now "
-                        f"\u00b7 {_now_z}")
-            _st_folium(build_radar_map(lat, lon, _sp_zoom, rv_frames=_rv,
-                                       opacity=_sp_op, minimal=True, loop=True),
-                       height=_PANE_H, use_container_width=True,
-                       returned_objects=[], key="spq_radar")
-    with _row1b:
-        _sat_t0 = _goes_t[0][11:16] + "Z" if _goes_t else "?"
-        _sat_t1 = _goes_t[-1][11:16] + "Z" if _goes_t else "?"
-        _pane_label(f"Satellite \u00b7 GOES-East {_sp_sat} \u00b7 loop "
-                    f"{_sat_t0}\u2192{_sat_t1}")
-        _st_folium(build_satellite_map(lat, lon, _sp_zoom, product=_sp_sat,
-                                       times=_goes_t, minimal=True),
-                   height=_PANE_H, use_container_width=True,
-                   returned_objects=[], key="spq_sat_map")
-
-    _row2a, _row2b = st.columns(2, gap="small")
-    with _row2a:
-        _pane_label("Elevation \u00b7 hypsometric relief")
-        _st_folium(build_elevation_map(lat, lon, max(_sp_zoom, 9),
-                                       minimal=True),
-                   height=_PANE_H, use_container_width=True,
-                   returned_objects=[], key="spq_topo")
-    with _row2b:
-        _pane_label("Meteomatics MIX \u00b7 1h precip"
-                    + ("" if _mix_uri else " \u00b7 fallback: HRDPS"))
-        _st_folium(build_mix_precip_map(lat, lon, _sp_zoom,
-                                        overlay_uri=_mix_uri,
-                                        overlay_bounds=_mix_bounds,
-                                        minimal=True),
-                   height=_PANE_H, use_container_width=True,
-                   returned_objects=[], key="spq_precip_map")
+    _quad = build_quad_html(
+        lat, lon, _sp_zoom, 0.8, _sat_choice,
+        station_id=_sta_id, station_product=_prod_code,
+        rv_path=(_rv[-1] if _rv else None), goes_times=_goes_t,
+        mix_uri=_mix_uri, mix_bounds=_mix_bounds,
+    )
+    _components.html(_quad, height=796, scrolling=False)
     st.stop()
 
 
