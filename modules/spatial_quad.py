@@ -167,11 +167,11 @@ function ecccLayer(t){
     transparent:true,version:'1.3.0',opacity:0,time:t});
 }
 if(sta && sta.cc==='us'){
-  for(let fi=4;fi>=0;fi--){
-    radarFrames.push(L.tileLayer(
-      `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-${fi}/{z}/{x}/{y}.png`,
-      {opacity:0,maxZoom:12}).addTo(m1));
-  }
+  // RIDGE tile cache serves only the latest scan (frame 0); historical
+  // frame indices are not cached — show latest, loop skips this pane.
+  L.tileLayer(
+    `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-0/{z}/{x}/{y}.png`,
+    {opacity:CFG.radarOp,maxZoom:12}).addTo(m1);
 }else{
   // Composite: IEM frames + ECCC timed frames stepped together
   const iem=['-m45m','-m30m','-m15m',''].map(suf=>L.tileLayer(
@@ -210,6 +210,10 @@ if(sta){
   m1.setView([(CFG.lat+sta.lat)/2,(CFG.lon+sta.lon)/2],CFG.zoom);
 }
 // ---------- SATELLITE: 'default' latest guaranteed when stopped ----------
+// GeoColor 'default' is the proven-resolving layer — it guarantees the
+// pane is never empty even if the selected product ID fails upstream.
+L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
+  {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
 const satLatest=L.tileLayer(GIBS(CFG.satLayer,'default',CFG.satMaxZ),
   {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
 const satFrames=(CFG.goesTimes||[]).filter(t=>t!=='default').map(t=>
@@ -234,7 +238,7 @@ function stoppedState(){
   if(mixFrames.length)show(mixFrames,mixFrames.length-1,0.75);
 }
 stoppedState();
-document.getElementById('m1_t').textContent=sta&&sta.cc==='us'?'last 5 scans':'T-45\u2192now';
+document.getElementById('m1_t').textContent=sta&&sta.cc==='us'?'latest scan (no site archive)':'T-45\u2192now';
 document.getElementById('m2_t').textContent='latest \u00b7 loop: '+
   ((CFG.goesTimes&&CFG.goesTimes.length&&CFG.goesTimes[0]!=='default')?
    CFG.goesTimes[0].slice(11,16)+'Z\u2192'+CFG.goesTimes[CFG.goesTimes.length-1].slice(11,16)+'Z':'n/a');
