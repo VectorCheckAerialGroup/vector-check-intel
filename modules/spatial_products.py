@@ -311,10 +311,23 @@ def nearest_stations(lat: float, lon: float, n: int = 8) -> list:
     return out[:n]
 
 
+def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
+    """Radar beam centreline height (ft) above the radar level at a given
+    range, using the standard 4/3-effective-earth-radius propagation model:
+        h = r*sin(theta) + r^2 / (2 * (4/3)*Re)
+    Ignores radar tower height (~20-30 m) and site elevation differences —
+    adequate for operational beam-overshoot reasoning."""
+    r_m = dist_km * 1000.0
+    re_eff = (4.0 / 3.0) * 6.371e6
+    h_m = r_m * math.sin(math.radians(elev_deg)) + (r_m ** 2) / (2.0 * re_eff)
+    return h_m * 3.28084
+
+
 def build_station_radar_map(site_lat: float, site_lon: float,
                             station_id: str, product: str = "N0Q",
                             opacity: float = 0.85,
-                            minimal: bool = True) -> folium.Map:
+                            minimal: bool = True,
+                            loop: bool = True) -> folium.Map:
     """Single-site NEXRAD view: the station's own lowest-tilt imagery (via
     IEM RIDGE tiles), the radar location marked, and range rings at
     60 / 120 / 180 / 230 km (230 km = N0Q product range). Centred between
@@ -324,11 +337,21 @@ def build_station_radar_map(site_lat: float, site_lon: float,
     c_lat = (site_lat + st_lat) / 2
     c_lon = (site_lon + st_lon) / 2
     m = _base_map(c_lat, c_lon, 7, minimal=minimal)
-    TileLayer(
-        f"https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/"
-        f"ridge::{station_id}-{product}-0/{{z}}/{{x}}/{{y}}.png",
-        attr="IEM RIDGE / NOAA NEXRAD", opacity=opacity, max_zoom=12,
-    ).add_to(m)
+    # RIDGE keeps the 5 most recent volume scans as frame indices 4 (oldest)
+    # .. 0 (latest) — a ~20-25 minute loop at typical VCP update rates.
+    frame_idx = [4, 3, 2, 1, 0] if loop else [0]
+    frames = []
+    for fi in frame_idx:
+        lyr = TileLayer(
+            f"https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/"
+            f"ridge::{station_id}-{product}-{fi}/{{z}}/{{x}}/{{y}}.png",
+            attr="IEM RIDGE / NOAA NEXRAD",
+            opacity=0 if loop else opacity, max_zoom=12,
+        )
+        lyr.add_to(m)
+        frames.append(lyr)
+    if loop:
+        _add_frame_loop(m, frames, opacity)
     # Radar site marker + range rings
     folium.CircleMarker([st_lat, st_lon], radius=5, color="#4ade80",
                         weight=2, fill=True, fill_opacity=0.9,
