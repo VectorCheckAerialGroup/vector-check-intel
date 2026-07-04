@@ -1365,7 +1365,8 @@ if _workspace == "Spatial":
         from modules.spatial_products import (
             build_radar_map, build_satellite_map, build_elevation_map,
             build_mix_precip_map, fetch_rainviewer_frames,
-            fetch_mix_precip_overlay,
+            fetch_mix_precip_overlay, build_station_radar_map,
+            nearest_stations, STATION_PRODUCTS,
         )
     except ImportError as _sp_err:
         st.info("Spatial workspace requires folium + streamlit-folium in "
@@ -1434,11 +1435,38 @@ if _workspace == "Spatial":
 
     _row1a, _row1b = st.columns(2, gap="small")
     with _row1a:
-        _pane_label("Radar \u00b7 15-min loop")
-        _st_folium(build_radar_map(lat, lon, _sp_zoom, rv_frames=_rv,
-                                   opacity=_sp_op, minimal=True, loop=True),
-                   height=_PANE_H, use_container_width=True,
-                   returned_objects=[], key="spq_radar")
+        _r_mode_c, _r_sta_c, _r_prod_c = st.columns([0.9, 1.2, 1.2])
+        with _r_mode_c:
+            _r_mode = st.radio("Radar mode", ["Composite", "Station"],
+                               horizontal=True, key="spq_rmode",
+                               label_visibility="collapsed")
+        if _r_mode == "Station":
+            _near = nearest_stations(lat, lon, n=8)
+            _sta_opts = {f"{sid} \u00b7 {nm} \u00b7 {km:.0f} km": sid
+                         for sid, nm, km in _near}
+            with _r_sta_c:
+                _sta_pick = st.selectbox("Station", list(_sta_opts.keys()),
+                                         key="spq_station",
+                                         label_visibility="collapsed")
+            with _r_prod_c:
+                _prod_pick = st.selectbox("Product",
+                                          list(STATION_PRODUCTS.keys()),
+                                          key="spq_sprod",
+                                          label_visibility="collapsed")
+            _pane_label(f"Radar \u00b7 {_sta_opts[_sta_pick]} single-site "
+                        f"\u00b7 0.5\u00b0 tilt")
+            _st_folium(build_station_radar_map(
+                           lat, lon, _sta_opts[_sta_pick],
+                           product=STATION_PRODUCTS[_prod_pick],
+                           opacity=_sp_op, minimal=True),
+                       height=_PANE_H, use_container_width=True,
+                       returned_objects=[], key="spq_radar_sta")
+        else:
+            _pane_label("Radar \u00b7 composite \u00b7 15-min loop")
+            _st_folium(build_radar_map(lat, lon, _sp_zoom, rv_frames=_rv,
+                                       opacity=_sp_op, minimal=True, loop=True),
+                       height=_PANE_H, use_container_width=True,
+                       returned_objects=[], key="spq_radar")
     with _row1b:
         _pane_label(f"Satellite \u00b7 GOES-East {_sp_sat} \u00b7 loop")
         _st_folium(build_satellite_map(lat, lon, _sp_zoom, product=_sp_sat,
