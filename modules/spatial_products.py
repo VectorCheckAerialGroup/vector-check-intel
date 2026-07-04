@@ -179,7 +179,18 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
     """Fetches one Meteomatics WMS GetMap image (model=mix) SERVER-SIDE with
     API credentials and returns (data_uri, bounds) for a folium ImageOverlay.
     Browsers refuse credentialed tile URLs, so tiles are not an option — a
-    single authenticated image fetch is. Returns (None, None) on failure."""
+    single authenticated image fetch is. Returns (None, None) on failure.
+
+    Breaker-aware: skips instantly while the Meteomatics circuit is open, and
+    reports network failures to the breaker so a dead provider can never make
+    the Spatial workspace hang."""
+    try:
+        from modules.meteomatics_provider import (
+            mm_circuit_open, mm_record_failure, mm_record_success)
+        if mm_circuit_open():
+            return None, None
+    except ImportError:
+        mm_circuit_open = None
     try:
         lon_span = 360.0 * width / (256.0 * (2 ** zoom))
         lat_span = lon_span * (height / width) * max(0.2, math.cos(math.radians(lat)))
@@ -197,11 +208,23 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
             img = r.read()
         if not img or len(img) < 500:
             return None, None
+        try:
+            mm_record_success()
+        except Exception:
+            pass
         uri = "data:image/png;base64," + base64.b64encode(img).decode()
         bounds = [[b[0], b[1]], [b[2], b[3]]]
         return uri, bounds
+    except urllib.error.HTTPError as e:
+        # 4xx = service alive (bad param/auth) — never trips the breaker
+        logger.warning("MIX WMS overlay HTTP %s", getattr(e, "code", "?"))
+        return None, None
     except Exception as e:
         logger.warning("MIX WMS overlay fetch failed: %s", e)
+        try:
+            mm_record_failure()
+        except Exception:
+            pass
         return None, None
 
 
@@ -238,3 +261,85 @@ MODEL_PRECIP_LAYERS = {
     "RDPS 10 km — precip rate": "RDPS.ETA_PR",
     "GDPS 15 km — precip rate": "GDPS.ETA_PR",
 }
+
+
+# ------------------------------------------------------- SINGLE-STATION ----
+# NEXRAD sites relevant to Canadian-border and detachment operations.
+# id -> (name, lat, lon). Products via IEM RIDGE single-site tile cache.
+NEXRAD_STATIONS = {
+    "KTYX": ("Fort Drum / Montague NY", 43.756, -75.680),
+    "KBUF": ("Buffalo NY", 42.949, -78.737),
+    "KBGM": ("Binghamton NY", 42.200, -75.985),
+    "KENX": ("Albany NY", 42.586, -74.064),
+    "KCXX": ("Burlington VT", 44.511, -73.166),
+    "KCBW": ("Caribou ME", 46.039, -67.806),
+    "KGYX": ("Portland ME", 43.891, -70.256),
+    "KDTX": ("Detroit MI", 42.700, -83.472),
+    "KAPX": ("Gaylord MI", 44.906, -84.720),
+    "KMQT": ("Marquette MI", 46.531, -87.548),
+    "KDLH": ("Duluth MN", 46.837, -92.210),
+    "KMVX": ("Grand Forks ND", 47.528, -97.325),
+    "KBIS": ("Bismarck ND", 46.771, -100.760),
+    "KMBX": ("Minot ND", 48.393, -100.865),
+    "KGGW": ("Glasgow MT", 48.206, -106.625),
+    "KTFX": ("Great Falls MT", 47.460, -111.385),
+    "KOTX": ("Spokane WA", 47.680, -117.627),
+    "KCLE": ("Cleveland OH", 41.413, -81.860),
+    "KGRB": ("Green Bay WI", 44.499, -88.111),
+    "KPBZ": ("Pittsburgh PA", 40.532, -80.218),
+}
+
+# Lowest-tilt (0.5 deg) products — precipitation beam + Doppler velocity
+STATION_PRODUCTS = {
+    "Reflectivity 0.5\u00b0 (N0Q)": "N0Q",
+    "Velocity 0.5\u00b0 Doppler (N0U)": "N0U",
+}
+
+
+def nearest_stations(lat: float, lon: float, n: int = 8) -> list:
+    """Nearest NEXRAD stations as [(id, name, km), ...] by great-circle."""
+    out = []
+    for sid, (nm, slat, slon) in NEXRAD_STATIONS.items():
+        dlat = math.radians(slat - lat)
+        dlon = math.radians(slon - lon)
+        a = (math.sin(dlat / 2) ** 2 +
+             math.cos(math.radians(lat)) * math.cos(math.radians(slat)) *
+             math.sin(dlon / 2) ** 2)
+        km = 6371.0 * 2 * math.asin(min(1.0, math.sqrt(a)))
+        out.append((sid, nm, km))
+    out.sort(key=lambda x: x[2])
+    return out[:n]
+
+
+def build_station_radar_map(site_lat: float, site_lon: float,
+                            station_id: str, product: str = "N0Q",
+                            opacity: float = 0.85,
+                            minimal: bool = True) -> folium.Map:
+    """Single-site NEXRAD view: the station's own lowest-tilt imagery (via
+    IEM RIDGE tiles), the radar location marked, and range rings at
+    60 / 120 / 180 / 230 km (230 km = N0Q product range). Centred between
+    the operating site and the radar so both stay in view."""
+    st_nm, st_lat, st_lon = NEXRAD_STATIONS.get(
+        station_id, (station_id, site_lat, site_lon))
+    c_lat = (site_lat + st_lat) / 2
+    c_lon = (site_lon + st_lon) / 2
+    m = _base_map(c_lat, c_lon, 7, minimal=minimal)
+    TileLayer(
+        f"https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/"
+        f"ridge::{station_id}-{product}-0/{{z}}/{{x}}/{{y}}.png",
+        attr="IEM RIDGE / NOAA NEXRAD", opacity=opacity, max_zoom=12,
+    ).add_to(m)
+    # Radar site marker + range rings
+    folium.CircleMarker([st_lat, st_lon], radius=5, color="#4ade80",
+                        weight=2, fill=True, fill_opacity=0.9,
+                        tooltip=f"{station_id} \u2014 {st_nm}").add_to(m)
+    for rk in (60, 120, 180, 230):
+        folium.Circle([st_lat, st_lon], radius=rk * 1000,
+                      color="#4ade80", weight=1, opacity=0.35,
+                      fill=False, dash_array="4 6",
+                      tooltip=f"{rk} km").add_to(m)
+    # Operating site marker (amber, consistent with the rest of ARMS)
+    folium.CircleMarker([site_lat, site_lon], radius=7, color="#E58E26",
+                        weight=2, fill=True, fill_opacity=0.15,
+                        tooltip="Detachment").add_to(m)
+    return m
