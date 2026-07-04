@@ -186,8 +186,7 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
     reports network failures to the breaker so a dead provider can never make
     the Spatial workspace hang."""
     try:
-        from modules.meteomatics_provider import (
-            mm_circuit_open, mm_record_failure, mm_record_success)
+        from modules.meteomatics_provider import mm_circuit_open
         if mm_circuit_open():
             return None, None
     except ImportError:
@@ -211,10 +210,6 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
             img = r.read()
         if not img or len(img) < 500:
             return None, None
-        try:
-            mm_record_success()
-        except Exception:
-            pass
         uri = "data:image/png;base64," + base64.b64encode(img).decode()
         bounds = [[b[0], b[1]], [b[2], b[3]]]
         return uri, bounds
@@ -223,11 +218,10 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
         logger.warning("MIX WMS overlay HTTP %s", getattr(e, "code", "?"))
         return None, None
     except Exception as e:
+        # Deliberately NOT reported to the circuit breaker: the WMS image
+        # service is a different subsystem from the forecast API, and spatial
+        # imagery must never be able to mark the forecast provider as down.
         logger.warning("MIX WMS overlay fetch failed: %s", e)
-        try:
-            mm_record_failure()
-        except Exception:
-            pass
         return None, None
 
 
@@ -382,4 +376,9 @@ def fetch_mix_precip_frames(lat, lon, zoom, username, password, times):
         if uri:
             uris.append(uri)
             bounds = b
+        else:
+            # First failure -> stop immediately. Four sequential timeouts
+            # against an unavailable WMS would stall the Spatial page for
+            # a minute; one probe answers the question.
+            break
     return uris, bounds
