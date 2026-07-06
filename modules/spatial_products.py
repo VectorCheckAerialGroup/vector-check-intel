@@ -403,3 +403,44 @@ def fetch_mix_precip_frames(lat, lon, zoom, username, password, times):
             # a minute; one probe answers the question.
             break
     return uris, bounds
+
+
+def fetch_ridge_scans(station: str, product: str = "N0Q", n: int = 5) -> list:
+    """Confirmed volume scans for a single NEXRAD site from IEM's JSON
+    catalog. Returns [{"index": i, "ts": unix}, ...] oldest-first, where
+    index i maps to the RIDGE tile frame ridge::SITE-PROD-i (0 = newest).
+    Empty list -> caller falls back; never animate unconfirmed frames."""
+    try:
+        url = ("https://mesonet.agron.iastate.edu/json/radar"
+               f"?operation=list&radar={station}&product={product}")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "VectorCheck-ARMS/2.1"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.load(r)
+        scans = data.get("scans") or []
+        out = []
+        from datetime import datetime as _dt, timezone as _tz
+        # newest-last in IEM ordering variants — normalize by parsing ts
+        parsed = []
+        for sc in scans:
+            t = sc.get("ts") or sc.get("timestamp")
+            if not t:
+                continue
+            try:
+                dt = _dt.strptime(t.replace("Z", ""), "%Y-%m-%dT%H:%M")
+            except ValueError:
+                try:
+                    dt = _dt.strptime(t.replace("Z", ""), "%Y-%m-%dT%H:%M:%S")
+                except ValueError:
+                    continue
+            parsed.append(dt.replace(tzinfo=_tz.utc))
+        parsed.sort()
+        recent = parsed[-n:]
+        total = len(recent)
+        for k, dt in enumerate(recent):
+            # newest scan = index 0, previous = 1, ...
+            out.append({"index": total - 1 - k, "ts": int(dt.timestamp())})
+        return out
+    except Exception as e:
+        logger.warning("RIDGE scan catalog failed for %s: %s", station, e)
+        return []
