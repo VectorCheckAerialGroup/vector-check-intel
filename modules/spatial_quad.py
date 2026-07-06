@@ -78,7 +78,7 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
-                    rv_path=None, goes_times=None, eccc_times=None,
+                    rv_catalog=None,
                     mix_uris=None, mix_times=None,
                     mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
@@ -93,9 +93,9 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "lat": lat, "lon": lon, "zoom": int(zoom),
         "radarOp": radar_opacity,
         "satLayer": sat_layer, "satMaxZ": sat_maxz,
-        "goesTimes": goes_times or [],
-        "ecccTimes": eccc_times or [],
-        "rvPath": rv_path, "station": sta,
+        "rvRadar": (rv_catalog or {}).get("radar", []),
+        "rvSat": (rv_catalog or {}).get("sat", []),
+        "station": sta,
         "mixUris": mix_uris or [], "mixTimes": mix_times or [],
         "mixBounds": mix_bounds,
         "paneH": pane_h,
@@ -161,11 +161,7 @@ const m4=mkmap('m4',CFG.zoom);
 const maps=[m1,m2,m3,m4];
 
 // ---------- RADAR frames (no static underlay — loop owns the pane) ----------
-let radarFrames=[];
-function ecccLayer(t){
-  return L.tileLayer.wms(GEOMET,{layers:'RADAR_1KM_RRAI',format:'image/png',
-    transparent:true,version:'1.3.0',opacity:0,time:t});
-}
+let radarFrames=[],radarTs=[],satTs=[];
 if(sta && sta.cc==='us'){
   // RIDGE tile cache serves only the latest scan (frame 0); historical
   // frame indices are not cached — show latest, loop skips this pane.
@@ -173,27 +169,13 @@ if(sta && sta.cc==='us'){
     `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-0/{z}/{x}/{y}.png`,
     {opacity:CFG.radarOp,maxZoom:12}).addTo(m1);
 }else{
-  // Composite: IEM frames + ECCC timed frames stepped together
-  const iem=['-m45m','-m30m','-m15m',''].map(suf=>L.tileLayer(
-      `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${suf}/{z}/{x}/{y}.png`,
-      {opacity:0,maxZoom:12}).addTo(m1));
-  const ec=(CFG.ecccTimes||[]).map(t=>ecccLayer(t).addTo(m1));
-  // pair frames: frame i = [iem[i], ec[i]]
-  const n=Math.max(iem.length,ec.length);
-  for(let i=0;i<n;i++){
-    radarFrames.push({set:function(op){
-      iem.forEach((l,j)=>l.setOpacity(j===i?op:l.options._z||0));
-      // handled jointly below
-    }});
-  }
-  radarFrames=[];
-  for(let i=0;i<n;i++){
-    (function(i){radarFrames.push({
-      setOpacity:function(op){
-        iem.forEach((l,j)=>l.setOpacity(j===i?op:0));
-        ec.forEach((l,j)=>l.setOpacity(j===i?op:0));
-      }});})(i);
-  }
+  // Composite: RainViewer catalogued frames — every frame is one the
+  // service says exists, with its true timestamp. Global composite fuses
+  // NEXRAD + Canadian + European radars (RadarScope-style smoothing, scheme 4).
+  radarFrames=(CFG.rvRadar||[]).map(f=>L.tileLayer(
+    `https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/4/1_1.png`,
+    {opacity:0,maxZoom:12}).addTo(m1));
+  radarTs=(CFG.rvRadar||[]).map(f=>f.ts);
 }
 if(sta){
   L.circleMarker([sta.lat,sta.lon],{radius:5,color:'#4ade80',weight:2,
@@ -202,22 +184,26 @@ if(sta){
     L.circle([sta.lat,sta.lon],{radius:rk*1000,color:'#4ade80',weight:1,
       opacity:0.35,fill:false,dashArray:'4 6'}).addTo(m1);
   });
-  if(sta.cc==='ca'){
-    // Canadian single-site: timed ECCC frames as the loop
-    const ec=(CFG.ecccTimes||[]).map(t=>ecccLayer(t).addTo(m1));
-    radarFrames=ec;
-  }
   m1.setView([(CFG.lat+sta.lat)/2,(CFG.lon+sta.lon)/2],CFG.zoom);
 }
-// ---------- SATELLITE: 'default' latest guaranteed when stopped ----------
-// GeoColor 'default' is the proven-resolving layer — it guarantees the
-// pane is never empty even if the selected product ID fails upstream.
-L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
-  {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
-const satLatest=L.tileLayer(GIBS(CFG.satLayer,'default',CFG.satMaxZ),
-  {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
-const satFrames=(CFG.goesTimes||[]).filter(t=>t!=='default').map(t=>
-  L.tileLayer(GIBS(CFG.satLayer,t,CFG.satMaxZ),{opacity:0,maxZoom:CFG.satMaxZ}).addTo(m2));
+// ---------- SATELLITE: catalogued GOES IR frames (loop) ----------
+// Vis Red has no public frame catalog -> shown as static latest (GIBS).
+// IR loops from the RainViewer satellite catalog with exact timestamps.
+let satFrames=[];
+const wantVis=CFG.satLayer.includes('Band2');
+if(wantVis){
+  L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
+    {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
+}else{
+  satFrames=(CFG.rvSat||[]).map(f=>L.tileLayer(
+    `https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/0/0_0.png`,
+    {opacity:0,maxZoom:CFG.satMaxZ}).addTo(m2));
+  satTs=(CFG.rvSat||[]).map(f=>f.ts);
+  if(!satFrames.length){
+    L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
+      {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
+  }
+}
 // ---------- ELEVATION ----------
 L.tileLayer(GIBS('ASTER_GDEM_Color_Shaded_Relief','default',12),{maxZoom:12}).addTo(m3);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
@@ -232,16 +218,17 @@ if(CFG.mixUris && CFG.mixUris.length && CFG.mixBounds){
 }
 // ---------- stopped state: latest everywhere ----------
 function show(frames,i,op){frames.forEach((l,j)=>l.setOpacity(j===i?op:0));}
+function tlabel(ts){const d=new Date(ts*1000);
+  return String(d.getUTCHours()).padStart(2,'0')+String(d.getUTCMinutes()).padStart(2,'0')+'Z';}
 function stoppedState(){
   if(radarFrames.length)show(radarFrames,radarFrames.length-1,CFG.radarOp);
-  satLatest.setOpacity(1.0);show(satFrames,-1,1.0);
+  if(satFrames.length)show(satFrames,satFrames.length-1,1.0);
   if(mixFrames.length)show(mixFrames,mixFrames.length-1,0.75);
+  if(radarTs.length)document.getElementById('m1_t').textContent=tlabel(radarTs[radarTs.length-1])+' (latest)';
+  if(satTs.length)document.getElementById('m2_t').textContent=tlabel(satTs[satTs.length-1])+' (latest)';
 }
 stoppedState();
-document.getElementById('m1_t').textContent=sta&&sta.cc==='us'?'latest scan (no site archive)':'T-45\u2192now';
-document.getElementById('m2_t').textContent='latest \u00b7 loop: '+
-  ((CFG.goesTimes&&CFG.goesTimes.length&&CFG.goesTimes[0]!=='default')?
-   CFG.goesTimes[0].slice(11,16)+'Z\u2192'+CFG.goesTimes[CFG.goesTimes.length-1].slice(11,16)+'Z':'n/a');
+if(sta&&sta.cc==='us')document.getElementById('m1_t').textContent='latest scan (no site archive)';
 if(mixFrames.length&&CFG.mixTimes)document.getElementById('m4_t').textContent=
   CFG.mixTimes[0].slice(11,16)+'Z\u2192'+CFG.mixTimes[CFG.mixTimes.length-1].slice(11,16)+'Z';
 // ---------- ONE loop: radar + satellite + MIX in lockstep ----------
@@ -252,10 +239,13 @@ btn.onclick=function(){
   if(timer){clearInterval(timer);timer=null;btn.classList.remove('on');
     btn.textContent='\u25b6 LOOP';stoppedState();return;}
   btn.classList.add('on');btn.textContent='\u25a0 LOOPING';idx=0;
-  satLatest.setOpacity(satFrames.length?0:1.0);
   timer=setInterval(function(){
-    if(radarFrames.length)show(radarFrames,idx%radarFrames.length,CFG.radarOp);
-    if(satFrames.length)show(satFrames,idx%satFrames.length,1.0);
+    if(radarFrames.length){const i=idx%radarFrames.length;
+      show(radarFrames,i,CFG.radarOp);
+      if(radarTs[i])document.getElementById('m1_t').textContent=tlabel(radarTs[i]);}
+    if(satFrames.length){const i=idx%satFrames.length;
+      show(satFrames,i,1.0);
+      if(satTs[i])document.getElementById('m2_t').textContent=tlabel(satTs[i]);}
     if(mixFrames.length)show(mixFrames,idx%mixFrames.length,0.75);
     idx++;
   },800);
