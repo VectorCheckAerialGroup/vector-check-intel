@@ -78,7 +78,7 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
-                    rv_catalog=None,
+                    rv_catalog=None, station_scans=None,
                     mix_uris=None, mix_times=None,
                     mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
@@ -93,6 +93,7 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "lat": lat, "lon": lon, "zoom": int(zoom),
         "radarOp": radar_opacity,
         "satLayer": sat_layer, "satMaxZ": sat_maxz,
+        "staScans": station_scans or [],
         "rvRadar": (rv_catalog or {}).get("radar", []),
         "rvSat": (rv_catalog or {}).get("sat", []),
         "station": sta,
@@ -162,12 +163,13 @@ const maps=[m1,m2,m3,m4];
 
 // ---------- RADAR frames (no static underlay — loop owns the pane) ----------
 let radarFrames=[],radarTs=[],satTs=[];
-if(sta && sta.cc==='us'){
-  // RIDGE tile cache serves only the latest scan (frame 0); historical
-  // frame indices are not cached — show latest, loop skips this pane.
-  L.tileLayer(
-    `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-0/{z}/{x}/{y}.png`,
-    {opacity:CFG.radarOp,maxZoom:12}).addTo(m1);
+if(sta && sta.cc==='us' && (CFG.staScans||[]).length){
+  // Catalog-confirmed volume scans: animate exactly the frames IEM says
+  // exist, oldest -> newest, with true scan timestamps.
+  radarFrames=CFG.staScans.map(sc=>L.tileLayer(
+    `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-${sc.index}/{z}/{x}/{y}.png`,
+    {opacity:0,maxZoom:12}).addTo(m1));
+  radarTs=CFG.staScans.map(sc=>sc.ts);
 }else{
   // Composite: RainViewer catalogued frames — every frame is one the
   // service says exists, with its true timestamp. Global composite fuses
@@ -228,7 +230,7 @@ function stoppedState(){
   if(satTs.length)document.getElementById('m2_t').textContent=tlabel(satTs[satTs.length-1])+' (latest)';
 }
 stoppedState();
-if(sta&&sta.cc==='us')document.getElementById('m1_t').textContent='latest scan (no site archive)';
+if(sta&&sta.cc==='us'&&!(CFG.staScans||[]).length)document.getElementById('m1_t').textContent='scan catalog unavailable \u00b7 composite shown';
 if(mixFrames.length&&CFG.mixTimes)document.getElementById('m4_t').textContent=
   CFG.mixTimes[0].slice(11,16)+'Z\u2192'+CFG.mixTimes[CFG.mixTimes.length-1].slice(11,16)+'Z';
 // ---------- ONE loop: radar + satellite + MIX in lockstep ----------
