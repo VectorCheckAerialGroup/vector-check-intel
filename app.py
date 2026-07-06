@@ -1365,7 +1365,8 @@ if _workspace == "Spatial":
         from modules.spatial_quad import (build_quad_html, nearest_stations,
                                           beam_height_ft, SAT_PRODUCTS)
         from modules.spatial_products import (fetch_rainviewer_catalog,
-                                              fetch_mix_precip_frames)
+                                              fetch_mix_precip_frames,
+                                              fetch_ridge_scans)
     except ImportError as _sp_err:
         st.info(f"Spatial workspace unavailable: {_sp_err}")
         st.stop()
@@ -1373,6 +1374,10 @@ if _workspace == "Spatial":
     @st.cache_data(ttl=300, show_spinner=False)
     def _rv_catalog_cached() -> dict:
         return fetch_rainviewer_catalog(6)
+
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _ridge_scans_cached(sta: str, prod: str) -> list:
+        return fetch_ridge_scans(sta, prod, n=5)
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _mix_frames_cached(ov_lat: float, ov_lon: float, ov_zoom: int,
@@ -1405,7 +1410,7 @@ if _workspace == "Spatial":
     with _q2:
         _r_mode = st.radio("Radar", ["Composite", "Station"],
                            horizontal=True, key="spq_rmode")
-    _sta_id, _prod_code = None, "N0Q"
+    _sta_id, _prod_code, _sta_cc = None, "N0Q", None
     if _r_mode == "Station":
         _near = nearest_stations(lat, lon, n=10)
         _sta_opts = {}
@@ -1438,6 +1443,9 @@ if _workspace == "Spatial":
         )
 
     _rv_cat = _rv_catalog_cached()
+    _sta_scans = []
+    if _sta_id and _sta_cc == "us":
+        _sta_scans = _ridge_scans_cached(_sta_id, _prod_code)
     _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     # MIX loop frames: 1-HOUR steps. precip_1h:mm is a sliding 1-hour
     # accumulation — frames closer together than 60 min overlap and appear
@@ -1451,7 +1459,7 @@ if _workspace == "Spatial":
     _quad = build_quad_html(
         lat, lon, _sp_zoom, 0.8, _sat_choice,
         station_id=_sta_id, station_product=_prod_code,
-        rv_catalog=_rv_cat,
+        rv_catalog=_rv_cat, station_scans=_sta_scans,
         mix_uris=_mix_uris, mix_times=_mix_times,
         mix_bounds=_mix_bounds,
     )
