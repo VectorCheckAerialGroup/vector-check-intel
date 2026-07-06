@@ -1364,33 +1364,15 @@ if _workspace == "Spatial":
     try:
         from modules.spatial_quad import (build_quad_html, nearest_stations,
                                           beam_height_ft, SAT_PRODUCTS)
-        from modules.spatial_products import (fetch_rainviewer_frames,
+        from modules.spatial_products import (fetch_rainviewer_catalog,
                                               fetch_mix_precip_frames)
     except ImportError as _sp_err:
         st.info(f"Spatial workspace unavailable: {_sp_err}")
         st.stop()
 
     @st.cache_data(ttl=300, show_spinner=False)
-    def _rv_frames_cached() -> list:
-        return fetch_rainviewer_frames(1)
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _goes_times_cached(now_iso: str) -> list:
-        _now = datetime.fromisoformat(now_iso)
-        _anchor = _now.replace(minute=(_now.minute // 15) * 15,
-                               second=0, microsecond=0) - timedelta(minutes=30)
-        return [(_anchor - timedelta(minutes=15 * k)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                for k in range(3, -1, -1)]
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def _eccc_times_cached(now_iso: str) -> list:
-        """Four ECCC radar frame times on the 6-min product grid, ~12-min
-        steps, anchored 6 min back for publication latency."""
-        _now = datetime.fromisoformat(now_iso)
-        _anchor = _now.replace(minute=(_now.minute // 6) * 6,
-                               second=0, microsecond=0) - timedelta(minutes=6)
-        return [(_anchor - timedelta(minutes=12 * k)).strftime("%Y-%m-%dT%H:%M:00Z")
-                for k in range(3, -1, -1)]
+    def _rv_catalog_cached() -> dict:
+        return fetch_rainviewer_catalog(6)
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _mix_frames_cached(ov_lat: float, ov_lon: float, ov_zoom: int,
@@ -1455,14 +1437,8 @@ if _workspace == "Spatial":
             unsafe_allow_html=True,
         )
 
-    _rv = _rv_frames_cached()
+    _rv_cat = _rv_catalog_cached()
     _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    _goes_t = _goes_times_cached(
-        _now_utc.replace(minute=(_now_utc.minute // 10) * 10,
-                         second=0, microsecond=0).isoformat())
-    _eccc_t = _eccc_times_cached(
-        _now_utc.replace(minute=(_now_utc.minute // 6) * 6,
-                         second=0, microsecond=0).isoformat())
     # MIX loop frames: 1-HOUR steps. precip_1h:mm is a sliding 1-hour
     # accumulation — frames closer together than 60 min overlap and appear
     # to stack on top of each other. Hourly frames are disjoint windows.
@@ -1475,8 +1451,8 @@ if _workspace == "Spatial":
     _quad = build_quad_html(
         lat, lon, _sp_zoom, 0.8, _sat_choice,
         station_id=_sta_id, station_product=_prod_code,
-        rv_path=(_rv[-1] if _rv else None), goes_times=_goes_t,
-        eccc_times=_eccc_t, mix_uris=_mix_uris, mix_times=_mix_times,
+        rv_catalog=_rv_cat,
+        mix_uris=_mix_uris, mix_times=_mix_times,
         mix_bounds=_mix_bounds,
     )
     _components.html(_quad, height=796, scrolling=False)
