@@ -89,6 +89,27 @@ def fetch_rainviewer_frames(n: int = 5) -> list:
         return []
 
 
+def fetch_rainviewer_catalog(n: int = 6) -> dict:
+    """Exact frame catalogs from RainViewer: the last n radar frames AND the
+    last n GOES infrared satellite frames, each with its true unix timestamp.
+    Animating only catalogued frames is what makes loops reliable — no
+    guessed timestamps, no 404-invisible frames."""
+    try:
+        req = urllib.request.Request(
+            "https://api.rainviewer.com/public/weather-maps.json",
+            headers={"User-Agent": "VectorCheck-ARMS/2.1"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            cat = json.load(r)
+        radar = [{"path": f["path"], "ts": f["time"]}
+                 for f in ((cat.get("radar") or {}).get("past") or [])[-n:]]
+        sat = [{"path": f["path"], "ts": f["time"]}
+               for f in ((cat.get("satellite") or {}).get("infrared") or [])[-n:]]
+        return {"radar": radar, "sat": sat}
+    except Exception as e:
+        logger.warning("RainViewer catalog failed: %s", e)
+        return {"radar": [], "sat": []}
+
+
 def fetch_rainviewer_frame() -> str | None:
     """Back-compat single latest frame."""
     fr = fetch_rainviewer_frames(1)
