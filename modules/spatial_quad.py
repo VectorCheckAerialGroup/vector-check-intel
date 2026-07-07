@@ -206,10 +206,30 @@ if(wantVis){
       {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
   }
 }
-// ---------- ELEVATION ----------
+// ---------- ELEVATION (dark terrain product) ----------
+// Hypsometric colour base, punched up via CSS saturation/contrast on the
+// pane itself (the raw ASTER tint is pale over low-relief terrain), with
+// DARK hillshade multiplied over it for depth instead of washing it out,
+// then transportation and place-name overlays for orientation.
+document.getElementById('m3').style.filter='saturate(1.6) contrast(1.15) brightness(0.95)';
 L.tileLayer(GIBS('ASTER_GDEM_Color_Shaded_Relief','default',12),{maxZoom:12}).addTo(m3);
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}',
-  {opacity:0.45,maxZoom:16}).addTo(m3);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade_Dark/MapServer/tile/{z}/{y}/{x}',
+  {opacity:0.62,maxZoom:16}).addTo(m3);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+  {opacity:0.75,maxZoom:16}).addTo(m3);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
+  {subdomains:'abcd',opacity:0.9,maxZoom:20}).addTo(m3);
+// Elevation legend — low -> high gradient chip
+(function(){
+  const c=document.getElementById('m3').parentElement;
+  const lg=document.createElement('div');
+  lg.style.cssText='position:absolute;bottom:8px;right:10px;z-index:1000;'+
+    'display:flex;align-items:center;gap:6px;background:rgba(10,12,16,0.72);'+
+    'padding:3px 9px;border-radius:5px;font-size:9px;color:#9ca3af;pointer-events:none;';
+  lg.innerHTML='LOW <span style="display:inline-block;width:70px;height:7px;border-radius:3px;'+
+    'background:linear-gradient(90deg,#1c4a2a,#5a7f3c,#b9975b,#8a6a4f,#e8e4dc);"></span> HIGH';
+  c.appendChild(lg);
+})();
 // ---------- MIX frames ----------
 let mixFrames=[];
 if(CFG.mixUris && CFG.mixUris.length && CFG.mixBounds){
