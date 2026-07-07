@@ -459,3 +459,98 @@ def fetch_ridge_scans(station: str, product: str = "N0Q", n: int = 5) -> list:
     except Exception as e:
         logger.warning("RIDGE scan catalog failed for %s: %s", station, e)
         return []
+
+
+# ---------------------------------------------------- STAR SATELLITE ----
+# CoD-class pre-rendered sector imagery, from the origin: NOAA STAR CDN.
+# Worldwide via nearest geostationary bird; regional sectors where defined,
+# full disk elsewhere. Bands: 13 (IR w/ colorbar), 02 (vis), GEOCOLOR,
+# Sandwich. Frames are hotlinked (browser loads them), ARMS only fetches
+# the directory listing to learn which frames exist.
+import re as _re
+
+STAR_BASE = "https://cdn.star.nesdis.noaa.gov"
+STAR_SATS = [
+    # (name, cdn_dir, sub-satellite lon, sectors [(id, latmin,latmax,lonmin,lonmax)])
+    ("GOES-East", "GOES19", -75.2, [
+        ("ne",  36.0, 48.5, -82.5, -66.0),
+        ("cgl", 40.0, 50.5, -94.0, -75.0),
+        ("se",  24.0, 38.0, -91.0, -75.0),
+        ("sp",  25.0, 39.0, -107.0, -90.0),
+        ("nr",  38.0, 52.0, -117.0, -95.0),
+        ("sr",  28.0, 42.0, -117.0, -100.0),
+        ("can", 47.0, 62.0, -125.0, -65.0),
+        ("CONUS", 20.0, 55.0, -130.0, -60.0),
+    ]),
+    ("GOES-West", "GOES18", -137.0, [
+        ("wus", 30.0, 50.0, -130.0, -110.0),
+        ("ak",  50.0, 72.0, -170.0, -130.0),
+        ("hi",  15.0, 26.0, -162.0, -152.0),
+        ("CONUS", 20.0, 55.0, -140.0, -100.0),
+    ]),
+    ("Himawari", "HIMAWARI", 140.7, [
+        ("jp", 24.0, 46.0, 125.0, 150.0),
+        ("aus", -45.0, -10.0, 110.0, 155.0),
+    ]),
+]
+STAR_BANDS = {"IR 13": "13", "Vis 02": "02",
+              "GeoColor": "GEOCOLOR", "Sandwich": "Sandwich"}
+
+
+def pick_star_view(lat: float, lon: float):
+    """Nearest bird by sub-satellite longitude; smallest sector containing
+    the point, else full disk. Returns (sat_name, cdn_dir, sector_id)."""
+    def londist(a, b):
+        d = abs(a - b) % 360
+        return min(d, 360 - d)
+    # Preference: named regional sector (purpose-built view) > CONUS-class
+    # wide sector > full disk from the nearest bird. A dedicated sector from
+    # the farther bird beats a wide-sector edge view from the nearer one
+    # (e.g. Cold Lake: GOES-East 'can' over GOES-West CONUS edge).
+    candidates = []
+    for name, cdn, slon, sectors in STAR_SATS:
+        d = londist(lon, slon)
+        for sid, la0, la1, lo0, lo1 in sectors:
+            if la0 <= lat <= la1 and lo0 <= lon <= lo1:
+                named = 0 if sid not in ("CONUS", "FD") else 1
+                area = (la1 - la0) * (lo1 - lo0)
+                candidates.append((named, area, d, name, cdn, sid))
+    if candidates:
+        candidates.sort()
+        _, _, _, name, cdn, sid = candidates[0]
+        return name, cdn, sid
+    name, cdn, _slon, _secs = min(STAR_SATS, key=lambda s: londist(lon, s[2]))
+    return name, cdn, "FD"
+
+
+def fetch_star_frames(cdn_dir: str, sector: str, band: str, n: int = 6):
+    """Last n frame URLs+times from the STAR directory listing. Filenames
+    embed YYYYDDDHHMM; we animate only frames the listing confirms."""
+    try:
+        base = f"{STAR_BASE}/{cdn_dir}/ABI/"
+        base += "FD/" if sector == "FD" else f"SECTOR/{sector}/"
+        base += f"{band}/"
+        req = urllib.request.Request(base, headers={
+            "User-Agent": "VectorCheck-ARMS/2.1"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            listing = r.read().decode("utf-8", "replace")
+        # Prefer 1200px-class files; FD uses 1808; fall back to any size
+        pat = _re.compile(r'href="((\d{11})_[^"]*?-(1200x1200|1808x1808)\.jpg)"')
+        hits = pat.findall(listing)
+        if not hits:
+            pat = _re.compile(r'href="((\d{11})_[^"]*?\.jpg)"')
+            hits = [(f, t, "") for f, t in pat.findall(listing)]
+        seen, frames = set(), []
+        for fname, tstr, _res in hits:
+            if tstr in seen:
+                continue
+            seen.add(tstr)
+            from datetime import datetime as _dt, timezone as _tz
+            dt = _dt.strptime(tstr, "%Y%j%H%M").replace(tzinfo=_tz.utc)
+            frames.append({"url": base + fname, "ts": int(dt.timestamp())})
+        frames.sort(key=lambda f: f["ts"])
+        return frames[-n:]
+    except Exception as e:
+        logger.warning("STAR listing failed %s/%s/%s: %s",
+                       cdn_dir, sector, band, e)
+        return []
