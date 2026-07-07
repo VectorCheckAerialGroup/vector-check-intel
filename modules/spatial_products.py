@@ -402,6 +402,13 @@ def fetch_mix_precip_frames(lat, lon, zoom, username, password, times):
             # against an unavailable WMS would stall the Spatial page for
             # a minute; one probe answers the question.
             break
+    if not uris:
+        # Timed requests failing but the service may still serve the plain
+        # latest image (the originally-proven call, no time parameter).
+        # A static latest MIX beats the HRDPS fallback every time.
+        uri, b = fetch_mix_precip_overlay(lat, lon, zoom, username, password)
+        if uri:
+            return [uri], b
     return uris, bounds
 
 
