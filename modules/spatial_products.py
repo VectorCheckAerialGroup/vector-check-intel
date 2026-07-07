@@ -518,9 +518,14 @@ def pick_star_view(lat: float, lon: float):
     if candidates:
         candidates.sort()
         _, _, _, name, cdn, sid = candidates[0]
-        return name, cdn, sid
+        for n2, c2, _sl, secs in STAR_SATS:
+            if c2 == cdn:
+                for s2, la0, la1, lo0, lo1 in secs:
+                    if s2 == sid:
+                        return name, cdn, sid, (la0, la1, lo0, lo1)
+        return name, cdn, sid, None
     name, cdn, _slon, _secs = min(STAR_SATS, key=lambda s: londist(lon, s[2]))
-    return name, cdn, "FD"
+    return name, cdn, "FD", None
 
 
 def fetch_star_frames(cdn_dir: str, sector: str, band: str, n: int = 6):
