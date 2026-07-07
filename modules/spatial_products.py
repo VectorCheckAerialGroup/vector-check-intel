@@ -535,14 +535,19 @@ def fetch_star_frames(cdn_dir: str, sector: str, band: str, n: int = 6):
     embed YYYYDDDHHMM; we animate only frames the listing confirms."""
     try:
         base = f"{STAR_BASE}/{cdn_dir}/ABI/"
-        base += "FD/" if sector == "FD" else f"SECTOR/{sector}/"
+        # CONUS and FD are top-level product dirs on STAR; only the small
+        # regional web sectors live under SECTOR/.
+        if sector in ("FD", "CONUS"):
+            base += f"{sector}/"
+        else:
+            base += f"SECTOR/{sector}/"
         base += f"{band}/"
         req = urllib.request.Request(base, headers={
             "User-Agent": "VectorCheck-ARMS/2.1"})
         with urllib.request.urlopen(req, timeout=10) as r:
             listing = r.read().decode("utf-8", "replace")
         # Prefer 1200px-class files; FD uses 1808; fall back to any size
-        pat = _re.compile(r'href="((\d{11})_[^"]*?-(1200x1200|1808x1808)\.jpg)"')
+        pat = _re.compile(r'href="((\d{11})_[^"]*?-(1200x1200|1808x1808|2500x1500|1250x750)\.jpg)"')
         hits = pat.findall(listing)
         if not hits:
             pat = _re.compile(r'href="((\d{11})_[^"]*?\.jpg)"')
