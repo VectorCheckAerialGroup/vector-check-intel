@@ -79,7 +79,7 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
                     rv_catalog=None, station_scans=None,
-                    star_frames=None, star_label=None, star_bounds=None,
+                    star_frames=None, star_label=None, star_bounds=None, star_proj=None,
                     mix_uris=None, mix_times=None,
                     mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
@@ -97,6 +97,7 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "starFrames": star_frames or [],
         "starLabel": star_label or "",
         "starBounds": list(star_bounds) if star_bounds else None,
+        "starProj": star_proj,
         "staScans": station_scans or [],
         "rvRadar": (rv_catalog or {}).get("radar", []),
         "rvSat": (rv_catalog or {}).get("sat", []),
@@ -167,7 +168,7 @@ cell('m2',`SATELLITE \u00b7 ${CFG.starLabel||'GOES'}`);
     '<div id="satwrap" style="position:absolute;inset:0;transition:transform 0.15s;">'+
     '<img id="satimg" style="position:absolute;top:0;left:0;width:100%;" alt="satellite"/>'+
     '<div id="satsite" style="position:absolute;width:14px;height:14px;border:2px solid #E58E26;'+
-    'border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 6px rgba(229,142,38,0.8);display:none;"></div>'+
+    'border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 6px rgba(229,142,38,0.8);display:none;pointer-events:none;"></div>'+
     '</div></div>';
 })();
 cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
@@ -214,21 +215,58 @@ satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
 // Zoom-match: scale the sector image about the site's position so the
 // satellite pane tracks the shared zoom of the map panes. The sector's geo
 // bounds are known, so scale = sector width / current map view width.
+let satZ=CFG.zoom;
+// GOES-R geostationary forward projection (PUG constants): lat/lon -> scan
+// angles -> fraction of the documented sector extents. Exact auto-placement.
+function geosFrac(){
+  const p=CFG.starProj;if(!p)return null;
+  const d=Math.PI/180, lat=CFG.lat*d, dl=(CFG.lon-p.lon0)*d;
+  const H=42164.16, rpol=6356.7523;
+  const phic=Math.atan(0.993305616*Math.tan(lat));
+  const rc=rpol/Math.sqrt(1-0.00669438*Math.cos(phic)*Math.cos(phic));
+  const sx=H-rc*Math.cos(phic)*Math.cos(dl);
+  const sy=-rc*Math.cos(phic)*Math.sin(dl);
+  const sz=rc*Math.sin(phic);
+  const x=Math.asin(-sy/Math.sqrt(sx*sx+sy*sy+sz*sz));
+  const y=Math.atan(sz/sx);
+  const e=p.ext;
+  return [(x-e[0])/(e[1]-e[0]), (e[3]-y)/(e[3]-e[2])];
+}
 function applySatZoom(z){
-  const b=CFG.starBounds;if(!b||!satFrames.length)return;
+  satZ=z;
+  if(!satFrames.length)return;
+  const fr=geosFrac();if(!fr)return;
   const box=document.getElementById('m2');
   const W=box.clientWidth||700;
-  const fx=Math.max(0,Math.min(1,(CFG.lon-b[2])/(b[3]-b[2])));
-  const fy=Math.max(0,Math.min(1,(b[1]-CFG.lat)/(b[1]-b[0])));
-  const px=fx*W, py=fy*W;               // image displayed as W x W, top-anchored
+  const iw=satImg.naturalWidth||1, ih=satImg.naturalHeight||1;
+  const dispH=W*ih/iw;
+  const px=fr[0]*W, py=fr[1]*dispH;
   satSite.style.left=px+'px';satSite.style.top=py+'px';
-  satSite.style.display=(py<=box.clientHeight*4)?'block':'none';
-  const spanLon=b[3]-b[2];
-  const viewLon=(W/256)*360/Math.pow(2,z);
-  const k=Math.max(1,Math.min(8,spanLon/viewLon));
+  satSite.style.display=(fr[0]>=0&&fr[0]<=1&&fr[1]>=0&&fr[1]<=1)?'block':'none';
+  const p=CFG.starProj;
+  const spanDeg=(p.ext[1]-p.ext[0])*42164.16/700;  // approx km/px scale proxy
+  const k=Math.max(1,Math.min(10,Math.pow(2,z-5)/2));
   satWrap.style.transformOrigin=px+'px '+py+'px';
   satWrap.style.transform='scale('+k+')';
 }
+satImg.addEventListener('load',()=>applySatZoom(satZ),{once:true});
+(function(){
+  const box=document.getElementById('m2');
+  box.addEventListener('wheel',function(e){
+    e.preventDefault();
+    applySatZoom(Math.max(4,Math.min(13,satZ+(e.deltaY<0?0.5:-0.5))));
+  },{passive:false});
+  const zc=document.createElement('div');
+  zc.style.cssText='position:absolute;top:8px;right:10px;z-index:1100;display:flex;gap:4px;';
+  ['+','\u2212'].forEach((t,i)=>{
+    const b2=document.createElement('button');b2.textContent=t;
+    b2.style.cssText='width:24px;height:24px;border-radius:5px;border:1px solid #374151;'+
+      'background:rgba(10,12,16,0.85);color:#e5e7eb;cursor:pointer;font-weight:700;';
+    b2.onclick=()=>applySatZoom(Math.max(4,Math.min(13,satZ+(i===0?1:-1))));
+    zc.appendChild(b2);
+  });
+  box.parentElement.appendChild(zc);
+})();
 function satShow(i){
   if(!satFrames.length)return;
   satImg.src=satFrames[i];
