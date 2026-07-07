@@ -155,19 +155,27 @@ const sta=CFG.station;
 let radarLabel='RADAR \u00b7 COMPOSITE';
 if(sta){radarLabel=`RADAR \u00b7 ${sta.id}`+(sta.cc==='ca'?' \u00b7 ECCC':` \u00b7 ${sta.product} 0.5\u00b0`);}
 cell('m1',radarLabel);
-cell('m2',`SATELLITE \u00b7 ${CFG.starLabel||'GOES'}`);
-// Sector imagery pane: full-res pre-rendered frames (CoD-class), not tiles.
-(function(){
-  const mdiv=document.getElementById('m2');
-  mdiv.outerHTML='<img id="m2" class="map" style="object-fit:cover;object-position:50% 0%;background:#05070a;transition:transform 0.15s;" alt="satellite"/>';
-})();
-cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
 cell('m4', (CFG.mixUris&&CFG.mixUris.length)?'METEOMATICS MIX \u00b7 1H PRECIP':'MODEL PRECIP \u00b7 HRDPS 2.5 KM');
 
-const m1=mkmap('m1',CFG.zoom);
+cell('m2',`SATELLITE \u00b7 ${CFG.starLabel||'GOES'}`);
+// Sector imagery pane: full-res frames in a transformable wrapper carrying
+// the site ring, so ring and imagery scale together. Top-anchored square
+// image in a wide pane = bottom banner/logos never painted.
+(function(){
+  const mdiv=document.getElementById('m2');
+  mdiv.outerHTML='<div id="m2" class="map" style="position:relative;overflow:hidden;background:#05070a;">'+
+    '<div id="satwrap" style="position:absolute;inset:0;transition:transform 0.15s;">'+
+    '<img id="satimg" style="position:absolute;top:0;left:0;width:100%;" alt="satellite"/>'+
+    '<div id="satsite" style="position:absolute;width:14px;height:14px;border:2px solid #E58E26;'+
+    'border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 6px rgba(229,142,38,0.8);display:none;"></div>'+
+    '</div></div>';
+})();
+cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
+
+const m1=mkmap('m1',Math.min(CFG.zoom,12),12);
 const m3=mkmap('m3',Math.max(CFG.zoom,9),12);
-const m4=mkmap('m4',CFG.zoom);
-const maps=[m1,m3,m4];   // satellite is a fixed sector image, not synced
+const m4=mkmap('m4',Math.min(CFG.zoom,12),12);
+const maps=[m1,m4];   // zoom pair: radar + MIX; sat & elevation independent
 
 // ---------- RADAR frames (no static underlay — loop owns the pane) ----------
 let radarFrames=[],radarTs=[],satTs=[];
@@ -197,7 +205,9 @@ if(sta){
   m1.setView([(CFG.lat+sta.lat)/2,(CFG.lon+sta.lon)/2],CFG.zoom);
 }
 // ---------- SATELLITE: STAR sector frames (image loop) ----------
-const satImg=document.getElementById('m2');
+const satImg=document.getElementById('satimg');
+const satWrap=document.getElementById('satwrap');
+const satSite=document.getElementById('satsite');
 const satFrames=(CFG.starFrames||[]).map(f=>f.url);
 satTs=(CFG.starFrames||[]).map(f=>f.ts);
 satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
@@ -206,14 +216,18 @@ satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
 // bounds are known, so scale = sector width / current map view width.
 function applySatZoom(z){
   const b=CFG.starBounds;if(!b||!satFrames.length)return;
-  const spanLon=b[3]-b[2];
-  const paneW=satImg.clientWidth||700;
-  const viewLon=(paneW/256)*360/Math.pow(2,z);
-  const k=Math.max(1,Math.min(8,spanLon/viewLon));
-  const fx=Math.max(0,Math.min(1,(CFG.lon-b[2])/spanLon));
+  const box=document.getElementById('m2');
+  const W=box.clientWidth||700;
+  const fx=Math.max(0,Math.min(1,(CFG.lon-b[2])/(b[3]-b[2])));
   const fy=Math.max(0,Math.min(1,(b[1]-CFG.lat)/(b[1]-b[0])));
-  satImg.style.transformOrigin=(fx*100)+'% '+(fy*100)+'%';
-  satImg.style.transform='scale('+k+')';
+  const px=fx*W, py=fy*W;               // image displayed as W x W, top-anchored
+  satSite.style.left=px+'px';satSite.style.top=py+'px';
+  satSite.style.display=(py<=box.clientHeight*4)?'block':'none';
+  const spanLon=b[3]-b[2];
+  const viewLon=(W/256)*360/Math.pow(2,z);
+  const k=Math.max(1,Math.min(8,spanLon/viewLon));
+  satWrap.style.transformOrigin=px+'px '+py+'px';
+  satWrap.style.transform='scale('+k+')';
 }
 function satShow(i){
   if(!satFrames.length)return;
@@ -372,7 +386,6 @@ maps.forEach(src=>{
     if(syncing)return;syncing=true;
     const c=src.getCenter(),z=src.getZoom();
     maps.forEach(dst=>{if(dst!==src){dst.setView(c,Math.min(z,dst.getMaxZoom()),{animate:false});}});
-    applySatZoom(src.getZoom());
     syncing=false;
   });
 });
