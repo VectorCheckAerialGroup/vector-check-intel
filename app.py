@@ -1450,6 +1450,23 @@ if _workspace == "Spatial":
 
     _rv_cat = _rv_catalog_cached()
     _star_sat, _star_cdn, _star_sec, _star_bounds = pick_star_view(lat, lon)
+    # Ring auto-placement needs DOCUMENTED fixed-grid extents (GOES-R PUG):
+    # only CONUS and FD qualify — regional web sectors have no published
+    # geolocation, which is why linear bounds mis-placed the ring.
+    _GEOS = {"GOES19": (-75.2, (-0.101332, 0.038612, 0.044240, 0.128212)),
+             "GOES18": (-137.0, (-0.069986, 0.069986, 0.044240, 0.128212))}
+    _FDX = 0.151872
+    if _star_cdn in _GEOS:
+        _lon0, _cx = _GEOS[_star_cdn]
+        if _star_sec not in ("CONUS", "FD"):
+            _star_sec = "CONUS" if _star_bounds else "FD"
+        if _star_sec == "CONUS":
+            _star_proj = {"lon0": _lon0, "ext": list(_cx)}
+        else:
+            _star_proj = {"lon0": _lon0, "ext": [-_FDX, _FDX, -_FDX, _FDX]}
+    else:
+        _star_sec = "FD"
+        _star_proj = {"lon0": 140.7, "ext": [-_FDX, _FDX, -_FDX, _FDX]}
     _star_frames = _star_frames_cached(_star_cdn, _star_sec,
                                        STAR_BANDS[_sat_choice])
     _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
@@ -1473,7 +1490,7 @@ if _workspace == "Spatial":
         station_id=_sta_id, station_product=_prod_code,
         rv_catalog=_rv_cat, station_scans=_sta_scans,
         star_frames=_star_frames, star_label=_star_label,
-        star_bounds=_star_bounds,
+        star_bounds=_star_bounds, star_proj=_star_proj,
         mix_uris=_mix_uris, mix_times=_mix_times,
         mix_bounds=_mix_bounds,
     )
