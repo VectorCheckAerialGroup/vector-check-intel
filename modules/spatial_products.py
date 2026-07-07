@@ -231,8 +231,10 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
         req = urllib.request.Request(url, headers={
             "Authorization": f"Basic {auth}",
             "User-Agent": "VectorCheck-ARMS/2.1"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            img = r.read()
+        from modules.meteomatics_provider import _MM_GATE
+        with _MM_GATE:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                img = r.read()
         # Must be a real PNG (magic bytes) — an XML exception or HTML error
         # page must never be embedded as imagery.
         if not img or img[:8] != b"\x89PNG\r\n\x1a\n":
