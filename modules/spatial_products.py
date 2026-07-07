@@ -217,19 +217,27 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
         lat_span = lon_span * (height / width) * max(0.2, math.cos(math.radians(lat)))
         b = (lat - lat_span / 2, lon - lon_span / 2,
              lat + lat_span / 2, lon + lon_span / 2)
+        # styles= is MANDATORY in WMS GetMap — omitting it makes servers
+        # return an XML exception document, which downstream code was
+        # treating as an image (the corrupt/stacked overlays). TIME= per
+        # the Meteomatics WMS documentation.
         url = ("https://api.meteomatics.com/wms?service=WMS&version=1.3.0"
-               f"&request=GetMap&layers={parameter}&model=mix"
+               f"&request=GetMap&layers={parameter}&styles=&model=mix"
                f"&crs=EPSG:4326&bbox={b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}"
                f"&width={width}&height={height}&format=image/png&transparent=true")
         if valid_iso:
-            url += f"&time={valid_iso}"
+            url += f"&TIME={valid_iso}"
         auth = base64.b64encode(f"{username}:{password}".encode()).decode()
         req = urllib.request.Request(url, headers={
             "Authorization": f"Basic {auth}",
             "User-Agent": "VectorCheck-ARMS/2.1"})
         with urllib.request.urlopen(req, timeout=15) as r:
             img = r.read()
-        if not img or len(img) < 500:
+        # Must be a real PNG (magic bytes) — an XML exception or HTML error
+        # page must never be embedded as imagery.
+        if not img or img[:8] != b"\x89PNG\r\n\x1a\n":
+            logger.warning("MIX WMS returned non-PNG response (%d bytes)",
+                           len(img) if img else 0)
             return None, None
         uri = "data:image/png;base64," + base64.b64encode(img).decode()
         bounds = [[b[0], b[1]], [b[2], b[3]]]
