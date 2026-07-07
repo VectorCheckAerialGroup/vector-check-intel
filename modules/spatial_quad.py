@@ -79,7 +79,7 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
                     rv_catalog=None, station_scans=None,
-                    star_frames=None, star_label=None,
+                    star_frames=None, star_label=None, star_bounds=None,
                     mix_uris=None, mix_times=None,
                     mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
@@ -96,6 +96,7 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "satLayer": sat_layer, "satMaxZ": sat_maxz,
         "starFrames": star_frames or [],
         "starLabel": star_label or "",
+        "starBounds": list(star_bounds) if star_bounds else None,
         "staScans": station_scans or [],
         "rvRadar": (rv_catalog or {}).get("radar", []),
         "rvSat": (rv_catalog or {}).get("sat", []),
@@ -158,7 +159,7 @@ cell('m2',`SATELLITE \u00b7 ${CFG.starLabel||'GOES'}`);
 // Sector imagery pane: full-res pre-rendered frames (CoD-class), not tiles.
 (function(){
   const mdiv=document.getElementById('m2');
-  mdiv.outerHTML='<img id="m2" class="map" style="object-fit:contain;background:#05070a;" alt="satellite"/>';
+  mdiv.outerHTML='<img id="m2" class="map" style="object-fit:cover;object-position:50% 0%;background:#05070a;transition:transform 0.15s;" alt="satellite"/>';
 })();
 cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
 cell('m4', (CFG.mixUris&&CFG.mixUris.length)?'METEOMATICS MIX \u00b7 1H PRECIP':'MODEL PRECIP \u00b7 HRDPS 2.5 KM');
@@ -200,6 +201,20 @@ const satImg=document.getElementById('m2');
 const satFrames=(CFG.starFrames||[]).map(f=>f.url);
 satTs=(CFG.starFrames||[]).map(f=>f.ts);
 satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
+// Zoom-match: scale the sector image about the site's position so the
+// satellite pane tracks the shared zoom of the map panes. The sector's geo
+// bounds are known, so scale = sector width / current map view width.
+function applySatZoom(z){
+  const b=CFG.starBounds;if(!b||!satFrames.length)return;
+  const spanLon=b[3]-b[2];
+  const paneW=satImg.clientWidth||700;
+  const viewLon=(paneW/256)*360/Math.pow(2,z);
+  const k=Math.max(1,Math.min(8,spanLon/viewLon));
+  const fx=Math.max(0,Math.min(1,(CFG.lon-b[2])/spanLon));
+  const fy=Math.max(0,Math.min(1,(b[1]-CFG.lat)/(b[1]-b[0])));
+  satImg.style.transformOrigin=(fx*100)+'% '+(fy*100)+'%';
+  satImg.style.transform='scale('+k+')';
+}
 function satShow(i){
   if(!satFrames.length)return;
   satImg.src=satFrames[i];
@@ -329,6 +344,7 @@ function stoppedState(){
   if(radarTs.length)document.getElementById('m1_t').textContent=tlabel(radarTs[radarTs.length-1])+' (latest)';
 }
 stoppedState();
+applySatZoom(CFG.zoom);
 if(sta&&sta.cc==='us'&&!(CFG.staScans||[]).length)document.getElementById('m1_t').textContent='scan catalog unavailable \u00b7 composite shown';
 if(mixFrames.length&&CFG.mixTimes)document.getElementById('m4_t').textContent=
   CFG.mixTimes[0].slice(11,16)+'Z\u2192'+CFG.mixTimes[CFG.mixTimes.length-1].slice(11,16)+'Z';
@@ -356,6 +372,7 @@ maps.forEach(src=>{
     if(syncing)return;syncing=true;
     const c=src.getCenter(),z=src.getZoom();
     maps.forEach(dst=>{if(dst!==src){dst.setView(c,Math.min(z,dst.getMaxZoom()),{animate:false});}});
+    applySatZoom(src.getZoom());
     syncing=false;
   });
 });
