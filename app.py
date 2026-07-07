@@ -1449,7 +1449,7 @@ if _workspace == "Spatial":
         )
 
     _rv_cat = _rv_catalog_cached()
-    _star_sat, _star_cdn, _star_sec = pick_star_view(lat, lon)
+    _star_sat, _star_cdn, _star_sec, _star_bounds = pick_star_view(lat, lon)
     _star_frames = _star_frames_cached(_star_cdn, _star_sec,
                                        STAR_BANDS[_sat_choice])
     _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
@@ -1473,6 +1473,7 @@ if _workspace == "Spatial":
         station_id=_sta_id, station_product=_prod_code,
         rv_catalog=_rv_cat, station_scans=_sta_scans,
         star_frames=_star_frames, star_label=_star_label,
+        star_bounds=_star_bounds,
         mix_uris=_mix_uris, mix_times=_mix_times,
         mix_bounds=_mix_bounds,
     )
