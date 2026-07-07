@@ -416,7 +416,8 @@ def _fetch_meteomatics_era5_year(lat: float, lon: float, year: int):
            f"/json?source=ecmwf-era5")
 
     try:
-        from modules.http_client import fetch_json as _fj, HttpFetchError as _HFE
+        from modules.meteomatics_provider import _mm_fetch_json as _fj
+        from modules.http_client import HttpFetchError as _HFE
         payload = _fj(url, timeout=_MM_TIMEOUT, retries=2, basic_auth=creds)
     except Exception as e:
         logger.warning("Meteomatics ERA5 fetch failed for %f,%f year %d: %s",
