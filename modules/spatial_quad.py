@@ -206,29 +206,110 @@ if(wantVis){
       {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
   }
 }
-// ---------- ELEVATION (dark terrain product) ----------
-// Hypsometric colour base, punched up via CSS saturation/contrast on the
-// pane itself (the raw ASTER tint is pale over low-relief terrain), with
-// DARK hillshade multiplied over it for depth instead of washing it out,
-// then transportation and place-name overlays for orientation.
-document.getElementById('m3').style.filter='saturate(1.6) contrast(1.15) brightness(0.95)';
-L.tileLayer(GIBS('ASTER_GDEM_Color_Shaded_Relief','default',12),{maxZoom:12}).addTo(m3);
+// ---------- ELEVATION: viewport-normalized hypsometric (Terrarium) ----------
+// ASTER's global colour ramp made local relief invisible (Belleville spans
+// ~2% of it). This layer decodes real elevations from AWS Terrarium
+// terrain-RGB tiles and re-stretches the FULL colour ramp to the min/max
+// elevation currently in view — maximum contrast at every zoom, plus true
+// HI/LO markers and a legend in metres.
+let vMin=0,vMax=500;
+const RAMP=[[0.0,28,74,42],[0.25,90,127,60],[0.5,185,151,91],[0.75,138,106,79],[1.0,232,228,220]];
+function rampCol(f){
+  for(let i=1;i<RAMP.length;i++){
+    if(f<=RAMP[i][0]){
+      const a=RAMP[i-1],b=RAMP[i],t=(f-a[0])/(b[0]-a[0]);
+      return [a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t,a[3]+(b[3]-a[3])*t];
+    }
+  }
+  return RAMP[RAMP.length-1].slice(1);
+}
+const HypsoLayer=L.GridLayer.extend({
+  createTile:function(coords,done){
+    const tile=document.createElement('canvas');
+    tile.width=tile.height=256;
+    const ctx=tile.getContext('2d');
+    const img=new Image();img.crossOrigin='anonymous';
+    img.onload=function(){
+      ctx.drawImage(img,0,0);
+      const d=ctx.getImageData(0,0,256,256);
+      const px=d.data;
+      const span=Math.max(1,vMax-vMin);
+      for(let i=0;i<px.length;i+=4){
+        const e=(px[i]*256+px[i+1]+px[i+2]/256)-32768;
+        if(e<=0){px[i]=14;px[i+1]=26;px[i+2]=38;px[i+3]=255;continue;}   // water
+        const f=Math.max(0,Math.min(1,(e-vMin)/span));
+        const c=rampCol(f);
+        px[i]=c[0];px[i+1]=c[1];px[i+2]=c[2];px[i+3]=255;
+      }
+      ctx.putImageData(d,0,0);done(null,tile);
+    };
+    img.onerror=function(){done(null,tile);};
+    img.src=`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${coords.z}/${coords.x}/${coords.y}.png`;
+    return tile;
+  }
+});
+const hypso=new HypsoLayer({maxZoom:15,maxNativeZoom:14});hypso.addTo(m3);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade_Dark/MapServer/tile/{z}/{y}/{x}',
-  {opacity:0.62,maxZoom:16}).addTo(m3);
+  {opacity:0.5,maxZoom:16}).addTo(m3);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
-  {opacity:0.75,maxZoom:16}).addTo(m3);
+  {opacity:0.18,maxZoom:16}).addTo(m3);   // barely-noticeable orientation only
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
-  {subdomains:'abcd',opacity:0.9,maxZoom:20}).addTo(m3);
-// Elevation legend — low -> high gradient chip
+  {subdomains:'abcd',opacity:0.85,maxZoom:20}).addTo(m3);
+// HI/LO scan: sample the viewport from one Terrarium tile, mark extremes,
+// re-normalize the ramp, redraw. Debounced on move end.
+let hiM=null,loM=null,elvLegend=null;
+function mkExtreme(latlng,txt,col){
+  return L.marker(latlng,{icon:L.divIcon({className:'',html:
+    `<div style="font-size:9px;font-weight:700;color:${col};background:rgba(10,12,16,0.8);`+
+    `padding:1px 5px;border-radius:4px;border:1px solid ${col};white-space:nowrap;">${txt}</div>`,
+    iconAnchor:[16,8]})}).addTo(m3);
+}
+function scanView(){
+  const b=m3.getBounds(),z=Math.min(m3.getZoom(),14);
+  const t2=(lat,lon)=>{const n=Math.pow(2,z);
+    return [Math.floor((lon+180)/360*n),
+            Math.floor((1-Math.log(Math.tan(lat*Math.PI/180)+1/Math.cos(lat*Math.PI/180))/Math.PI)/2*n)];};
+  const c=m3.getCenter(),[tx,ty]=t2(c.lat,c.lng);
+  const img=new Image();img.crossOrigin='anonymous';
+  img.onload=function(){
+    const cv=document.createElement('canvas');cv.width=cv.height=256;
+    const cx=cv.getContext('2d');cx.drawImage(img,0,0);
+    const d=cx.getImageData(0,0,256,256).data;
+    let mn=1e9,mx=-1e9,mnI=0,mxI=0;
+    for(let i=0;i<d.length;i+=4){
+      const e=(d[i]*256+d[i+1]+d[i+2]/256)-32768;
+      if(e<mn){mn=e;mnI=i/4;}
+      if(e>mx){mx=e;mxI=i/4;}
+    }
+    const n=Math.pow(2,z);
+    const p2ll=(pi)=>{const px=pi%256,py=Math.floor(pi/256);
+      const lon=(tx+px/256)/n*360-180;
+      const yy=Math.PI*(1-2*(ty+py/256)/n);
+      return [Math.atan(Math.sinh(yy))*180/Math.PI,lon];};
+    vMin=mn;vMax=mx;hypso.redraw();
+    if(hiM)m3.removeLayer(hiM);if(loM)m3.removeLayer(loM);
+    hiM=mkExtreme(p2ll(mxI),`HI ${Math.round(mx)} m`,'#e8b04a');
+    loM=mkExtreme(p2ll(mnI),`LO ${Math.round(mn)} m`,'#7fb8e6');
+    if(elvLegend)elvLegend.textContent=`${Math.round(mn)} m`;
+    if(elvLegendHi)elvLegendHi.textContent=`${Math.round(mx)} m`;
+  };
+  img.src=`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`;
+}
+let scanT=null;
+m3.on('moveend zoomend',function(){clearTimeout(scanT);scanT=setTimeout(scanView,400);});
+setTimeout(scanView,800);
+// Legend with live metre values
+let elvLegendHi=null;
 (function(){
   const c=document.getElementById('m3').parentElement;
   const lg=document.createElement('div');
   lg.style.cssText='position:absolute;bottom:8px;right:10px;z-index:1000;'+
     'display:flex;align-items:center;gap:6px;background:rgba(10,12,16,0.72);'+
     'padding:3px 9px;border-radius:5px;font-size:9px;color:#9ca3af;pointer-events:none;';
-  lg.innerHTML='LOW <span style="display:inline-block;width:70px;height:7px;border-radius:3px;'+
-    'background:linear-gradient(90deg,#1c4a2a,#5a7f3c,#b9975b,#8a6a4f,#e8e4dc);"></span> HIGH';
+  lg.innerHTML='<span id="elvLo"></span> <span style="display:inline-block;width:70px;height:7px;border-radius:3px;'+
+    'background:linear-gradient(90deg,#1c4a2a,#5a7f3c,#b9975b,#8a6a4f,#e8e4dc);"></span> <span id="elvHi"></span>';
   c.appendChild(lg);
+  elvLegend=document.getElementById('elvLo');elvLegendHi=document.getElementById('elvHi');
 })();
 // ---------- MIX frames ----------
 let mixFrames=[];
