@@ -246,8 +246,9 @@ function applySatZoom(z){
   const p=CFG.starProj;
   const spanDeg=(p.ext[1]-p.ext[0])*42164.16/700;  // approx km/px scale proxy
   const k=Math.max(1,Math.min(10,Math.pow(2,z-5)/2));
+  const cx=W/2, cy=(box.clientHeight||380)/2;
   satWrap.style.transformOrigin=px+'px '+py+'px';
-  satWrap.style.transform='scale('+k+')';
+  satWrap.style.transform='translate('+(cx-px)+'px,'+(cy-py)+'px) scale('+k+')';
 }
 satImg.addEventListener('load',()=>applySatZoom(satZ),{once:true});
 (function(){
