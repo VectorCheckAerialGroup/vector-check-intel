@@ -79,6 +79,7 @@ def beam_height_ft(dist_km: float, elev_deg: float = 0.5) -> float:
 def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
                     station_id=None, station_product="N0Q",
                     rv_catalog=None, station_scans=None,
+                    star_frames=None, star_label=None,
                     mix_uris=None, mix_times=None,
                     mix_bounds=None, pane_h=380):
     """Returns the full HTML for the synced 2x2 quad."""
@@ -93,6 +94,8 @@ def build_quad_html(lat, lon, zoom, radar_opacity, sat_product,
         "lat": lat, "lon": lon, "zoom": int(zoom),
         "radarOp": radar_opacity,
         "satLayer": sat_layer, "satMaxZ": sat_maxz,
+        "starFrames": star_frames or [],
+        "starLabel": star_label or "",
         "staScans": station_scans or [],
         "rvRadar": (rv_catalog or {}).get("radar", []),
         "rvSat": (rv_catalog or {}).get("sat", []),
@@ -151,15 +154,19 @@ const sta=CFG.station;
 let radarLabel='RADAR \u00b7 COMPOSITE';
 if(sta){radarLabel=`RADAR \u00b7 ${sta.id}`+(sta.cc==='ca'?' \u00b7 ECCC':` \u00b7 ${sta.product} 0.5\u00b0`);}
 cell('m1',radarLabel);
-cell('m2',`SATELLITE \u00b7 ${CFG.satLayer.includes('Band2')?'VIS RED':'IR CLEAN'}`);
+cell('m2',`SATELLITE \u00b7 ${CFG.starLabel||'GOES'}`);
+// Sector imagery pane: full-res pre-rendered frames (CoD-class), not tiles.
+(function(){
+  const mdiv=document.getElementById('m2');
+  mdiv.outerHTML='<img id="m2" class="map" style="object-fit:contain;background:#05070a;" alt="satellite"/>';
+})();
 cell('m3','ELEVATION \u00b7 HYPSOMETRIC');
-cell('m4', (CFG.mixUris&&CFG.mixUris.length)?'METEOMATICS MIX \u00b7 1H PRECIP':'MODEL PRECIP \u00b7 HRDPS (MIX OFFLINE)');
+cell('m4', (CFG.mixUris&&CFG.mixUris.length)?'METEOMATICS MIX \u00b7 1H PRECIP':'MODEL PRECIP \u00b7 HRDPS 2.5 KM');
 
 const m1=mkmap('m1',CFG.zoom);
-const m2=mkmap('m2',Math.min(CFG.zoom,CFG.satMaxZ),CFG.satMaxZ);
 const m3=mkmap('m3',Math.max(CFG.zoom,9),12);
 const m4=mkmap('m4',CFG.zoom);
-const maps=[m1,m2,m3,m4];
+const maps=[m1,m3,m4];   // satellite is a fixed sector image, not synced
 
 // ---------- RADAR frames (no static underlay — loop owns the pane) ----------
 let radarFrames=[],radarTs=[],satTs=[];
@@ -188,23 +195,15 @@ if(sta){
   });
   m1.setView([(CFG.lat+sta.lat)/2,(CFG.lon+sta.lon)/2],CFG.zoom);
 }
-// ---------- SATELLITE: catalogued GOES IR frames (loop) ----------
-// Vis Red has no public frame catalog -> shown as static latest (GIBS).
-// IR loops from the RainViewer satellite catalog with exact timestamps.
-let satFrames=[];
-const wantVis=CFG.satLayer.includes('Band2');
-if(wantVis){
-  L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
-    {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
-}else{
-  satFrames=(CFG.rvSat||[]).map(f=>L.tileLayer(
-    `https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/0/0_0.png`,
-    {opacity:0,maxZoom:CFG.satMaxZ}).addTo(m2));
-  satTs=(CFG.rvSat||[]).map(f=>f.ts);
-  if(!satFrames.length){
-    L.tileLayer(GIBS('GOES-East_ABI_GeoColor','default',7),
-      {opacity:1.0,maxZoom:CFG.satMaxZ}).addTo(m2);
-  }
+// ---------- SATELLITE: STAR sector frames (image loop) ----------
+const satImg=document.getElementById('m2');
+const satFrames=(CFG.starFrames||[]).map(f=>f.url);
+satTs=(CFG.starFrames||[]).map(f=>f.ts);
+satFrames.forEach(u=>{const p=new Image();p.src=u;});   // preload
+function satShow(i){
+  if(!satFrames.length)return;
+  satImg.src=satFrames[i];
+  if(satTs[i])document.getElementById('m2_t').textContent=tlabel(satTs[i])+(i===satFrames.length-1?' (latest)':'');
 }
 // ---------- ELEVATION: viewport-normalized hypsometric (Terrarium) ----------
 // ASTER's global colour ramp made local relief invisible (Belleville spans
@@ -325,10 +324,9 @@ function tlabel(ts){const d=new Date(ts*1000);
   return String(d.getUTCHours()).padStart(2,'0')+String(d.getUTCMinutes()).padStart(2,'0')+'Z';}
 function stoppedState(){
   if(radarFrames.length)show(radarFrames,radarFrames.length-1,CFG.radarOp);
-  if(satFrames.length)show(satFrames,satFrames.length-1,1.0);
+  if(satFrames.length)satShow(satFrames.length-1);
   if(mixFrames.length)show(mixFrames,mixFrames.length-1,0.75);
   if(radarTs.length)document.getElementById('m1_t').textContent=tlabel(radarTs[radarTs.length-1])+' (latest)';
-  if(satTs.length)document.getElementById('m2_t').textContent=tlabel(satTs[satTs.length-1])+' (latest)';
 }
 stoppedState();
 if(sta&&sta.cc==='us'&&!(CFG.staScans||[]).length)document.getElementById('m1_t').textContent='scan catalog unavailable \u00b7 composite shown';
@@ -346,9 +344,7 @@ btn.onclick=function(){
     if(radarFrames.length){const i=idx%radarFrames.length;
       show(radarFrames,i,CFG.radarOp);
       if(radarTs[i])document.getElementById('m1_t').textContent=tlabel(radarTs[i]);}
-    if(satFrames.length){const i=idx%satFrames.length;
-      show(satFrames,i,1.0);
-      if(satTs[i])document.getElementById('m2_t').textContent=tlabel(satTs[i]);}
+    if(satFrames.length)satShow(idx%satFrames.length);
     if(mixFrames.length)show(mixFrames,idx%mixFrames.length,0.75);
     idx++;
   },800);
