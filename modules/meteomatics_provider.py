@@ -57,6 +57,15 @@ import time as _time
 _MM_CIRCUIT = {"open_until": 0.0}
 MM_CIRCUIT_COOLDOWN_S = 180.0   # fail-fast window after a failure
 
+# CONCURRENCY GATE — Meteomatics enforces a parallel-request limit on trial
+# accounts. A cold-start (every deploy!) fires the primary forecast, the
+# ensemble, and the scorecard's threaded fetches simultaneously, breaching
+# that limit -> 429s -> "Meteomatics unavailable" right after each update.
+# This semaphore caps ARMS-wide MM concurrency; excess requests queue for a
+# moment instead of being rejected. Deploy-correlated outages end here.
+import threading as _threading
+_MM_GATE = _threading.Semaphore(3)
+
 
 class MeteomaticsCircuitOpen(Exception):
     """Raised (fail-fast) when Meteomatics recently failed and the cooldown
@@ -97,7 +106,9 @@ def _mm_fetch_json(url: str, timeout: float = DEFAULT_TIMEOUT_S,
         raise MeteomaticsCircuitOpen(
             "Meteomatics circuit open (recent failure) — failing fast")
     try:
-        result = _fj(url, timeout=timeout, retries=retries, basic_auth=basic_auth)
+        with _MM_GATE:
+            result = _fj(url, timeout=timeout, retries=retries,
+                         basic_auth=basic_auth)
         mm_record_success()
         return result
     except HttpFetchError as e:
