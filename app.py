@@ -1365,6 +1365,8 @@ if _workspace == "Spatial":
         from modules.spatial_quad import (build_quad_html, nearest_stations,
                                           beam_height_ft, SAT_PRODUCTS)
         from modules.spatial_products import (fetch_rainviewer_catalog,
+                                              pick_star_view, fetch_star_frames,
+                                              STAR_BANDS,
                                               fetch_mix_precip_frames,
                                               fetch_ridge_scans)
     except ImportError as _sp_err:
@@ -1378,6 +1380,10 @@ if _workspace == "Spatial":
     @st.cache_data(ttl=120, show_spinner=False)
     def _ridge_scans_cached(sta: str, prod: str) -> list:
         return fetch_ridge_scans(sta, prod, n=5)
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _star_frames_cached(cdn: str, sector: str, band: str) -> list:
+        return fetch_star_frames(cdn, sector, band, n=6)
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _mix_frames_cached(ov_lat: float, ov_lon: float, ov_zoom: int,
@@ -1430,8 +1436,8 @@ if _workspace == "Spatial":
     else:
         with _q4:
             pass
-    _sat_choice = st.radio("Satellite", list(SAT_PRODUCTS.keys()),
-                           horizontal=True, key="spq_sat")
+    _sat_choice = st.radio("Satellite band", list(STAR_BANDS.keys()),
+                           horizontal=True, key="spq_sat_band")
 
     if _sta_id:
         _bft = beam_height_ft(_sta_km)
@@ -1443,6 +1449,12 @@ if _workspace == "Spatial":
         )
 
     _rv_cat = _rv_catalog_cached()
+    _star_sat, _star_cdn, _star_sec = pick_star_view(lat, lon)
+    _star_frames = _star_frames_cached(_star_cdn, _star_sec,
+                                       STAR_BANDS[_sat_choice])
+    _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
+    if _star_sec == "FD" and not (-170 < lon < -20 or 90 < lon < 180):
+        _star_label += " (nearest bird — Meteosat region unsupported)"
     _sta_scans = []
     if _sta_id and _sta_cc == "us":
         _sta_scans = _ridge_scans_cached(_sta_id, _prod_code)
@@ -1460,6 +1472,7 @@ if _workspace == "Spatial":
         lat, lon, _sp_zoom, 0.8, _sat_choice,
         station_id=_sta_id, station_product=_prod_code,
         rv_catalog=_rv_cat, station_scans=_sta_scans,
+        star_frames=_star_frames, star_label=_star_label,
         mix_uris=_mix_uris, mix_times=_mix_times,
         mix_bounds=_mix_bounds,
     )
