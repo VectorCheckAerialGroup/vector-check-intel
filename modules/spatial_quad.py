@@ -168,7 +168,7 @@ if(sta && sta.cc==='us' && (CFG.staScans||[]).length){
   // exist, oldest -> newest, with true scan timestamps.
   radarFrames=CFG.staScans.map(sc=>L.tileLayer(
     `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::${sta.id}-${sta.product}-${sc.index}/{z}/{x}/{y}.png`,
-    {opacity:0,maxZoom:12}).addTo(m1));
+    {opacity:0,maxNativeZoom:12,maxZoom:15}).addTo(m1));
   radarTs=CFG.staScans.map(sc=>sc.ts);
 }else{
   // Composite: RainViewer catalogued frames — every frame is one the
@@ -176,7 +176,7 @@ if(sta && sta.cc==='us' && (CFG.staScans||[]).length){
   // NEXRAD + Canadian + European radars (RadarScope-style smoothing, scheme 4).
   radarFrames=(CFG.rvRadar||[]).map(f=>L.tileLayer(
     `https://tilecache.rainviewer.com${f.path}/512/{z}/{x}/{y}/4/1_1.png`,
-    {opacity:0,maxZoom:12}).addTo(m1));
+    {opacity:0,maxNativeZoom:12,maxZoom:15}).addTo(m1));
   radarTs=(CFG.rvRadar||[]).map(f=>f.ts);
 }
 if(sta){
