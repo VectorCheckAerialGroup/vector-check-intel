@@ -1405,7 +1405,7 @@ if _workspace == "Spatial":
 
     _q1, _q2, _q3, _q4 = st.columns([0.8, 0.9, 1.5, 1.1])
     with _q1:
-        _sp_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9, 10],
+        _sp_zoom = st.select_slider("Zoom", options=[5, 6, 7, 8, 9, 10, 11, 12, 13],
                                     value=7, key="spq_zoom")
     with _q2:
         _r_mode = st.radio("Radar", ["Composite", "Station"],
