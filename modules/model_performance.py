@@ -1788,15 +1788,23 @@ def compute_performance_scorecard(
     # the Open-Meteo fetcher. MODEL_ENDPOINTS now returns the best-available
     # source for each model name (Meteomatics where the subscription has it,
     # Open-Meteo otherwise) via the source-aware routing in ensemble_analysis.
+    # "Best Match" is Open-Meteo's auto-select endpoint, not a model. Scoring
+    # it produced a scorecard row an operator cannot act on (it may silently
+    # be a different model each hour, and it duplicates GFS/ECMWF/ICON which
+    # are already scored individually). Where no genuine regional high-res
+    # model covers the site (e.g. Nepal, Alaska, Manila), the regional slot is
+    # simply omitted and the global models stand on their own.
+    _has_regional = regional_name != "Best Match"
     all_candidate_models = [
         # (display_name, endpoint_url_or_marker, in_coverage)
-        (regional_name, regional_url, True),  # always in coverage by definition
         ("GFS",   MODEL_ENDPOINTS["GFS"],   True),
         ("ECMWF", MODEL_ENDPOINTS["ECMWF"], True),
         ("ICON",  MODEL_ENDPOINTS["ICON"],  True),
         ("NAM",   MODEL_ENDPOINTS["NAM"],   in_conus),
         ("HRRR",  MODEL_ENDPOINTS["HRRR"],  in_conus),
     ]
+    if _has_regional:
+        all_candidate_models.insert(0, (regional_name, regional_url, True))
     # Meteomatics-only models — surface only when credentials configured
     if _mm_in_scorecard:
         if "MIX" in MODEL_ENDPOINTS:
