@@ -3474,7 +3474,78 @@ else:
             unsafe_allow_html=True,
         )
 
+    # Explain any ensemble member removed for carrying no independent signal.
+    _dupe_info = (_mtx or {}).get("duplicate_members") or []
+    if _dupe_info:
+        _dl = "; ".join(f"{d} (identical to {s})" for d, s in _dupe_info)
+        st.caption(
+            f"Removed from the comparison: {_dl}. A blended product that "
+            "resolves to a single underlying model at this location carries "
+            "no independent information, and leaving it in would narrow the "
+            "apparent spread and overstate confidence."
+        )
+
     st.divider()
+
+    # =========================================================================
+    # SYSTEM DIAGNOSTICS — VCAG administrator only
+    # =========================================================================
+    # Exposes provider identity, credential presence and request internals,
+    # so it is gated on the administrator profile and never rendered for an
+    # operator. Every check is read-only; the live probe is explicit.
+    try:
+        from modules.system_diagnostics import (
+            is_admin, collect_all, probe_meteomatics_live, status_colour,
+        )
+        _diag_ok = True
+    except ImportError:
+        _diag_ok = False
+
+    if _diag_ok and is_admin(st.session_state.get("active_operator")):
+        with st.expander("⚙ System Diagnostics — VCAG"):
+            _diag = collect_all(lat, lon)
+            st.caption(f"Snapshot {_diag['generated']} · read-only · "
+                       "no credentials are displayed")
+
+            def _diag_table(title, rows):
+                if not rows:
+                    return
+                st.markdown(f"**{title}**")
+                _html = ['<div style="font-size:0.78rem;line-height:1.7;">']
+                for name, status, detail in rows:
+                    _c = status_colour(status)
+                    _html.append(
+                        f'<div style="display:flex;gap:10px;align-items:baseline;">'
+                        f'<span style="min-width:150px;color:#E5E7EB;">{name}</span>'
+                        f'<span style="min-width:120px;color:{_c};font-weight:600;">'
+                        f'{status}</span>'
+                        f'<span style="color:#9CA3AF;">{detail}</span></div>'
+                    )
+                _html.append("</div>")
+                st.markdown("".join(_html), unsafe_allow_html=True)
+
+            _diag_table("Providers", _diag["providers"])
+            st.markdown("")
+            _diag_table("Configuration (presence only)", _diag["config"])
+            st.markdown("")
+            _diag_table(f"Capabilities at {lat:.4f}, {lon:.4f}",
+                        _diag["location"])
+            st.markdown("")
+            _diag_table("Runtime", _diag["runtime"])
+
+            st.markdown("---")
+            if st.button("Run live Meteomatics probe", key="diag_live_probe"):
+                _st, _det = probe_meteomatics_live()
+                _c = status_colour(_st)
+                st.markdown(
+                    f'<div style="font-size:0.85rem;color:{_c};font-weight:600;">'
+                    f'{_st} — {_det}</div>', unsafe_allow_html=True)
+            st.caption(
+                "The probe issues one authenticated request, bypassing cache "
+                "and circuit breaker. 429 indicates quota exhaustion, 401/403 "
+                "a subscription or credential problem, 404 a parameter "
+                "coverage limit on an otherwise healthy service."
+            )
 
     st.divider()
 
