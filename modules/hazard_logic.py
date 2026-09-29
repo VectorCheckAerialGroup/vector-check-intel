@@ -30,10 +30,24 @@ def get_weather_element(wx_code: int, wind_spd: float) -> str:
     return wx_map.get(wx_code, "NIL")
 
 
+def _h_at(h: dict, key: str, idx: int):
+    """Safe hourly read: returns None when the key is absent, the series is
+    shorter than idx, or the value is null.
+
+    Required because `h.get(key, [0])[idx]` only survives idx 0 — with
+    partial-parameter tolerance a provider may legitimately omit a field
+    entirely, and this function has no caller-side exception handling.
+    """
+    series = h.get(key)
+    if not series or idx >= len(series):
+        return None
+    return series[idx]
+
+
 def calculate_icing_profile(h: dict, idx: int, wx_code: int) -> str:
     """Evaluates base surface icing condition utilizing official Vector Check matrices."""
-    t_raw = h.get('temperature_2m', [0])[idx]
-    rh_raw = h.get('relative_humidity_2m', [0])[idx]
+    t_raw = _h_at(h, 'temperature_2m', idx)
+    rh_raw = _h_at(h, 'relative_humidity_2m', idx)
 
     t = float(t_raw) if t_raw is not None else 0.0
     rh = int(rh_raw) if rh_raw is not None else 0
