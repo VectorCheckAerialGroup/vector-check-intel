@@ -1472,7 +1472,13 @@ if _workspace == "Spatial":
     _GEOS = {"GOES19": (-75.2, (-0.101332, 0.038612, 0.044240, 0.128212)),
              "GOES18": (-137.0, (-0.069986, 0.069986, 0.044240, 0.128212))}
     _FDX = 0.151872
-    if _star_cdn in _GEOS:
+    if _star_sec == "NONE":
+        # No geostationary satellite can see this site (Meteosat longitudes,
+        # or extreme polar latitudes). Render the honest empty state rather
+        # than fetching limb imagery that would be meaningless.
+        _star_frames, _star_proj = [], None
+        _star_label = f"{_star_sat} \u2014 no geostationary coverage at this location"
+    elif _star_cdn in _GEOS:
         _lon0, _cx = _GEOS[_star_cdn]
         if _star_sec not in ("CONUS", "FD"):
             _star_sec = "CONUS" if _star_bounds else "FD"
@@ -1483,8 +1489,9 @@ if _workspace == "Spatial":
     else:
         _star_sec = "FD"
         _star_proj = {"lon0": 140.7, "ext": [-_FDX, _FDX, -_FDX, _FDX]}
-    _star_frames = _star_frames_cached(_star_cdn, _star_sec,
-                                       STAR_BANDS[_sat_choice])
+    _star_frames = ([] if _star_sec == "NONE"
+                    else _star_frames_cached(_star_cdn, _star_sec,
+                                             STAR_BANDS[_sat_choice]))
     _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
     # Meteosat-only longitudes (roughly 20E-60E: Europe/Africa/Middle East)
     # have no NOAA-hosted geostationary coverage. Everywhere else is served
