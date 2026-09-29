@@ -206,16 +206,34 @@ def match_forecast_hour(
     h = forecast_data
     lead_time_h = int(best_diff / 3600)
 
+    def _fv_at(src: dict, key: str, idx: int):
+        """Safe hourly read returning a float or None."""
+        series = src.get(key)
+        if not series or idx >= len(series):
+            return None
+        val = series[idx]
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     try:
         return {
             "index": best_idx,
             "time": forecast_times[best_idx],
             "lead_time_hours": lead_time_h,
-            "wind_speed_kt": float(h.get("wind_speed_10m", [0])[best_idx] or 0) * 0.539957,
-            "wind_dir": float(h.get("wind_direction_10m", [0])[best_idx] or 0),
-            "temp_c": float(h.get("temperature_2m", [0])[best_idx] or 0),
-            "rh": float(h.get("relative_humidity_2m", [0])[best_idx] or 0),
-            "pressure_hpa": float(h.get("surface_pressure", [0])[best_idx] or 0),
+            # Per-field safe reads. The previous `h.get(k,[0])[best_idx]`
+            # pattern raised IndexError whenever a field was absent and
+            # best_idx > 0, and the surrounding handler then discarded the
+            # ENTIRE verification pairing — losing four good variables
+            # because one was missing. Each field now degrades on its own.
+            "wind_speed_kt": (_fv_at(h, "wind_speed_10m", best_idx) or 0.0) * 0.539957,
+            "wind_dir": _fv_at(h, "wind_direction_10m", best_idx) or 0.0,
+            "temp_c": _fv_at(h, "temperature_2m", best_idx) or 0.0,
+            "rh": _fv_at(h, "relative_humidity_2m", best_idx) or 0.0,
+            "pressure_hpa": _fv_at(h, "surface_pressure", best_idx) or 0.0,
         }
     except (IndexError, TypeError, ValueError) as e:
         logger.warning("Forecast match failed at index %d: %s", best_idx, e)
