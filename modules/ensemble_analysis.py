@@ -120,6 +120,11 @@ def _build_model_routes() -> dict:
 
 MODEL_ROUTES = _build_model_routes()
 
+# Ensemble members dropped by the most recent fetch_all_models() call because
+# they were numerically identical to another member — [(dropped, same_as)].
+# build_model_matrix() surfaces this so the UI can explain the absence.
+_LAST_DUPLICATE_MEMBERS: list = []
+
 # Approximate native horizontal grid resolution (km) for each model, used to
 # order the comparison matrix from highest-resolution (finest) to lowest.
 # Finer-resolution mesoscale models resolve terrain and convection better and
@@ -558,6 +563,69 @@ def fetch_all_models(lat: float, lon: float) -> list:
                 continue
             if mf.valid:
                 results.append(mf)
+
+    # ---- DUPLICATE-MEMBER REMOVAL ------------------------------------------
+    # Meteomatics MIX is a blend of regional models. Where no regional model
+    # exists (most of the world outside NA/EU), the blend degenerates to a
+    # single global model — in practice ECMWF IFS — so MIX arrives as a
+    # numerically IDENTICAL copy of a member already in the ensemble.
+    #
+    # That is worse than useless. Every confidence calculation in ARMS is
+    # driven by cross-model spread, so a cloned member narrows the apparent
+    # spread and manufactures false agreement: two "models" that concur
+    # because they are the same model. The matrix would shade green on a
+    # single model's output.
+    #
+    # Duplicates are dropped and recorded so the UI can say WHY a model
+    # vanished rather than silently showing one fewer member.
+    _dupes: list = []
+    global _LAST_DUPLICATE_MEMBERS
+
+    def _series_identical(a, b) -> bool:
+        """True when two members carry effectively the same numbers."""
+        pairs = 0
+        for key in ("wind_kt", "temp_c"):
+            sa, sb = getattr(a, key, None) or [], getattr(b, key, None) or []
+            n = min(len(sa), len(sb))
+            if n < 6:
+                return False
+            for i in range(n):
+                va, vb = sa[i], sb[i]
+                if va is None or vb is None:
+                    continue
+                tol = 0.1 if key == "wind_kt" else 0.05
+                if abs(va - vb) > tol:
+                    return False
+                pairs += 1
+        return pairs >= 12
+
+    # Prefer keeping the explicitly-named raw model over the blend, so the
+    # operator sees "ECMWF" rather than a blend that is secretly ECMWF.
+    _priority_drop = ("MIX", "AIFS", "MM-MIX")
+    _kept: list = []
+    for mf in results:
+        clone_of = None
+        for other in _kept:
+            if _series_identical(mf, other):
+                clone_of = other
+                break
+        if clone_of is None:
+            _kept.append(mf)
+            continue
+        if mf.name in _priority_drop:
+            _dupes.append((mf.name, clone_of.name))
+        elif clone_of.name in _priority_drop:
+            _kept[_kept.index(clone_of)] = mf
+            _dupes.append((clone_of.name, mf.name))
+        else:
+            _dupes.append((mf.name, clone_of.name))
+    if _dupes:
+        for dropped, same_as in _dupes:
+            logger.info("Ensemble: dropped %s — numerically identical to %s "
+                        "at %.3f,%.3f (no independent information)",
+                        dropped, same_as, lat, lon)
+    _LAST_DUPLICATE_MEMBERS = list(_dupes)
+    results = _kept
     return results
 
 
@@ -731,6 +799,9 @@ def build_model_matrix(models: list, n_hours: int = 24,
             "dir_spread": dir_spread,
             "vis_min": vis_min,
         },
+        # [(dropped_model, identical_to), ...] — surfaced so the UI can
+        # explain a missing member instead of it silently disappearing.
+        "duplicate_members": list(_LAST_DUPLICATE_MEMBERS),
     }
 
 
