@@ -236,6 +236,47 @@ _MODEL_MISSING_SURFACE_PARAMS = {
 # whole 10-parameter batch of quota at every elevated site.
 _ELEV_CACHE: dict = {}
 
+# Parameters proven unsupported for a (model, location) — discovered by
+# bisection on first encounter, then skipped on every later request so the
+# isolation cost is paid once per site, not per page load.
+_UNSUPPORTED_CACHE: dict = {}
+
+
+def _unsupported_key(model_id: str, lat: float, lon: float) -> tuple:
+    return (model_id, round(lat, 1), round(lon, 1))
+
+
+def _isolate_unsupported(creds, validdate, lat, lon, model_id, params,
+                         depth: int = 0):
+    """Binary-search a 404'ing batch to find exactly which parameters are
+    unavailable, keeping everything else.
+
+    Meteomatics applies all-or-nothing semantics per request, so one
+    unsupported parameter 404s its whole batch. Discarding the batch wholesale
+    also discards the 9 good parameters travelling with it — and if a CORE
+    field (temperature, wind) happened to share that batch, the entire
+    forecast failed. Observed outside North America (Nepal, Poland, Alaska,
+    Manila) where MIX serves a reduced parameter set.
+
+    Returns (payloads, bad_params): payloads from every sub-batch that
+    succeeded, and the parameter names that genuinely 404.
+    """
+    if not params:
+        return [], []
+    res = _fetch_one_batch(creds, validdate, lat, lon, model_id, params)
+    if not res.get("_batch_error"):
+        return [res], []
+    if res.get("status") != 404:
+        return [], []                      # transient — handled elsewhere
+    if len(params) == 1 or depth >= 5:
+        return [], list(params)
+    mid = len(params) // 2
+    lp, lb = _isolate_unsupported(creds, validdate, lat, lon, model_id,
+                                  params[:mid], depth + 1)
+    rp, rb = _isolate_unsupported(creds, validdate, lat, lon, model_id,
+                                  params[mid:], depth + 1)
+    return lp + rp, lb + rb
+
 
 def _surface_pressure_hpa(elev_m: float) -> float:
     """ISA surface pressure for a geometric elevation (hPa)."""
@@ -1030,6 +1071,13 @@ def fetch_meteomatics_forecast(
         logger.info("Below-ground levels at %.3f,%.3f: %s — dropped %d params",
                     lat, lon, _bg_levels, _before - len(mm_params_all))
 
+    # Skip parameters already proven unsupported here (cached from a prior
+    # bisection) — avoids re-discovering the same 404s on every page load.
+    _known_bad = set(_UNSUPPORTED_CACHE.get(
+        _unsupported_key(model_id, lat, lon), []))
+    if _known_bad:
+        mm_params_all = [p for p in mm_params_all if p not in _known_bad]
+
     batches = _chunked(mm_params_all, METEOMATICS_BATCH_SIZE)
 
     # Fire all batches in parallel
@@ -1084,14 +1132,24 @@ def fetch_meteomatics_forecast(
     _dropped_params: list = []
     _404_idx = [i for i, r in enumerate(results)
                 if r.get("_batch_error") and r.get("status") == 404]
-    if _404_idx and len(_404_idx) < len(batches):
+    if _404_idx:
+        _recovered = []
         for i in _404_idx:
-            _dropped_params.extend(batches[i])
+            _ok_payloads, _bad = _isolate_unsupported(
+                creds, validdate, lat, lon, model_id, list(batches[i]))
+            _recovered.extend(_ok_payloads)
+            _dropped_params.extend(_bad)
         results = [r for i, r in enumerate(results) if i not in _404_idx]
+        results.extend(_recovered)
+        # Remember for this site so the bisection cost is paid once.
+        if _dropped_params:
+            _k = _unsupported_key(model_id, lat, lon)
+            _UNSUPPORTED_CACHE[_k] = sorted(
+                set(_UNSUPPORTED_CACHE.get(_k, [])) | set(_dropped_params))
         logger.info(
-            "Meteomatics: %d/%d batches unavailable at %.4f,%.4f (HTTP 404) — "
-            "rendering forecast without %d parameter(s)",
-            len(_404_idx), len(batches), lat, lon, len(_dropped_params))
+            "Meteomatics: isolated %d unsupported parameter(s) at %.4f,%.4f "
+            "(%d batch 404s) — kept every other parameter",
+            len(_dropped_params), lat, lon, len(_404_idx))
 
     for r in results:
         if r.get("_batch_error"):
