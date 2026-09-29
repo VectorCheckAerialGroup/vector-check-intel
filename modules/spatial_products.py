@@ -215,8 +215,26 @@ def fetch_mix_precip_overlay(lat, lon, zoom, username, password,
     try:
         lon_span = 360.0 * width / (256.0 * (2 ** zoom))
         lat_span = lon_span * (height / width) * max(0.2, math.cos(math.radians(lat)))
-        b = (lat - lat_span / 2, lon - lon_span / 2,
-             lat + lat_span / 2, lon + lon_span / 2)
+        # Clamp the window into valid WGS84 ranges. Near the antimeridian or
+        # the poles an unclamped window runs past +/-180 lon or +/-90 lat,
+        # which is an INVALID WMS bbox — the server rejects it and the MIX
+        # pane silently fails. Observed at Suva (178.4E), Apia (171.8W),
+        # Honolulu and McMurdo. The window is SHIFTED to stay inside the
+        # valid range (preserving its span) rather than truncated, so the
+        # requested area stays the same size.
+        lat_span = min(lat_span, 180.0)
+        lon_span = min(lon_span, 360.0)
+        lat0, lat1 = lat - lat_span / 2, lat + lat_span / 2
+        lon0, lon1 = lon - lon_span / 2, lon + lon_span / 2
+        if lat0 < -90.0:
+            lat0, lat1 = -90.0, -90.0 + lat_span
+        elif lat1 > 90.0:
+            lat0, lat1 = 90.0 - lat_span, 90.0
+        if lon0 < -180.0:
+            lon0, lon1 = -180.0, -180.0 + lon_span
+        elif lon1 > 180.0:
+            lon0, lon1 = 180.0 - lon_span, 180.0
+        b = (lat0, lon0, lat1, lon1)
         # styles= is MANDATORY in WMS GetMap — omitting it makes servers
         # return an XML exception document, which downstream code was
         # treating as an image (the corrupt/stacked overlays). TIME= per
@@ -505,6 +523,19 @@ def pick_star_view(lat: float, lon: float):
     def londist(a, b):
         d = abs(a - b) % 360
         return min(d, 360 - d)
+
+    def view_angle(sub_lon):
+        """Earth-central angle between the site and the satellite's
+        sub-satellite point. Beyond ~81 deg the site is over the horizon from
+        geostationary orbit; beyond ~70 deg it sits on the extreme limb where
+        imagery is severely foreshortened. Selecting on longitude alone
+        ignored latitude entirely and assigned satellites to sites they
+        cannot see (Warsaw 93.8 deg, Nairobi 103.9 deg, Alert 82.7 deg)."""
+        d = math.pi / 180.0
+        return math.degrees(math.acos(max(-1.0, min(1.0,
+            math.cos(lat * d) * math.cos((lon - sub_lon) * d)))))
+
+    VISIBLE_LIMIT_DEG = 78.0
     # Preference: named regional sector (purpose-built view) > CONUS-class
     # wide sector > full disk from the nearest bird. A dedicated sector from
     # the farther bird beats a wide-sector edge view from the nearer one
@@ -517,6 +548,17 @@ def pick_star_view(lat: float, lon: float):
                 named = 0 if sid not in ("CONUS", "FD") else 1
                 area = (la1 - la0) * (lo1 - lo0)
                 candidates.append((named, area, d, name, cdn, sid))
+    # Reject satellites that cannot actually see this site before anything
+    # else. If none can, the caller gets sector "NONE" and renders an honest
+    # "no geostationary coverage" state instead of limb garbage.
+    _visible = [(view_angle(s[2]), s) for s in STAR_SATS
+                if view_angle(s[2]) <= VISIBLE_LIMIT_DEG]
+    if not _visible:
+        _best = min(STAR_SATS, key=lambda s: view_angle(s[2]))
+        return _best[0], _best[1], "NONE", None
+    _vis_cdns = {s[1] for _a, s in _visible}
+    candidates = [c for c in candidates if c[4] in _vis_cdns]
+
     if candidates:
         candidates.sort()
         _, _, _, name, cdn, sid = candidates[0]
@@ -526,8 +568,8 @@ def pick_star_view(lat: float, lon: float):
                     if s2 == sid:
                         return name, cdn, sid, (la0, la1, lo0, lo1)
         return name, cdn, sid, None
-    name, cdn, _slon, _secs = min(STAR_SATS, key=lambda s: londist(lon, s[2]))
-    return name, cdn, "FD", None
+    _a, _best = min(_visible, key=lambda t: t[0])
+    return _best[0], _best[1], "FD", None
 
 
 def fetch_star_frames(cdn_dir: str, sector: str, band: str, n: int = 6):
