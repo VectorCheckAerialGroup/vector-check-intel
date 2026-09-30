@@ -1,0 +1,37 @@
+# VECTOR CHECK AERIAL GROUP INC. — ARMS Streamlit configuration
+#
+# THEME IS PINNED. Without a [theme] block Streamlit follows each viewer's
+# operating-system appearance setting, so an operator on a light-mode machine
+# received a light dashboard. ARMS is a night-operations tool: the Spatial
+# panes, hypsometric elevation ramp, radar overlays and hazard colour coding
+# are all designed against a dark ground, and they lose contrast and meaning
+# on white.
+#
+# Setting base and the explicit colours here makes dark the only appearance
+# the application ever renders, on every machine, for every operator.
+
+[theme]
+base = "dark"
+
+# ARMS palette — matches the Spatial workspace and hazard shading so the
+# chrome and the imagery agree.
+primaryColor = "#E58E26"              # VCAG amber: site markers, accents
+backgroundColor = "#0B0E12"           # pane ground, matches Spatial cells
+secondaryBackgroundColor = "#161B22"  # sidebar, expanders, input fields
+textColor = "#E5E7EB"
+
+[client]
+# "minimal" removes the viewer-facing toolbar, which is where the appearance
+# selector lives. Combined with the pinned theme above, there is no route for
+# an operator to switch the dashboard to light mode mid-brief.
+#
+# NOTE: this also hides the Rerun and Clear-cache menu items. Cache clearing
+# is done from DigitalOcean (Actions -> Restart App) and is already documented
+# in the deploy procedure, so nothing operational is lost.
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[server]
+# Long briefs and the Spatial workspace keep sessions open; the default
+# timeout can drop a session mid-review.
+enableStaticServing = false
