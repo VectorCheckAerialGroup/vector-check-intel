@@ -28,8 +28,11 @@ from branca.element import Element
 
 logger = logging.getLogger("arms.spatial")
 
-_DARK_TILES = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-_DARK_ATTR = "CARTO / OSM"
+# CARTO basemaps now require an API key and return watermarked tiles without
+# one. Esri's dark canvas is keyless and already used elsewhere in ARMS.
+_DARK_TILES = ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+               "World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}")
+_DARK_ATTR = "Esri"
 GEOMET_WMS = "https://geo.weather.gc.ca/geomet"
 GIBS_WMTS = ("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/"
              "{layer}/default/{time}/GoogleMapsCompatible_Level{maxz}/{{z}}/{{y}}/{{x}}.png")
@@ -44,7 +47,7 @@ def _base_map(lat, lon, zoom, tiles="dark", minimal=False, max_zoom=20):
     )
     if tiles == "dark":
         TileLayer(_DARK_TILES, attr=_DARK_ATTR, name="Base",
-                  max_zoom=20, subdomains="abcd").add_to(m)
+                  max_zoom=16).add_to(m)
     folium.CircleMarker([lat, lon], radius=7, color="#E58E26", weight=2,
                         fill=True, fill_opacity=0.15).add_to(m)
     return m
