@@ -53,9 +53,6 @@ TILES = [
 CATALOGS = [
     ("RainViewer frame catalog (radar + IR loop)",
      "https://api.rainviewer.com/public/weather-maps.json", "radar"),
-    ("ECCC GeoMet capabilities (MIX fallback layer)",
-     "https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0"
-     "&request=GetCapabilities", "HRDPS"),
 ]
 
 # Directory listings: (label, url, substring)
@@ -66,9 +63,35 @@ LISTINGS = [
      "https://cdn.star.nesdis.noaa.gov/GOES18/ABI/CONUS/13/", ".jpg"),
 ]
 
+# WMS GetMap checks: request the EXACT layer and parameters ARMS uses and
+# require real PNG bytes back. This beats parsing GetCapabilities — that
+# document is many megabytes on GeoMet, so any substring check against a
+# truncated read reports a false failure. A GetMap either works or it does
+# not, which is the only question that matters.
+# (label, url, note)
+WMS_GETMAP = [
+    ("ECCC GeoMet HRDPS precip (MIX pane fallback)",
+     "https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0"
+     "&request=GetMap&layers=HRDPS.CONTINENTAL_PR&styles="
+     "&crs=EPSG:4326&bbox=43.0,-79.0,45.0,-76.0"
+     "&width=256&height=256&format=image/png&transparent=true",
+     "layer id HRDPS.CONTINENTAL_PR"),
+    ("ECCC GeoMet 1 km radar (Canadian composite)",
+     "https://geo.weather.gc.ca/geomet?service=WMS&version=1.3.0"
+     "&request=GetMap&layers=RADAR_1KM_RRAI&styles="
+     "&crs=EPSG:4326&bbox=43.0,-79.0,45.0,-76.0"
+     "&width=256&height=256&format=image/png&transparent=true",
+     "layer id RADAR_1KM_RRAI"),
+]
+
 # Tiles that are watermarked rather than failed are the dangerous case: HTTP
 # 200, valid PNG, useless content. Size heuristics catch the obvious ones.
+#
+# NOTE: a small radar or precip tile is NORMAL — a fully transparent PNG is
+# the correct answer when there is no echo over the requested area. Only
+# non-image content types and hard failures are treated as faults for those.
 MIN_TILE_BYTES = 200
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 results: list = []
 
@@ -123,6 +146,31 @@ def check_text(label: str, url: str, needle: str, kind: str):
         record("FAIL", label, f"unreachable: {type(e).__name__}: {e}")
 
 
+def check_getmap(label: str, url: str, note: str):
+    """A WMS server answering an invalid layer returns an XML ServiceException
+    with HTTP 200 — the exact failure that made MIX imagery silently useless
+    before the styles= parameter was added. So: verify PNG magic bytes, not
+    just the status code."""
+    try:
+        t0 = time.time()
+        req = urllib.request.Request(url, headers=UA)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = r.read()
+            ms = (time.time() - t0) * 1000
+        if body[:8] != PNG_MAGIC:
+            head = body[:120].decode("utf-8", "replace").replace("\n", " ")
+            record("FAIL", label,
+                   f"not a PNG — {note} may have changed. Response began: "
+                   f"{head!r}")
+            return
+        # Transparent is fine (no echo); we are testing the contract, not wx.
+        record("OK", label, f"valid PNG, {len(body):,} bytes, {ms:.0f} ms")
+    except urllib.error.HTTPError as e:
+        record("FAIL", label, f"HTTP {e.code} — {note} rejected by server")
+    except Exception as e:
+        record("FAIL", label, f"unreachable: {type(e).__name__}: {e}")
+
+
 def main() -> int:
     print("=" * 72)
     print("ARMS EXTERNAL ENDPOINT LIVENESS")
@@ -135,6 +183,10 @@ def main() -> int:
     print("\n-- Catalogs (drive the animation loops) --")
     for label, url, needle in CATALOGS:
         check_text(label, url, needle, "catalog")
+
+    print("\n-- WMS layers (exact layer ids ARMS requests) --")
+    for label, url, note in WMS_GETMAP:
+        check_getmap(label, url, note)
 
     print("\n-- Satellite directory listings --")
     for label, url, needle in LISTINGS:
