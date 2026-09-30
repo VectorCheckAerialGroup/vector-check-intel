@@ -150,7 +150,12 @@ _TEMPLATE = r"""
 <div class="grid" id="grid"></div>
 <script>
 const CFG = __CFG__;
-const DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+// CARTO basemaps began requiring an API key and now serve watermarked
+// "API KEY REQUIRED" tiles. Esri's dark canvas is keyless and is already the
+// source for this workspace's hillshade and transportation layers, so the
+// whole quad now depends on one fewer external account.
+const DARK = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
+const DARK_LABELS = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}";
 const GIBS = (lyr,t,mz)=>`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${lyr}/default/${t}/GoogleMapsCompatible_Level${mz}/{z}/{y}/{x}.png`;
 const GEOMET='https://geo.weather.gc.ca/geomet';
 
@@ -163,7 +168,7 @@ function cell(id,label){
 function mkmap(id,zoom,maxZoom){
   const m=L.map(id,{zoomControl:false,attributionControl:false,
                     center:[CFG.lat,CFG.lon],zoom:zoom,maxZoom:maxZoom||18});
-  L.tileLayer(DARK,{subdomains:'abcd',maxZoom:20}).addTo(m);
+  L.tileLayer(DARK,{maxZoom:16}).addTo(m);
   L.circleMarker([CFG.lat,CFG.lon],{radius:7,color:'#E58E26',weight:2,
                  fillOpacity:0.15}).addTo(m);
   return m;
@@ -344,8 +349,7 @@ L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/Worl
   {opacity:0.5,maxZoom:16}).addTo(m3);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
   {opacity:0.18,maxZoom:16}).addTo(m3);   // barely-noticeable orientation only
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
-  {subdomains:'abcd',opacity:0.85,maxZoom:20}).addTo(m3);
+L.tileLayer(DARK_LABELS,{opacity:0.9,maxZoom:16}).addTo(m3);
 // HI/LO scan: sample the viewport from one Terrarium tile, mark extremes,
 // re-normalize the ramp, redraw. Debounced on move end.
 let hiM=null,loM=null,elvLegend=null;
