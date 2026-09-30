@@ -258,3 +258,133 @@ def collect_all(lat: float, lon: float) -> dict:
     except Exception as e:
         logger.warning("diagnostics collection partial failure: %s", e)
     return out
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTICS WORKSPACE — full page, VCAG only
+# ---------------------------------------------------------------------------
+# The audit and endpoint scripts run as SUBPROCESSES, deliberately. audit.py
+# installs a stub `streamlit` module into sys.modules so it can import ARMS
+# modules headlessly; importing it in-process would clobber the live Streamlit
+# session. Subprocess isolation also means a hung or crashing check can never
+# take the dashboard down with it.
+
+def _run_script(script_name: str, timeout: int = 120) -> tuple:
+    """Runs a repo-root script and returns (returncode, combined_output)."""
+    import os
+    import subprocess
+    import sys as _sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, script_name)
+    if not os.path.exists(path):
+        return -1, (f"{script_name} not found in the repository root. "
+                    "Commit it alongside app.py to enable this check.")
+    try:
+        r = subprocess.run([_sys.executable, path], cwd=root,
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        return -1, f"{script_name} exceeded {timeout}s and was terminated."
+    except Exception as e:
+        return -1, f"{script_name} could not run: {type(e).__name__}: {e}"
+
+
+def _status_row_html(name: str, status: str, detail: str) -> str:
+    c = status_colour(status)
+    return (f'<div style="display:flex;gap:10px;align-items:baseline;'
+            f'padding:2px 0;">'
+            f'<span style="min-width:170px;color:#E5E7EB;">{name}</span>'
+            f'<span style="min-width:130px;color:{c};font-weight:600;">{status}</span>'
+            f'<span style="color:#9CA3AF;">{detail}</span></div>')
+
+
+def render_workspace(st, lat: float, lon: float):
+    """Full diagnostics page. Caller must have already checked is_admin()."""
+    st.markdown(
+        '<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:2px;">'
+        '<span style="font-size:1.05rem;font-weight:600;color:#E5E7EB;'
+        'letter-spacing:0.5px;">SYSTEM DIAGNOSTICS</span>'
+        '<span style="font-size:0.7rem;color:#6B7280;">VCAG administrator '
+        '· not visible to operators</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    tab_status, tab_audit, tab_ext = st.tabs(
+        ["Live status", "Code audit", "External endpoints"])
+
+    # ---- LIVE STATUS -------------------------------------------------------
+    with tab_status:
+        diag = collect_all(lat, lon)
+        st.caption(f"Snapshot {diag['generated']} · read-only · "
+                   "credential presence only, never values")
+        for title, rows in (("Providers", diag["providers"]),
+                            ("Configuration", diag["config"]),
+                            (f"Capabilities at {lat:.4f}, {lon:.4f}",
+                             diag["location"]),
+                            ("Runtime", diag["runtime"])):
+            if not rows:
+                continue
+            st.markdown(f"**{title}**")
+            st.markdown('<div style="font-size:0.78rem;line-height:1.6;">'
+                        + "".join(_status_row_html(*r) for r in rows)
+                        + "</div>", unsafe_allow_html=True)
+            st.markdown("")
+
+        st.markdown("---")
+        if st.button("Run live Meteomatics probe", key="diagws_probe"):
+            s, d = probe_meteomatics_live()
+            st.markdown(
+                f'<div style="font-size:0.85rem;color:{status_colour(s)};'
+                f'font-weight:600;">{s} — {d}</div>', unsafe_allow_html=True)
+        st.caption(
+            "One authenticated request, bypassing cache and circuit breaker. "
+            "429 = quota exhausted · 401/403 = credentials or subscription · "
+            "404 = parameter coverage limit on a healthy service · "
+            "timeout = network or outage."
+        )
+
+    # ---- CODE AUDIT --------------------------------------------------------
+    with tab_audit:
+        st.caption(
+            "Tiered static and contract screening of the deployed code. "
+            "Tier 0 static · Tier 1 degenerate-input contracts · Tier 2 "
+            "location logic across 24 worldwide sites. Every check exists "
+            "because a real bug reached production without it."
+        )
+        if st.button("Run code audit", key="diagws_audit"):
+            with st.spinner("Running audit…"):
+                rc, out = _run_script("audit.py", timeout=180)
+            if rc == 0:
+                st.success("Audit passed — no CRITICAL or HIGH findings.")
+            elif rc < 0:
+                st.warning(out)
+            else:
+                st.error("Audit found CRITICAL or HIGH findings — see below.")
+            if out:
+                st.code(out, language="text")
+        st.caption(
+            "Exit code is non-zero only on CRITICAL or HIGH findings, so this "
+            "same script drops straight into CI unchanged."
+        )
+
+    # ---- EXTERNAL ENDPOINTS ------------------------------------------------
+    with tab_ext:
+        st.caption(
+            "Third-party liveness. This is the only check that catches a "
+            "vendor changing terms, paths or auth while ARMS code stays "
+            "untouched — the failure mode that watermarked all four Spatial "
+            "panes with no deploy. Run weekly and before any demo."
+        )
+        if st.button("Check external endpoints", key="diagws_endpoints"):
+            with st.spinner("Contacting tile services, catalogs and listings…"):
+                rc, out = _run_script("endpoint_check.py", timeout=180)
+            if rc == 0:
+                st.success("All external endpoints reachable and serving "
+                           "expected content.")
+            elif rc < 0:
+                st.warning(out)
+            else:
+                st.error("One or more endpoints failed — a Spatial pane is "
+                         "broken or silently degraded right now.")
+            if out:
+                st.code(out, language="text")
