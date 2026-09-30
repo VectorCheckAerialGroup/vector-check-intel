@@ -1537,16 +1537,30 @@ if _workspace == "Spatial":
     _mix_uris, _mix_bounds, _mix_times = _mix_frames_cached(
         lat, lon, int(_sp_zoom), "|".join(_mix_t))
 
-    _quad = build_quad_html(
-        lat, lon, _sp_zoom, 0.8, _sat_choice,
-        station_id=_sta_id, station_product=_prod_code,
-        rv_catalog=_rv_cat, station_scans=_sta_scans,
-        star_frames=_star_frames, star_label=_star_label,
-        star_bounds=_star_bounds, star_proj=_star_proj,
-        mix_uris=_mix_uris, mix_times=_mix_times,
-        mix_bounds=_mix_bounds,
-    )
-    _components.html(_quad, height=796, scrolling=False)
+    # Any failure in quad assembly must SAY SO. Previously an exception here
+    # left the workspace blank, which is indistinguishable from "the imagery
+    # providers returned nothing" and cost a full diagnostic cycle.
+    _quad = None
+    try:
+        _quad = build_quad_html(
+            lat, lon, _sp_zoom, 0.8, _sat_choice,
+            station_id=_sta_id, station_product=_prod_code,
+            rv_catalog=_rv_cat, station_scans=_sta_scans,
+            star_frames=_star_frames, star_label=_star_label,
+            star_bounds=_star_bounds, star_proj=_star_proj,
+            mix_uris=_mix_uris, mix_times=_mix_times,
+            mix_bounds=_mix_bounds,
+        )
+    except Exception as _quad_err:
+        st.error(
+            "Spatial workspace failed to build. This is an ARMS fault, not a "
+            "provider outage — the imagery sources are checked separately in "
+            "Diagnostics → External endpoints."
+        )
+        st.exception(_quad_err)
+
+    if _quad:
+        _components.html(_quad, height=796, scrolling=False)
     st.stop()
 
 
@@ -3538,7 +3552,23 @@ else:
             mesonet_radius_km=75.0,
         )
 
-    _sc = _fetch_scorecard_cached(lat, lon, icao)
+    # A scorecard failure must announce itself. An exception here previously
+    # left the section empty, which reads as "no observations" — a very
+    # different and far less alarming statement than "the scorer crashed".
+    try:
+        _sc = _fetch_scorecard_cached(lat, lon, icao)
+    except Exception as _sc_err:
+        st.error(
+            "Model Performance scoring failed. This is an ARMS fault, not an "
+            "absence of observations — treat the scorecard as unavailable "
+            "rather than as a verdict on model skill."
+        )
+        st.exception(_sc_err)
+        _sc = {"has_data": False, "message": "Scoring unavailable (internal error)."}
+
+    if not isinstance(_sc, dict):
+        st.error(f"Model Performance returned an unexpected type: {type(_sc).__name__}")
+        _sc = {"has_data": False, "message": "Scoring unavailable."}
 
     if not _sc.get("has_data"):
         st.markdown(
