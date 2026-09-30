@@ -29,7 +29,13 @@ textColor = "#E5E7EB"
 # is done from DigitalOcean (Actions -> Restart App) and is already documented
 # in the deploy procedure, so nothing operational is lost.
 toolbarMode = "minimal"
-showErrorDetails = false
+
+# showErrorDetails is deliberately NOT disabled. Suppressing it replaces a
+# visible traceback with a blank area, which turns a diagnosable crash into
+# "the page shows nothing" — the exact situation it caused on the Spatial and
+# Model Performance sections. ARMS has a VCAG-only diagnostics workspace for
+# controlled internals; hiding errors from the operator only hides them from
+# the person trying to fix them.
 
 [server]
 # Long briefs and the Spatial workspace keep sessions open; the default
