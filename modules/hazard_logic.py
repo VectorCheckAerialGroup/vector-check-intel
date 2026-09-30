@@ -49,8 +49,6 @@ def calculate_icing_profile(h: dict, idx: int, wx_code: int) -> str:
     t_raw = _h_at(h, 'temperature_2m', idx)
     rh_raw = _h_at(h, 'relative_humidity_2m', idx)
 
-    t = float(t_raw) if t_raw is not None else 0.0
-    rh = int(rh_raw) if rh_raw is not None else 0
     wx = int(wx_code) if wx_code is not None else 0
 
     liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 68, 69, 77, 80, 81, 82]
@@ -62,6 +60,27 @@ def calculate_icing_profile(h: dict, idx: int, wx_code: int) -> str:
         return "MOD MX"
     elif wx == 48:
         return "MOD RIME"
+
+    # Present-weather codes above are self-sufficient — freezing precipitation
+    # implies icing regardless of the 2 m temperature. Everything below needs
+    # real thermodynamics, so absent data must NOT be defaulted.
+    #
+    # The previous code substituted 0.0 degC for a missing temperature, which
+    # sits exactly ON the `t <= 0` icing threshold: with any liquid-precip
+    # code that fabricated a "MOD MX" moderate icing hazard out of no data at
+    # all. In a flight-safety tool, inventing a hazard assessment from absent
+    # inputs is as dangerous as suppressing one — the operator must be told
+    # the assessment could not be made.
+    if t_raw is None:
+        return "N/A"
+    t = float(t_raw)
+
+    if t <= 0:
+        # Below freezing with no humidity reading: the rime branches below
+        # would silently read 0% RH and return a false all-clear.
+        if rh_raw is None and wx not in liquid_wx_codes and wx not in snow_wx_codes:
+            return "N/A"
+    rh = int(rh_raw) if rh_raw is not None else 0
 
     if t <= 0:
         is_wet_snow = (wx in snow_wx_codes) and (0 >= t >= -3.0)
