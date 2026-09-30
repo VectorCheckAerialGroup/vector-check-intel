@@ -1353,11 +1353,31 @@ st.sidebar.button("Force Manual Data Refresh", on_click=log_refresh_callback)
 # (Windy / Pivotal Weather style: chrome-free panes, one shared control strip).
 # Selecting it renders the quad and stops before the main dashboard body, so
 # none of the forecast fetches run — the workspace loads fast and clean.
+# Diagnostics is an administrator workspace: it exposes provider identity,
+# credential presence, code-audit output and third-party endpoint state. The
+# option is not rendered at all for operators — absence, not a locked door.
+try:
+    from modules.system_diagnostics import is_admin as _is_admin
+    _diag_available = _is_admin(st.session_state.get("active_operator"))
+except ImportError:
+    _diag_available = False
+
 _workspace = st.sidebar.radio(
     "Workspace",
-    ["Dashboard", "Spatial"],
+    ["Dashboard", "Spatial"] + (["Diagnostics"] if _diag_available else []),
     key="arms_workspace",
 )
+
+if _workspace == "Diagnostics":
+    # Re-check admin at render time rather than trusting the widget value:
+    # `arms_workspace` persists in session state, so a stale "Diagnostics"
+    # selection must not survive into a non-admin session.
+    if not _diag_available:
+        st.error("Not authorised.")
+        st.stop()
+    from modules.system_diagnostics import render_workspace as _render_diag
+    _render_diag(st, lat, lon)
+    st.stop()
 
 if _workspace == "Spatial":
     import streamlit.components.v1 as _components
@@ -3490,66 +3510,6 @@ else:
         )
 
     st.divider()
-
-    # =========================================================================
-    # SYSTEM DIAGNOSTICS — VCAG administrator only
-    # =========================================================================
-    # Exposes provider identity, credential presence and request internals,
-    # so it is gated on the administrator profile and never rendered for an
-    # operator. Every check is read-only; the live probe is explicit.
-    try:
-        from modules.system_diagnostics import (
-            is_admin, collect_all, probe_meteomatics_live, status_colour,
-        )
-        _diag_ok = True
-    except ImportError:
-        _diag_ok = False
-
-    if _diag_ok and is_admin(st.session_state.get("active_operator")):
-        with st.expander("⚙ System Diagnostics — VCAG"):
-            _diag = collect_all(lat, lon)
-            st.caption(f"Snapshot {_diag['generated']} · read-only · "
-                       "no credentials are displayed")
-
-            def _diag_table(title, rows):
-                if not rows:
-                    return
-                st.markdown(f"**{title}**")
-                _html = ['<div style="font-size:0.78rem;line-height:1.7;">']
-                for name, status, detail in rows:
-                    _c = status_colour(status)
-                    _html.append(
-                        f'<div style="display:flex;gap:10px;align-items:baseline;">'
-                        f'<span style="min-width:150px;color:#E5E7EB;">{name}</span>'
-                        f'<span style="min-width:120px;color:{_c};font-weight:600;">'
-                        f'{status}</span>'
-                        f'<span style="color:#9CA3AF;">{detail}</span></div>'
-                    )
-                _html.append("</div>")
-                st.markdown("".join(_html), unsafe_allow_html=True)
-
-            _diag_table("Providers", _diag["providers"])
-            st.markdown("")
-            _diag_table("Configuration (presence only)", _diag["config"])
-            st.markdown("")
-            _diag_table(f"Capabilities at {lat:.4f}, {lon:.4f}",
-                        _diag["location"])
-            st.markdown("")
-            _diag_table("Runtime", _diag["runtime"])
-
-            st.markdown("---")
-            if st.button("Run live Meteomatics probe", key="diag_live_probe"):
-                _st, _det = probe_meteomatics_live()
-                _c = status_colour(_st)
-                st.markdown(
-                    f'<div style="font-size:0.85rem;color:{_c};font-weight:600;">'
-                    f'{_st} — {_det}</div>', unsafe_allow_html=True)
-            st.caption(
-                "The probe issues one authenticated request, bypassing cache "
-                "and circuit breaker. 429 indicates quota exhaustion, 401/403 "
-                "a subscription or credential problem, 404 a parameter "
-                "coverage limit on an otherwise healthy service."
-            )
 
     st.divider()
 
