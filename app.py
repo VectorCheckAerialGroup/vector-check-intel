@@ -1477,7 +1477,6 @@ if _workspace == "Spatial":
         # or extreme polar latitudes). Render the honest empty state rather
         # than fetching limb imagery that would be meaningless.
         _star_frames, _star_proj = [], None
-        _star_label = f"{_star_sat} \u2014 no geostationary coverage at this location"
     elif _star_cdn in _GEOS:
         _lon0, _cx = _GEOS[_star_cdn]
         if _star_sec not in ("CONUS", "FD"):
@@ -1492,14 +1491,19 @@ if _workspace == "Spatial":
     _star_frames = ([] if _star_sec == "NONE"
                     else _star_frames_cached(_star_cdn, _star_sec,
                                              STAR_BANDS[_sat_choice]))
-    _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
-    # Meteosat-only longitudes (roughly 20E-60E: Europe/Africa/Middle East)
-    # have no NOAA-hosted geostationary coverage. Everywhere else is served
-    # by GOES-East/West or Himawari, so the old test — which flagged anything
-    # outside two hardcoded windows — wrongly labelled well-covered sites
-    # such as 85.3E (Himawari, 55 deg from sub-satellite point).
-    if 20.0 <= lon <= 60.0:
-        _star_label += " (Meteosat region — no NOAA-hosted imagery)"
+    # Label. The no-coverage case is built FIRST and returned immediately —
+    # a previous version set it and then unconditionally overwrote it with the
+    # generic form, producing "GOES-East NONE IR 13 (Meteosat region ...)".
+    if _star_sec == "NONE":
+        # Meteosat-only longitudes (roughly 20E-60E: Europe/Africa/Middle
+        # East) have no NOAA-hosted geostationary coverage; extreme polar
+        # latitudes are past the limb of every bird.
+        if 20.0 <= lon <= 60.0:
+            _star_label = "No satellite coverage — Meteosat region"
+        else:
+            _star_label = "No satellite coverage — beyond geostationary view"
+    else:
+        _star_label = f"{_star_sat} {_star_sec.upper()} {_sat_choice}"
     _sta_scans = []
     if _sta_id and _sta_cc == "us":
         _sta_scans = _ridge_scans_cached(_sta_id, _prod_code)
