@@ -1974,12 +1974,46 @@ def compute_performance_scorecard(
         mae["status"] = "OK"
         mae["composite_score"] = _composite_score(mae)
 
-        # Rolling-MAE trend — uses the station closest to the site as a
-        # representative timeseries (so the trend line is interpretable as
-        # "the model at the most-representative ground truth"). Far stations
-        # don't contribute to the rolling trend even though they contribute
-        # to the aggregated MAE — this is a deliberate choice to keep the
-        # trend visualization clean.
+        # Rolling-MAE trend.
+        #
+        # Previously this used ONLY the station closest to the site, on the
+        # reasoning that a single representative timeseries reads more
+        # cleanly. In practice that made the entire chart — all models at
+        # once — hostage to one station. If the nearest station happened to
+        # lack model history, report no wind, or sit outside the pairing
+        # tolerance, `rolling` came back None for every model and the panel
+        # fell through to "Insufficient paired observations" even while the
+        # table beside it was scoring hundreds of pairs successfully.
+        #
+        # That became the normal case once non-METAR (mesonet) stations
+        # entered the network: they are often physically closer than the
+        # METAR sites but report a narrower variable set, so the `min()` by
+        # distance started selecting a station that cannot support a trend.
+        #
+        # The trend now draws from the same evidence the table does. The
+        # closest station is still PREFERRED — it is the most representative
+        # ground truth — but if it yields nothing usable we pool pairings
+        # across every verification station rather than render an empty
+        # chart. A trend that disagrees slightly with the distance-weighted
+        # table is far more useful than no trend at all.
+        def _rolling_from(pairs):
+            if not pairs:
+                return None
+            roll = compute_rolling_mae(
+                pairs, window_hours=6, step_hours=1, span_hours=24
+            )
+            # A result with centres but every value None is not usable.
+            has_values = any(
+                any(v is not None for v in roll.get(k, []))
+                for k in ("wind_mae_kt", "dir_mae_deg", "gust_mae_kt",
+                          "temp_mae_c", "pressure_mae_hpa", "rh_mae_pct",
+                          "vis_mae_sm")
+            )
+            return roll if has_values else None
+
+        mae["rolling"] = None
+        mae["rolling_source"] = None
+
         if stations_for_verification:
             closest_sid = min(
                 stations_for_verification,
@@ -1988,14 +2022,34 @@ def compute_performance_scorecard(
             closest_history = station_hist.get(closest_sid)
             closest_obs = obs_by_station.get(closest_sid) or []
             if closest_history is not None and closest_obs:
-                pairings = compute_model_pairings(closest_history, closest_obs)
-                mae["rolling"] = compute_rolling_mae(
-                    pairings, window_hours=6, step_hours=1, span_hours=24
+                roll = _rolling_from(
+                    compute_model_pairings(closest_history, closest_obs)
                 )
-            else:
-                mae["rolling"] = None
-        else:
-            mae["rolling"] = None
+                if roll is not None:
+                    mae["rolling"] = roll
+                    mae["rolling_source"] = closest_sid
+
+            # Fallback: pool every station that has both a history and obs.
+            if mae["rolling"] is None:
+                pooled: list = []
+                used: list = []
+                for sid, _slat, _slon in stations_for_verification:
+                    hist = station_hist.get(sid)
+                    sobs = obs_by_station.get(sid) or []
+                    if hist is None or not sobs:
+                        continue
+                    p = compute_model_pairings(hist, sobs)
+                    if p:
+                        pooled.extend(p)
+                        used.append(sid)
+                if pooled:
+                    pooled.sort(key=lambda x: x["time"])
+                    roll = _rolling_from(pooled)
+                    if roll is not None:
+                        mae["rolling"] = roll
+                        mae["rolling_source"] = (
+                            f"{len(used)} stations pooled"
+                        )
 
         model_results.append(mae)
 
