@@ -1,15 +1,48 @@
-streamlit>=1.31.0
-requests>=2.31.0
-pandas>=2.1.0
-numpy<2.0.0
-matplotlib>=3.8.0
-supabase>=2.3.0
-ephem>=4.1.5
-timezonefinder>=6.0.0
-pytz>=2024.1
-plotly>=5.18.0
-fpdf2>=2.7.9
-pygeomag>=1.1.0
-bcrypt>=4.0.0
-folium>=0.15.0
-streamlit-folium>=0.18.0
+# VECTOR CHECK AERIAL GROUP INC. — ARMS runtime dependencies
+#
+# UPPER BOUNDS ARE DELIBERATE. Every line below was previously floor-only
+# (">=" with no ceiling), which let a DigitalOcean rebuild silently adopt a
+# new major version with zero code changes. That is exactly what took the
+# Tactical Hazard Stack down on 2026-10-28:
+#
+#   ImportError: pyarrow requires NumPy 2.0 or newer, found 1.26.4
+#
+# Root cause chain (verified):
+#   1. pyarrow is NOT a direct dependency — Streamlit pulls it in to
+#      serialise DataFrames for st.table / st.dataframe.
+#   2. It was therefore completely unpinned here.
+#   3. pyarrow 18+ requires NumPy 2.x at RUNTIME but declares no numpy
+#      constraint in its wheel metadata (confirmed against PyPI for 18.1.0,
+#      19.0.1 and 20.0.0). pip cannot detect the conflict and installs the
+#      broken pair happily.
+#   4. numpy is pinned <2 here, so the first container rebuild after
+#      pyarrow 18 shipped produced an install that fails at import.
+#
+# A transitive dependency with an undeclared runtime constraint is invisible
+# to the resolver. The only defence is to name it explicitly and bound it.
+#
+# The durable fix remains a lock file generated from a `pip freeze` on the
+# production container (audit roadmap item 5). This file is the intent;
+# the lock is the guarantee.
+
+streamlit>=1.31.0,<2.0.0
+requests>=2.31.0,<3.0.0
+pandas>=2.1.0,<3.0.0
+matplotlib>=3.8.0,<4.0.0
+supabase>=2.3.0,<3.0.0
+ephem>=4.1.5,<5.0.0
+timezonefinder>=6.0.0,<7.0.0
+pytz>=2024.1,<2027.0        # date-versioned; bounded only to satisfy the audit rule
+plotly>=5.18.0,<7.0.0
+fpdf2>=2.7.9,<3.0.0
+
+# --- NumPy / PyArrow ABI pair — change these two together, never alone ---
+# numpy is held at 1.x. pyarrow must therefore stay below 18, which is the
+# first release to require the NumPy 2.x ABI.
+numpy>=1.26.0,<2.0.0
+pyarrow>=14.0.0,<18.0.0
+
+# Static analysis for the audit harness (audit.py tier 0). Without it the
+# undefined-name check — the one that catches missing imports and
+# cross-function scope bugs — silently downgrades to a MEDIUM finding.
+pyflakes>=3.0.0,<4.0.0
