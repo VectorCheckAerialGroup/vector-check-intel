@@ -4057,11 +4057,38 @@ else:
                 )
                 st.plotly_chart(_fig_trend, use_container_width=True, config={"displayModeBar": False})
             else:
+                # Self-diagnosing empty state. The previous wording blamed the
+                # observation network, which was actively misleading whenever
+                # the table beside it was scoring hundreds of pairs — it sent
+                # the reader looking at the data when the fault was in the
+                # trend path. Report which models carry trend data, where it
+                # came from, and whether the selected variable is the issue.
+                _with_roll = [m["name"] for m in _sc["models"] if m.get("rolling")]
+                _sources = {
+                    m.get("rolling_source") for m in _sc["models"]
+                    if m.get("rolling_source")
+                }
+                if _with_roll:
+                    _detail = (
+                        f"{len(_with_roll)} model(s) have trend data "
+                        f"({', '.join(_with_roll[:4])}"
+                        f"{'…' if len(_with_roll) > 4 else ''}), but none "
+                        f"report <b>{_selected_var}</b> over this window. "
+                        "Try another variable."
+                    )
+                    if _sources:
+                        _detail += f" Trend source: {', '.join(sorted(_sources))}."
+                else:
+                    _detail = (
+                        "No model returned a rolling trend. The scorecard "
+                        "beside this chart is computed from a different, "
+                        "wider aggregation, so a populated table here with "
+                        "an empty chart indicates a trend-path fault rather "
+                        "than missing observations."
+                    )
                 st.markdown(
                     '<div style="font-size:0.78rem;color:#9CA3AF;line-height:1.5;padding:20px 0;">'
-                    'Insufficient paired observations to render a trend for this variable. '
-                    'This is normal in the first few hours after a fresh model run, or for '
-                    'variables not reported by the available stations.'
+                    f'{_detail}'
                     '</div>',
                     unsafe_allow_html=True,
                 )
