@@ -172,6 +172,64 @@ def tier0_banned_patterns():
     ok("banned pattern scan")
 
 
+SILENT_TRANSITIVE_DEPS = {
+    "pyarrow": "pulled in by Streamlit for DataFrame serialisation; "
+               ">=18 needs NumPy 2.x at runtime with no declared constraint",
+}
+
+
+def tier0_requirements_bounds():
+    """Every requirement needs an upper bound, and known silent-constraint
+    transitives must be pinned explicitly. A floor-only requirement lets a
+    container rebuild adopt a new major with zero code changes."""
+    path = os.path.join(ROOT, "requirements.txt")
+    if not os.path.exists(path):
+        finding(0, "MEDIUM", "requirements.txt", "not found")
+        return
+    named = set()
+    for i, raw in enumerate(open(path).read().splitlines(), 1):
+        line = raw.split("#")[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~\[]", line, 1)[0].strip().lower()
+        named.add(name)
+        if not (("<" in line) or ("==" in line) or ("~=" in line)):
+            finding(0, "MEDIUM", f"requirements.txt:{i}",
+                    f"'{name}' has no upper bound - a rebuild can adopt a "
+                    f"new major version with no code change")
+    for dep, why in SILENT_TRANSITIVE_DEPS.items():
+        if dep not in named:
+            finding(0, "HIGH", "requirements.txt",
+                    f"'{dep}' is not pinned explicitly. {why}. "
+                    f"pip cannot catch this conflict - it must be bounded here.")
+    ok("requirements upper bounds + silent transitives")
+
+
+def tier0_numpy_pyarrow_abi():
+    """numpy and pyarrow share an ABI. Verify the declared pair is coherent
+    rather than waiting for the container to fail at import."""
+    path = os.path.join(ROOT, "requirements.txt")
+    if not os.path.exists(path):
+        return
+    text = open(path).read()
+    np1 = re.search(r"numpy[^\n]*<\s*2", text)
+    pa_line = re.search(r"^pyarrow[^\n]*", text, re.M)
+    if np1:
+        if not pa_line:
+            pass  # absence handled by tier0_requirements_bounds
+        else:
+            m = re.search(r"<\s*(\d+)", pa_line.group(0))
+            if not m:
+                finding(0, "HIGH", "requirements.txt",
+                        "numpy is pinned <2 but pyarrow has no upper bound - "
+                        "pyarrow>=18 requires the NumPy 2.x ABI at runtime")
+            elif int(m.group(1)) > 18:
+                finding(0, "HIGH", "requirements.txt",
+                        f"numpy<2 paired with pyarrow<{m.group(1)} - pyarrow 18+ "
+                        f"requires NumPy 2.x at runtime; cap pyarrow at <18")
+    ok("numpy/pyarrow ABI pair coherent")
+
+
 def tier0_duplicate_defs():
     for f in PY_FILES():
         try:
@@ -458,6 +516,8 @@ def main():
     tier0_undefined_names()
     tier0_banned_patterns()
     tier0_duplicate_defs()
+    tier0_requirements_bounds()
+    tier0_numpy_pyarrow_abi()
 
     if args.tier >= 1:
         banner("TIER 1 — CONTRACT")
