@@ -177,6 +177,99 @@ SILENT_TRANSITIVE_DEPS = {
                ">=18 needs NumPy 2.x at runtime with no declared constraint",
 }
 
+# Import name -> distribution name, where they differ. An entry here means
+# "seeing `import X` satisfies a requirements line naming Y".
+IMPORT_TO_DIST = {
+    "fpdf": "fpdf2",
+    "cv2": "opencv-python",
+    "PIL": "pillow",
+    "yaml": "pyyaml",
+    "dateutil": "python-dateutil",
+    "sklearn": "scikit-learn",
+    "serial": "pyserial",
+}
+
+# Imports that are deliberately optional — guarded by try/except with a
+# working fallback, so their absence is not a packaging fault.
+OPTIONAL_IMPORTS = {
+    "tomli",   # bootstrap_climate falls back to it only if tomllib is absent
+}
+
+
+def tier0_declared_dependencies():
+    """Every third-party module imported anywhere must be in requirements.txt.
+
+    This is the check that catches a dropped dependency — the failure mode
+    where a requirements edit silently removes a package and the feature
+    that needed it dies at import with no code change to point at. It cost
+    the Spatial workspace on 2026-10-29 ("No module named 'folium'") after
+    a requirements rewrite was based on a stale copy of the file.
+
+    Deliberately scans the SOURCE rather than the installed environment:
+    the question is what the code needs, not what happens to be present in
+    whatever interpreter is running the audit.
+    """
+    path = os.path.join(ROOT, "requirements.txt")
+    if not os.path.exists(path):
+        finding(0, "MEDIUM", "requirements.txt", "not found")
+        return
+
+    declared = set()
+    for raw in open(path).read().splitlines():
+        line = raw.split("#")[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~\[]", line, 1)[0].strip().lower()
+        if name:
+            declared.add(name)
+            declared.add(name.replace("-", "_"))
+
+    stdlib = set(getattr(sys, "stdlib_module_names", set()))
+    imports: dict = {}
+    for f in PY_FILES() + [
+        os.path.basename(p) for p in glob.glob(os.path.join(ROOT, "*.py"))
+    ]:
+        fp = f if os.path.isabs(f) else os.path.join(ROOT, f)
+        if not os.path.exists(fp):
+            continue
+        try:
+            tree = ast.parse(open(fp).read())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            top = None
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    t = a.name.split(".")[0]
+                    if t not in stdlib and t != "modules":
+                        imports.setdefault(t, set()).add(os.path.basename(fp))
+                continue
+            if isinstance(node, ast.ImportFrom):
+                if node.level or not node.module:
+                    continue
+                top = node.module.split(".")[0]
+            if top and top not in stdlib and top != "modules":
+                imports.setdefault(top, set()).add(os.path.basename(fp))
+
+    missing = []
+    for mod, files in sorted(imports.items()):
+        if mod in OPTIONAL_IMPORTS:
+            continue
+        dist = IMPORT_TO_DIST.get(mod, mod).lower()
+        if (dist in declared or dist.replace("-", "_") in declared
+                or mod.lower() in declared):
+            continue
+        missing.append((mod, dist, sorted(files)))
+
+    for mod, dist, files in missing:
+        where = ", ".join(files[:3]) + ("…" if len(files) > 3 else "")
+        finding(0, "CRITICAL", "requirements.txt",
+                f"'{mod}' is imported ({where}) but no requirements line "
+                f"provides it (expected '{dist}'). The feature using it will "
+                f"fail at import on a clean container build.")
+    if not missing:
+        ok(f"all {len(imports)} third-party imports are declared")
+
 
 def tier0_requirements_bounds():
     """Every requirement needs an upper bound, and known silent-constraint
@@ -516,6 +609,7 @@ def main():
     tier0_undefined_names()
     tier0_banned_patterns()
     tier0_duplicate_defs()
+    tier0_declared_dependencies()
     tier0_requirements_bounds()
     tier0_numpy_pyarrow_abi()
 
