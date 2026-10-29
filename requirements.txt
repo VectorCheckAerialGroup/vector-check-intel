@@ -1,48 +1,89 @@
 # VECTOR CHECK AERIAL GROUP INC. — ARMS runtime dependencies
 #
-# UPPER BOUNDS ARE DELIBERATE. Every line below was previously floor-only
-# (">=" with no ceiling), which let a DigitalOcean rebuild silently adopt a
-# new major version with zero code changes. That is exactly what took the
-# Tactical Hazard Stack down on 2026-10-28:
+# Every third-party module imported anywhere in the codebase must appear
+# here. audit.py tier 0 cross-references this file against the actual
+# imports and fails on any gap — see the note at the bottom.
+#
+# ---------------------------------------------------------------------------
+# UPPER BOUNDS ARE DELIBERATE
+# ---------------------------------------------------------------------------
+# These lines were previously floor-only (">=" with no ceiling), which let a
+# DigitalOcean rebuild adopt a new major version with zero code changes.
+# That took the Tactical Hazard Stack down on 2026-10-28:
 #
 #   ImportError: pyarrow requires NumPy 2.0 or newer, found 1.26.4
 #
-# Root cause chain (verified):
-#   1. pyarrow is NOT a direct dependency — Streamlit pulls it in to
-#      serialise DataFrames for st.table / st.dataframe.
-#   2. It was therefore completely unpinned here.
-#   3. pyarrow 18+ requires NumPy 2.x at RUNTIME but declares no numpy
-#      constraint in its wheel metadata (confirmed against PyPI for 18.1.0,
-#      19.0.1 and 20.0.0). pip cannot detect the conflict and installs the
-#      broken pair happily.
-#   4. numpy is pinned <2 here, so the first container rebuild after
-#      pyarrow 18 shipped produced an install that fails at import.
+# Root cause chain (verified against PyPI wheel metadata):
+#   1. pyarrow is NOT a direct import — Streamlit pulls it in to serialise
+#      DataFrames for st.table / st.dataframe, so it was unpinned here.
+#   2. pyarrow 18+ requires the NumPy 2.x ABI at RUNTIME but declares no
+#      numpy constraint in its metadata (confirmed for 18.1.0, 19.0.1,
+#      20.0.0). pip cannot see the conflict and installs the broken pair.
+#   3. numpy is held at 1.x here, so the first rebuild after pyarrow 18
+#      shipped produced an install that fails at import.
 #
 # A transitive dependency with an undeclared runtime constraint is invisible
 # to the resolver. The only defence is to name it explicitly and bound it.
 #
-# The durable fix remains a lock file generated from a `pip freeze` on the
-# production container (audit roadmap item 5). This file is the intent;
-# the lock is the guarantee.
+# The durable fix is still a lock file from a `pip freeze` on the production
+# container (audit roadmap item 5). This file is intent; the lock is the
+# guarantee.
+# ---------------------------------------------------------------------------
 
+# --- Core app -------------------------------------------------------------
 streamlit>=1.31.0,<2.0.0
 requests>=2.31.0,<3.0.0
 pandas>=2.1.0,<3.0.0
-matplotlib>=3.8.0,<4.0.0
-supabase>=2.3.0,<3.0.0
-ephem>=4.1.5,<5.0.0
+pytz>=2024.1,<2027.0        # date-versioned; bounded to satisfy the audit rule
 timezonefinder>=6.0.0,<7.0.0
-pytz>=2024.1,<2027.0        # date-versioned; bounded only to satisfy the audit rule
-plotly>=5.18.0,<7.0.0
-fpdf2>=2.7.9,<3.0.0
 
-# --- NumPy / PyArrow ABI pair — change these two together, never alone ---
-# numpy is held at 1.x. pyarrow must therefore stay below 18, which is the
-# first release to require the NumPy 2.x ABI.
+# --- Auth -----------------------------------------------------------------
+# _verify_password() uses bcrypt for $2a$/$2b$/$2y$ hashes and fails CLOSED
+# if the import raises. Without this package every bcrypt-hashed operator
+# login is rejected, with no error surfaced to the user.
+bcrypt>=4.0.0,<5.0.0
+
+# --- Persistence ----------------------------------------------------------
+supabase>=2.3.0,<3.0.0
+
+# --- Visualisation --------------------------------------------------------
+plotly>=5.18.0,<7.0.0
+matplotlib>=3.8.0,<4.0.0
+
+# --- Spatial workspace ----------------------------------------------------
+# modules/spatial_products.py imports folium and branca at module level, and
+# app.py imports that module to reach the catalog fetchers. Dropping either
+# of these does not degrade the Spatial pane — it removes it entirely, with
+# "Spatial workspace unavailable: No module named 'folium'".
+folium>=0.15.0,<1.0.0
+branca>=0.7.0,<1.0.0
+
+# --- Physics / astronomy --------------------------------------------------
+ephem>=4.1.5,<5.0.0
+pygeomag>=1.1.0,<2.0.0      # magnetic declination, modules/geomag.py
+
+# --- Reporting ------------------------------------------------------------
+fpdf2>=2.7.9,<3.0.0         # imported as `fpdf`
+
+# --- NumPy / PyArrow ABI pair — change these two together, never alone ----
+# numpy is held at 1.x, so pyarrow must stay below 18, which is the first
+# release to require the NumPy 2.x ABI.
 numpy>=1.26.0,<2.0.0
 pyarrow>=14.0.0,<18.0.0
 
-# Static analysis for the audit harness (audit.py tier 0). Without it the
-# undefined-name check — the one that catches missing imports and
-# cross-function scope bugs — silently downgrades to a MEDIUM finding.
+# --- Tooling --------------------------------------------------------------
+# Static analysis for audit.py tier 0. Without it the undefined-name check —
+# the one that catches missing imports and cross-function scope bugs —
+# silently downgrades to a MEDIUM finding.
 pyflakes>=3.0.0,<4.0.0
+
+# ---------------------------------------------------------------------------
+# NOT REQUIRED, deliberately:
+#   tomli        — bootstrap_climate.py falls back to it only if tomllib is
+#                  missing. Python 3.11 ships tomllib, so the fallback never
+#                  fires on this container.
+#   streamlit-folium — no longer imported. The Spatial quad renders its own
+#                  Leaflet HTML through components.html; the folium/
+#                  streamlit-folium render path was removed in the quad
+#                  rewrite. folium itself is still needed (see above).
+# ---------------------------------------------------------------------------
