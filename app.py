@@ -3190,7 +3190,13 @@ if _ens.get("error"):
     st.warning(f"Model analysis unavailable: {_ens['error']}")
 else:
     # Generate the briefing text using climate context if available
-    from modules.ensemble_analysis import BlockStats, RiskWindow, ModelForecast, EnsembleBriefing
+    from modules.ensemble_analysis import (
+        BlockStats, RiskWindow, ModelForecast, EnsembleBriefing,
+        # Divergence thresholds — imported so the header states the ACTUAL
+        # numbers the block classifier uses rather than restating them by
+        # hand, which is how a legend drifts out of step with the code.
+        WIND_SPREAD_ALERT_KT, TEMP_SPREAD_WARN_C,
+    )
     _ens_blocks = [BlockStats(**{k: v for k, v in b.items()}) for b in _ens["blocks"]]
     _ens_risks = [RiskWindow(start_label=r["label"], variable=r["var"], spread=r["spread"],
                               detail=r["detail"], severity=r["severity"]) for r in _ens["risks"]]
@@ -3207,19 +3213,70 @@ else:
     _conf_colors = {"HIGH": "#4ade80", "MODERATE": "#E58E26", "LOW": "#ff6b4a"}
     _conf_clr = _conf_colors.get(_ens_brief.overall_confidence, "#9CA3AF")
 
-    # Compute the expected ensemble size: 4 globally, 6 in CONUS (HRRR + NAM added).
-    # The lat/lon check mirrors _is_conus_coverage() in ensemble_analysis.
-    _expected_ensemble_size = 6 if (21.0 <= lat <= 50.0 and -134.0 <= lon <= -60.0) else 4
+    # ---- Model count ----------------------------------------------------
+    # The denominator is what the ensemble actually DISPATCHED, not a guess.
+    # It used to be hardcoded (6 in CONUS, 4 elsewhere), which ignored the
+    # Meteomatics members and produced "8/6 models reporting" — a fraction
+    # above 1, which tells the operator nothing except that a number is wrong.
+    _attempted = (_ens.get("matrix") or {}).get("attempted_models") or []
+    _reporting = list(_ens_brief.models_used)
+    _missing = [m for m in _attempted if m not in _reporting]
 
-    # Header strip: model count and overall confidence badge — full width
+    if _missing:
+        _count_txt = (f'{len(_reporting)} of {len(_attempted)} models reporting'
+                      if _attempted else f'{len(_reporting)} models reporting')
+    else:
+        # Every model we asked for answered. A denominator would be noise.
+        _count_txt = f'{len(_reporting)} models reporting'
+
+    _missing_html = ""
+    if _missing:
+        _missing_html = (
+            f'<div style="font-size:0.68rem;color:#8A94A6;margin-top:3px;">'
+            f'No data returned from {", ".join(_missing)} — excluded from '
+            f'the comparison rather than substituted.</div>'
+        )
+
+    # ---- Agreement badge -------------------------------------------------
+    # Previously labelled "LOW CONFIDENCE", which was ambiguous in the way
+    # that matters most: it reads as confidence in the FORECAST, when what is
+    # actually measured is how closely the models agree with each other.
+    # Those are different things — models can agree and still all be wrong —
+    # and conflating them overstates what the tool knows.
+    _blk_total = len(_ens_blocks)
+    _blk_low   = sum(1 for _b in _ens_blocks if _b.confidence == "LOW")
+    _blk_mod   = sum(1 for _b in _ens_blocks if _b.confidence == "MODERATE")
+
+    if _ens_brief.overall_confidence == "LOW":
+        _agree_basis = (f'models diverge in {_blk_low} of {_blk_total} '
+                        f'12-hour blocks')
+    elif _ens_brief.overall_confidence == "MODERATE":
+        _agree_basis = (f'models diverge or drift apart in '
+                        f'{_blk_low + _blk_mod} of {_blk_total} 12-hour blocks')
+    else:
+        _agree_basis = (f'models hold together across '
+                        f'{_blk_total - _blk_low - _blk_mod} of {_blk_total} '
+                        f'12-hour blocks')
+
     st.markdown(
-        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">'
-        f'<span style="font-size:0.82rem;color:#9CA3AF;">'
-        f'{_ens_brief.model_count}/{_expected_ensemble_size} models reporting: '
-        f'<span style="color:#D1D5DB;font-weight:500;">{", ".join(_ens_brief.models_used)}</span></span>'
+        f'<div style="margin-bottom:14px;">'
+        f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
+        f'<span style="font-size:0.82rem;color:#9CA3AF;">{_count_txt}: '
+        f'<span style="color:#D1D5DB;font-weight:500;">'
+        f'{", ".join(_reporting)}</span></span>'
         f'<span style="font-size:0.72rem;color:{_conf_clr};font-weight:600;'
-        f'border:1px solid {_conf_clr};border-radius:3px;padding:3px 10px;">'
-        f'{_ens_brief.overall_confidence} CONFIDENCE</span>'
+        f'border:1px solid {_conf_clr};border-radius:3px;padding:3px 10px;'
+        f'white-space:nowrap;">MODEL AGREEMENT: '
+        f'{_ens_brief.overall_confidence}</span>'
+        f'</div>'
+        f'{_missing_html}'
+        f'<div style="font-size:0.68rem;color:#8A94A6;margin-top:4px;line-height:1.45;">'
+        f'{_agree_basis} over the 72-hour window '
+        f'(a block counts as divergent at ≥ {WIND_SPREAD_ALERT_KT} kt wind '
+        f'or ≥ {TEMP_SPREAD_WARN_C}°C temperature spread). '
+        f'This measures how closely the models track each other, not whether '
+        f'they are right — they can agree and still be wrong together.'
+        f'</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
