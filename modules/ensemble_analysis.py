@@ -125,6 +125,13 @@ MODEL_ROUTES = _build_model_routes()
 # build_model_matrix() surfaces this so the UI can explain the absence.
 _LAST_DUPLICATE_MEMBERS: list = []
 
+# Model names the most recent fetch_all_models() call actually DISPATCHED,
+# versus those that came back valid. The UI previously compared the returned
+# count against a hardcoded guess (6 in CONUS, 4 elsewhere) which ignored the
+# Meteomatics members entirely and produced nonsense like "8/6 models
+# reporting". The only honest denominator is what we actually asked for.
+_LAST_ATTEMPTED_MODELS: list = []
+
 # Approximate native horizontal grid resolution (km) for each model, used to
 # order the comparison matrix from highest-resolution (finest) to lowest.
 # Finer-resolution mesoscale models resolve terrain and convection better and
@@ -548,6 +555,9 @@ def fetch_all_models(lat: float, lon: float) -> list:
             return _fetch_model_mos(mos_station_id, display_name=name)
         return _fetch_model(name, target, lat, lon)
 
+    global _LAST_ATTEMPTED_MODELS
+    _LAST_ATTEMPTED_MODELS = sorted(active_routes.keys())
+
     results = []
     with ThreadPoolExecutor(max_workers=max(2, len(active_routes))) as ex:
         futures = {
@@ -802,6 +812,9 @@ def build_model_matrix(models: list, n_hours: int = 24,
         # [(dropped_model, identical_to), ...] — surfaced so the UI can
         # explain a missing member instead of it silently disappearing.
         "duplicate_members": list(_LAST_DUPLICATE_MEMBERS),
+        # What we dispatched, so the UI can report a real denominator and
+        # name any member that failed instead of silently showing fewer.
+        "attempted_models": list(_LAST_ATTEMPTED_MODELS),
     }
 
 
