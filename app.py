@@ -3331,6 +3331,66 @@ else:
             return (f'<div style="display:grid;grid-template-columns:{_grid};gap:1px;'
                     f'margin-bottom:1px;min-width:max-content;">')
 
+        # =====================================================================
+        # COLOUR POLICY — ONE SIGNAL ONLY: cross-model confidence
+        # =====================================================================
+        # This section answers exactly one question: do the models agree?
+        # Colour therefore encodes exactly one thing — convergence or
+        # divergence at that hour. Nothing else.
+        #
+        # Earlier versions also tinted the NUMBERS by absolute value
+        # (hazardous wind red, high RH red, low visibility red). That put two
+        # unrelated claims in one palette: a red cell meant "models disagree"
+        # while a red number meant "this value is hazardous". The operator
+        # could not tell which assertion was being made, and the two could
+        # even contradict — a confidently-forecast dangerous value showed
+        # green background with red text.
+        #
+        # Absolute-threshold judgement belongs to the Impact Matrix and the
+        # Tactical Hazard Stack, which are built for it and carry the
+        # operator's constraints. Duplicating it here diluted both.
+        #
+        #   BACKGROUND = model agreement.  Red wash = diverge, green = agree.
+        #   TEXT       = neutral. Always. It is data, not a verdict.
+        _TXT_VALUE = "#D1D5DB"   # every value, every table
+        _TXT_GLYPH = "#8A94A6"   # direction arrow — secondary to the number
+        _TXT_NULL  = "#4B5563"   # no data
+        _BG_DIVERGE = "rgba(255,107,74,0.16)"   # low confidence
+        _BG_AGREE   = "rgba(74,222,128,0.10)"   # high confidence
+        _BG_PLAIN   = "#161A1F"
+
+        # Divergence / agreement thresholds per variable.
+        #
+        # Wind (6 / 3 kt) and temp (5 / 1.5 °C) are the established ones and
+        # are unchanged. The RH and visibility thresholds below are NOT drawn
+        # from a published standard — no verification literature defines
+        # "model disagreement" for these fields. They are set by analogy:
+        # roughly a quarter of the plausible range for divergence, a tenth
+        # for agreement. Flagged as chosen, not derived. Tune freely.
+        _RH_DIVERGE,  _RH_AGREE  = 25.0, 8.0    # percent
+        _VIS_DIVERGE, _VIS_AGREE = 3.0,  1.0    # statute miles
+
+        def _spread_bg(values, diverge_at, agree_at, min_models=3):
+            """Background wash from cross-model spread at one hour.
+
+            values      — this hour's value from each model (None allowed)
+            diverge_at  — spread at or above which models are in disagreement
+            agree_at    — spread at or below which they agree tightly
+
+            Agreement requires min_models actually reporting: two models
+            agreeing is not evidence, and shading it green would overstate
+            confidence on thin data.
+            """
+            vals = [v for v in values if v is not None]
+            if len(vals) < 2:
+                return _BG_PLAIN
+            spread = max(vals) - min(vals)
+            if spread >= diverge_at:
+                return _BG_DIVERGE
+            if spread <= agree_at and len(vals) >= min_models:
+                return _BG_AGREE
+            return _BG_PLAIN
+
         # ============ WIND TABLE (arrow + speed, gust on hover via title) ====
         st.markdown(
             '<div style="font-size:0.74rem;color:#6B7280;text-transform:uppercase;'
@@ -3358,22 +3418,22 @@ else:
                 # this hour (low confidence), light green = models tightly
                 # agree (high confidence), neutral in between.
                 if _sp >= 6:
-                    _bg = "rgba(255,107,74,0.16)"      # light red — divergence
+                    _bg = _BG_DIVERGE
                 elif _sp <= 3 and _wind_counts[_hi] >= 3:
-                    _bg = "rgba(74,222,128,0.10)"      # light green — agreement
+                    _bg = _BG_AGREE
                 else:
-                    _bg = "#161A1F"
+                    _bg = _BG_PLAIN
                 if _w is None:
                     _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
                              f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
                 else:
                     _arr = _wind_arrow(_d)
                     _ttl = f"{_w:.0f} kt" + (f" G{_g:.0f}" if (_g is not None and _g >= _w + 3) else "")
-                    _w_clr = "#ff6b4a" if _w >= 25 else "#E58E26" if _w >= 15 else "#D1D5DB"
                     _cell = (f'<div title="{_ttl}" style="background:{_bg};padding:4px 2px;'
                              f'text-align:center;font-variant-numeric:tabular-nums;">'
-                             f'<span style="font-size:0.78rem;color:#7DA3C9;">{_arr}</span>'
-                             f'<span style="font-size:0.72rem;color:{_w_clr};margin-left:1px;">{_w:.0f}</span>'
+                             f'<span style="font-size:0.78rem;color:{_TXT_GLYPH};">{_arr}</span>'
+                             f'<span style="font-size:0.72rem;color:{_TXT_VALUE};'
+                             f'margin-left:1px;">{_w:.0f}</span>'
                              f'</div>')
                 _row += _cell
             _wind_html += f'{_row_open()}{_row}</div>'
@@ -3399,24 +3459,18 @@ else:
                 _tspread = _consensus.get("temp_spread", [0] * _ncol)
                 _tsp = _tspread[_hi] if _hi < len(_tspread) else 0
                 if _tsp >= 5:
-                    _bg = "rgba(255,107,74,0.16)"      # light red — divergence
+                    _bg = _BG_DIVERGE
                 elif _tsp <= 1.5 and _temp_counts[_hi] >= 3:
-                    _bg = "rgba(74,222,128,0.10)"      # light green — agreement
+                    _bg = _BG_AGREE
                 else:
-                    _bg = "#161A1F"
+                    _bg = _BG_PLAIN
                 if _t is None:
                     _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
                              f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
                 else:
-                    # Color by absolute temperature (cold blue → hot red)
-                    if _t <= 0:     _t_clr = "#7DA3C9"
-                    elif _t <= 10:  _t_clr = "#9CB8D4"
-                    elif _t <= 20:  _t_clr = "#D1D5DB"
-                    elif _t <= 28:  _t_clr = "#E58E26"
-                    else:           _t_clr = "#ff6b4a"
                     _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
-                             f'font-size:0.72rem;color:{_t_clr};font-variant-numeric:tabular-nums;">'
-                             f'{_t:.0f}</div>')
+                             f'font-size:0.72rem;color:{_TXT_VALUE};'
+                             f'font-variant-numeric:tabular-nums;">{_t:.0f}</div>')
                 _row += _cell
             _temp_html += f'{_row_open()}{_row}</div>'
         st.markdown(_scroll_open() + _temp_html + _scroll_close(), unsafe_allow_html=True)
@@ -3434,18 +3488,15 @@ else:
             _row = _model_name_cell(_mm["name"])
             for _hi in range(_ncol):
                 _r = _mm["rh"][_hi]
+                _bg = _spread_bg([_m2["rh"][_hi] for _m2 in _mtx_models],
+                                 diverge_at=_RH_DIVERGE, agree_at=_RH_AGREE)
                 if _r is None:
-                    _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
-                             f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                    _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                             f'font-size:0.7rem;color:{_TXT_NULL};">\u00b7</div>')
                 else:
-                    # High RH (fog/precip risk) amber→red; dry neutral
-                    if _r >= 95:    _r_clr = "#ff6b4a"
-                    elif _r >= 85:  _r_clr = "#E58E26"
-                    elif _r >= 60:  _r_clr = "#D1D5DB"
-                    else:           _r_clr = "#9CA3AF"
-                    _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
-                             f'font-size:0.72rem;color:{_r_clr};font-variant-numeric:tabular-nums;">'
-                             f'{_r:.0f}</div>')
+                    _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                             f'font-size:0.72rem;color:{_TXT_VALUE};'
+                             f'font-variant-numeric:tabular-nums;">{_r:.0f}</div>')
                 _row += _cell
             _rh_html += f'{_row_open()}{_row}</div>'
         st.markdown(_scroll_open() + _rh_html + _scroll_close(), unsafe_allow_html=True)
@@ -3481,33 +3532,50 @@ else:
                 _row = _model_name_cell(_mm["name"])
                 for _hi in range(_ncol):
                     _v = _mm["visibility_sm"][_hi]
+                    _bg = _spread_bg([_m2["visibility_sm"][_hi] for _m2 in _vis_models],
+                                     diverge_at=_VIS_DIVERGE, agree_at=_VIS_AGREE)
                     if _v is None:
-                        _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
-                                 f'font-size:0.7rem;color:#4B5563;">\u00b7</div>')
+                        _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                                 f'font-size:0.7rem;color:{_TXT_NULL};">\u00b7</div>')
                     else:
-                        # Aviation-relevant thresholds: <1 red, <3 amber, else ok
-                        if _v < 1.0:    _v_clr = "#ff6b4a"
-                        elif _v < 3.0:  _v_clr = "#E58E26"
-                        else:           _v_clr = "#9CA3AF"
                         _vtxt = f"{_v:.0f}" if _v >= 10 else f"{_v:.1f}"
-                        _cell = (f'<div style="background:#161A1F;padding:4px 2px;text-align:center;'
-                                 f'font-size:0.72rem;color:{_v_clr};font-variant-numeric:tabular-nums;">'
-                                 f'{_vtxt}</div>')
+                        _cell = (f'<div style="background:{_bg};padding:4px 2px;text-align:center;'
+                                 f'font-size:0.72rem;color:{_TXT_VALUE};'
+                                 f'font-variant-numeric:tabular-nums;">{_vtxt}</div>')
                     _row += _cell
                 _vis_html += f'{_row_open()}{_row}</div>'
             st.markdown(_scroll_open() + _vis_html + _scroll_close(), unsafe_allow_html=True)
 
         # Legend
         st.markdown(
-            '<div style="font-size:0.64rem;color:#6B7280;margin-top:14px;line-height:1.5;">'
-            '48-hour horizon \u2014 scroll horizontally to see later hours. Columns show '
+            '<div style="font-size:0.64rem;color:#6B7280;margin-top:14px;line-height:1.6;">'
+            '<div style="color:#9CA3AF;font-weight:600;margin-bottom:5px;">'
+            'Colour means one thing here: model confidence</div>'
+            '<div style="margin-bottom:4px;">'
+            '<span style="display:inline-block;width:11px;height:11px;vertical-align:-1px;'
+            'background:rgba(255,107,74,0.16);border:1px solid rgba(255,107,74,0.45);'
+            'border-radius:2px;margin-right:6px;"></span>'
+            '<b style="color:#9CA3AF;">Models diverge</b> \u2014 low confidence at that '
+            'hour. Wind spread \u2265 6 kt \u00b7 temp \u2265 5\u00b0C \u00b7 '
+            'RH \u2265 25% \u00b7 visibility \u2265 3 SM.'
+            '</div>'
+            '<div style="margin-bottom:4px;">'
+            '<span style="display:inline-block;width:11px;height:11px;vertical-align:-1px;'
+            'background:rgba(74,222,128,0.10);border:1px solid rgba(74,222,128,0.45);'
+            'border-radius:2px;margin-right:6px;"></span>'
+            '<b style="color:#9CA3AF;">Models agree</b> \u2014 high confidence. '
+            'Wind within 3 kt \u00b7 temp within 1.5\u00b0C \u00b7 RH within 8% \u00b7 '
+            'visibility within 1 SM, with 3+ models reporting.'
+            '</div>'
+            '<div style="color:#4B5563;margin-top:6px;">'
+            'Values are shown in neutral text on purpose. Whether a number breaches '
+            'your limits is answered by the Impact Matrix and the Tactical Hazard '
+            'Stack, which carry your configured constraints. This section answers '
+            'only whether the models agree on it. '
+            '48-hour horizon \u2014 scroll horizontally for later hours. Columns show '
             'local time over Zulu. Models are ordered finest resolution first. '
-            'Cell shading is cross-model confidence at that hour: '
-            '<span style="color:#ff6b4a;">light red = models diverge (low confidence'
-            '; wind spread \u2265 6 kt, temp \u2265 5\u00b0C)</span> \u00b7 '
-            '<span style="color:#4ade80;">light green = models tightly agree (high '
-            'confidence; wind within 3 kt, temp within 1.5\u00b0C, 3+ models reporting)</span>. '
             'Hover a wind cell for exact speed and gust.'
+            '</div>'
             '</div>',
             unsafe_allow_html=True,
         )
