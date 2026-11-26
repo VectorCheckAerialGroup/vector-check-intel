@@ -349,58 +349,44 @@ def _filter_params_for_model(pairs: list[tuple[str, str]], model: str) -> list[t
 # =============================================================================
 # WEATHER SYMBOL TRANSLATION
 # =============================================================================
-# Meteomatics weather_symbol_1h:idx returns a 1-99 code that differs from
-# WMO. ARMS' hazard logic in modules/hazard_logic.py is written against WMO
-# codes (0/45/61/95/etc.), so we translate.
+# Meteomatics weather_symbol_1h:idx is NOT a WMO code. ARMS' hazard logic in
+# modules/hazard_logic.py is written against WMO codes, so we translate.
 #
-# Meteomatics symbol catalog (from their public docs, simplified):
-#   1  = clear (day),       101 = clear (night)
-#   2  = mostly clear,      102 = mostly clear (night)
-#   3  = partly cloudy,     103 = partly cloudy (night)
-#   4  = mostly cloudy,     104 = mostly cloudy (night)
-#   5  = overcast
-#   6  = fog
-#   7  = light rain
-#   8  = rain
-#   9  = heavy rain
-#  10  = freezing rain
-#  11  = mixed precip / sleet
-#  12  = light snow
-#  13  = snow
-#  14  = heavy snow
-#  15  = rain shower
-#  16  = snow shower
-#  17  = mixed shower
-#  18  = thunderstorm
-#  19  = light hail
-#  20  = heavy hail / severe thunderstorm
-# Some implementations also include drizzle (~21), freezing drizzle (~22).
-_METEOMATICS_TO_WMO = {
-    1:   0,    # Clear
-    2:   1,    # Mostly clear → "few clouds"
-    3:   2,    # Partly cloudy
-    4:   3,    # Mostly cloudy / overcast
-    5:   3,    # Overcast
-    6:   45,   # Fog
-    7:   61,   # Light rain
-    8:   63,   # Rain
-    9:   65,   # Heavy rain
-    10:  66,   # Light freezing rain → WMO 66
-    11:  68,   # Mixed precip / sleet
-    12:  71,   # Light snow
-    13:  73,   # Snow
-    14:  75,   # Heavy snow
-    15:  80,   # Rain shower
-    16:  85,   # Snow shower
-    17:  82,   # Mixed shower (treat as heavy rain shower)
-    18:  95,   # Thunderstorm
-    19:  96,   # Thunderstorm with hail
-    20:  99,   # Severe thunderstorm
-    21:  51,   # Drizzle
-    22:  56,   # Freezing drizzle
-    # Night-equivalent codes — add 100 to day codes, map to same WMO
-    101: 0, 102: 1, 103: 2, 104: 3, 105: 3,
+# Vendor table (Meteomatics "General Weather State", checked 2026-11-25:
+# https://meteomatics.com/en/api/available-parameters/weather-parameter/general-weather-state)
+#   0 symbol could not be determined
+#   1 cloudless        2 few clouds        3 partly cloudy     4 cloudy
+#   5 rain             6 rain and snow     7 snow              8 rain showers
+#   9 snow showers    10 rain+snow showers 11 light fog (mist) 12 dense fog
+#  13 freezing rain   14 thunderstorms    15 drizzle          16 sandstorm
+# Night symbols are day + 100 (101-116). Index 0 is the same day and night.
+#
+# The previous table (2026-05-28 to 2026-11-25) was not the vendor's: 24 of
+# 33 codes were wrong (rain read as overcast, freezing rain as snow,
+# thunderstorms as heavy snow) and every night symbol above 105 read clear.
+#
+# 62 and 83 are WMO 4677 "rain and snow" codes; 31 is WMO sandstorm. They are
+# added to hazard_logic so they display and count as liquid precipitation.
+_METEOMATICS_DAY_TO_WMO = {
+    1:  0,    # cloudless
+    2:  1,    # few clouds
+    3:  2,    # partly cloudy
+    4:  3,    # cloudy
+    5:  63,   # rain
+    6:  62,   # rain and snow
+    7:  73,   # snow
+    8:  81,   # rain showers
+    9:  85,   # snow showers
+    10: 83,   # rain and snow showers
+    11: 45,   # light fog (mist)
+    12: 45,   # dense fog
+    13: 66,   # freezing rain
+    14: 95,   # thunderstorms
+    15: 53,   # drizzle
+    16: 31,   # sandstorm
 }
+_METEOMATICS_TO_WMO = dict(_METEOMATICS_DAY_TO_WMO)
+_METEOMATICS_TO_WMO.update({k + 100: v for k, v in _METEOMATICS_DAY_TO_WMO.items()})
 
 
 def _meteomatics_symbol_to_wmo(idx: Optional[float]) -> int:
