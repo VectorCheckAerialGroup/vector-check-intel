@@ -508,6 +508,42 @@ def wind_at_agl(alt_agl_m: float, anchors: list) -> float:
     return pts[-1][1]
 
 
+# Heights offered for the aloft limits (owner decision 2026-11-25). Wind aloft
+# is the RPAS envelope; turbulence and icing can be checked higher, matching
+# the Tactical Hazard Stack and Extended Trajectory rows.
+WIND_ALOFT_ALTS_FT = [100, 200, 300, 400]
+HAZARD_ALTS_FT = [100, 200, 300, 400, 1000, 2000, 3000, 4000, 5000]
+_WIND_ANCHOR_LEVELS = (1000, 975, 950, 925, 900, 850, 800, 700)
+
+
+def build_wind_anchors(get, sfc_kt: float, sfc_elevation_ft: float, k_conv: float) -> list:
+    """[(height_agl_m, kt)] for wind_at_agl(): 10 m, the model's 80/120/180 m
+    winds, and pressure levels at least 50 m above ground. `get(key)` returns
+    that hour's value or None. One builder for the Impact Matrix and both
+    dashboard tables, so what the tables show is what the matrix tests."""
+    anchors = [(10.0, sfc_kt)]
+    for hm, key in ((80.0, 'wind_speed_80m'), (120.0, 'wind_speed_120m'), (180.0, 'wind_speed_180m')):
+        v = get(key)
+        if v is not None:
+            anchors.append((hm, float(v) * k_conv))
+    for p in _WIND_ANCHOR_LEVELS:
+        uv, gh = get(f'wind_speed_{p}hPa'), get(f'geopotential_height_{p}hPa')
+        if uv is not None and gh is not None:
+            agl = float(gh) - sfc_elevation_ft / 3.28084
+            if agl >= WIND_ANCHOR_MIN_AGL_M:
+                anchors.append((agl, float(uv) * k_conv))
+    return anchors
+
+
+def gust_at(alt_ft: float, sustained_kt: float, sfc_gust_delta: float) -> float:
+    """Gust at height: sustained + the full surface gust excursion up to 400 ft
+    (owner decision 2026-11-25); attenuated above 400 ft, as the Extended
+    Trajectory table already does."""
+    if alt_ft <= 400:
+        return sustained_kt + sfc_gust_delta
+    return sustained_kt + attenuate_gust_delta(sfc_gust_delta, alt_ft)
+
+
 def hazard_lvl(h_str: str) -> float:
     """FIX: Previous ordering checked 'SEV' before 'MOD-SEV', causing MOD-SEV
     to always return 3.0. Longest-match-first ordering is now correct."""
@@ -861,6 +897,15 @@ def compute_impact_matrix(
     t_tmin:       float = -20.0,
     en_rhmax:     bool = False,
     t_rhmax:      int = 95,
+    # Altitude-aware limits (step C, 2026-11-25). t_wind is now the SURFACE
+    # limit; the aloft limit is tested over the climb from 10 m to
+    # alt_wind_aloft. Turbulence and icing take the worst value from the
+    # surface to their chosen altitude.
+    en_wind_aloft:  bool = True,
+    t_wind_aloft:   int = 30,
+    alt_wind_aloft: int = 400,
+    alt_turb:       int = 400,
+    alt_ice:        int = 400,
 ) -> tuple[list, list, list]:
     """
     Evaluates Go/No-Go status for every hour in the 72-hour forecast window.
@@ -1038,42 +1083,44 @@ def compute_impact_matrix(
                 c_base_agl = ccl_base
                 c_amt      = "BKN" if wx >= 80 else "SCT"
 
-        # --- 400ft AGL hazard evaluation ---
-        alt_msl    = sfc_elevation + 400
-        alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
-        icing_cond    = calculate_icing_profile(h_data, mat_i, wx)
+        # --- Altitude evaluation (step C, 2026-11-25) ---
+        icing_cond = calculate_icing_profile(h_data, mat_i, wx)
+        _anchors = build_wind_anchors(lambda k: _hd_at(k, mat_i), w_spd, sfc_elevation, k_conv)
+        _gdelta = max(0, gst - w_spd)
 
-        # 400 ft (122 m) wind from the model's real levels (step B1).
-        _anchors = [(10.0, w_spd)]
-        for _hm, _key in ((80.0, 'wind_speed_80m'), (120.0, 'wind_speed_120m'), (180.0, 'wind_speed_180m')):
-            _v = _hd_at(_key, mat_i)
-            if _v is not None:
-                _anchors.append((_hm, float(_v) * k_conv))
-        for _p in (1000, 975, 950, 925, 900, 850):
-            _uv = _hd_at(f'wind_speed_{_p}hPa', mat_i)
-            _gh = _hd_at(f'geopotential_height_{_p}hPa', mat_i)
-            if _uv is not None and _gh is not None:
-                _agl = float(_gh) - sfc_elevation / 3.28084
-                if _agl >= WIND_ANCHOR_MIN_AGL_M:
-                    _anchors.append((_agl, float(_uv) * k_conv))
-        s_c = wind_at_agl(400 * 0.3048, _anchors)
-
-        g_c       = s_c + max(0, gst - w_spd)
-        turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
+        # Turbulence and icing: worst level from the surface to the chosen
+        # altitude, on the same rows the dashboard tables show.
+        _turb_worst, _turb_at = "NIL", None
+        _ice_worst, _ice_at = "NIL", None
+        for _alt in HAZARD_ALTS_FT:
+            if _alt > max(alt_turb, alt_ice):
+                break
+            _s = wind_at_agl(_alt * 0.3048, _anchors)
+            _g = gust_at(_alt, _s, _gdelta)
+            _t_a, _rh_a = get_interp_thermals(sfc_elevation + _alt, profile)
+            _tb, _ic = get_turb_ice(_alt, _s, w_spd, _g, wx, is_convective, icing_cond,
+                                    _t_a, _rh_a, terrain_env, c_base_agl)
+            if _alt <= alt_turb and hazard_lvl(_tb) > hazard_lvl(_turb_worst):
+                _turb_worst, _turb_at = _tb, _alt
+            if _alt <= alt_ice and hazard_lvl(_ic) > hazard_lvl(_ice_worst):
+                _ice_worst, _ice_at = _ic, _alt
 
         # --- Go / No-Go decision ---
         # Each constraint is checked only if its enable flag is True.
-        # Operators toggle constraints in/out of effect from the UI.
-        # Wind limit is the aircraft limit, so it is tested from the surface to
-        # 400 ft AGL, not at 10 m only (step B2, 2026-11-25). s_c / g_c are the
-        # 400 ft sustained and gust used for turbulence just above.
-        max_wind_val = max(w_spd, gst)
-        _wind_where = "SFC"
-        if max(s_c, g_c) > max_wind_val:
-            max_wind_val = max(s_c, g_c)
-            _wind_where = "400FT"
-        if en_wind and max_wind_val > t_wind:
-            failures.append(f"Wind ({int(max_wind_val)}KT {_wind_where})")
+        # Surface wind limit: 10 m sustained and gust.
+        _sfc_wind = max(w_spd, gst)
+        if en_wind and _sfc_wind > t_wind:
+            failures.append(f"Wind ({int(_sfc_wind)}KT SFC)")
+        # Aloft wind limit: worst gust over the climb, every 50 ft from 50 ft
+        # to the chosen height.
+        if en_wind_aloft:
+            _wa_worst, _wa_at = 0.0, None
+            for _alt in range(50, int(alt_wind_aloft) + 1, 50):
+                _ga = gust_at(_alt, wind_at_agl(_alt * 0.3048, _anchors), _gdelta)
+                if _ga > _wa_worst:
+                    _wa_worst, _wa_at = _ga, _alt
+            if _wa_worst > t_wind_aloft:
+                failures.append(f"Wind aloft ({int(_wa_worst)}KT {_wa_at}FT)")
         # Visibility the model did not send is unverified, not assumed good
         # (step B6). The hour is not greyed: HRDPS, ECMWF and ICON never send
         # visibility, so the operator is told instead.
@@ -1082,18 +1129,15 @@ def compute_impact_matrix(
             failures.append(f"Vis ({vis_sm:.1f}SM)")
         if en_ceil and c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]:
             failures.append(f"Ceil ({c_base_agl}ft)")
-        if en_turb and hazard_lvl(turb) > hazard_lvl(t_turb):
-            failures.append(f"Turb ({turb})")
-        # Ice: worse of surface icing and 400 ft icing (step B3, 2026-11-25).
-        # calculate_icing_profile() was computed every hour but never reached
-        # the decision; get_turb_ice() accepts it and does not read it.
-        # Surface icing needs visible moisture (step B8, owner decision
-        # 2026-11-25): fog, precipitation, or cloud at or below 400 ft AGL.
-        # Clear-air RH alone (the LGT/MOD RIME RH bands) no longer fails.
+        if en_turb and hazard_lvl(_turb_worst) > hazard_lvl(t_turb):
+            failures.append(f"Turb ({_turb_worst} {_turb_at}FT)")
+        # Ice: worst of surface icing and every level up to the chosen
+        # altitude (steps B3/C). Surface icing needs visible moisture (step B8,
+        # owner decision): fog, precipitation, or cloud at or below 400 ft AGL.
         _sfc_visible_moisture = (wx in (45, 48) or wx >= 50
                                  or (c_amt != "CLR" and c_base_agl <= 400))
-        _ice_worst, _ice_where = ice, "400FT"
-        if _sfc_visible_moisture and hazard_lvl(icing_cond) > hazard_lvl(ice):
+        _ice_where = f"{_ice_at}FT"
+        if _sfc_visible_moisture and hazard_lvl(icing_cond) > hazard_lvl(_ice_worst):
             _ice_worst, _ice_where = icing_cond, "SFC"
         if en_ice and hazard_lvl(_ice_worst) > hazard_lvl(t_ice):
             failures.append(f"Ice ({_ice_worst} {_ice_where})")
@@ -1947,57 +1991,84 @@ with st.expander("Configure Operational Constraints"):
     # add a Max Temp gate for battery-temperature-sensitive RPAS work).
     st.caption("Toggle constraints on/off; disabled constraints are skipped in the Impact Matrix.")
 
-    # Row 1: existing constraints
+    # Altitude-aware limits (step C, 2026-11-25, owner decision): surface wind
+    # and wind aloft are separate limits; wind aloft, turbulence and icing are
+    # each tested over the climb from the surface to their chosen height.
+    # Settings are session-only for now (not saved to the operator profile).
+    _alt_fmt = lambda v: f"sfc to {v:,} ft AGL"
+
+    # Row 1: wind, ceiling, visibility
     r1c1, r1c2, r1c3, r1c4 = st.columns(4)
 
     with r1c1:
-        en_wind = st.toggle("Max Wind/Gust", value=st.session_state.get('en_wind', True), key='en_wind')
+        en_wind = st.toggle("Max Sfc Wind/Gust", value=st.session_state.get('en_wind', True), key='en_wind')
         t_wind = st.number_input("KT", value=int(st.session_state.get('input_wind', 30)),
                                   key='input_wind', label_visibility="collapsed",
                                   disabled=not en_wind)
     with r1c2:
+        en_wind_aloft = st.toggle("Max Wind/Gust Aloft", value=st.session_state.get('en_wind_aloft', True),
+                                  key='en_wind_aloft')
+        t_wind_aloft = st.number_input("KT aloft", value=int(st.session_state.get('input_wind_aloft', 30)),
+                                        key='input_wind_aloft', label_visibility="collapsed",
+                                        disabled=not en_wind_aloft)
+        alt_wind_aloft = st.selectbox("Wind aloft height", WIND_ALOFT_ALTS_FT,
+                                      index=WIND_ALOFT_ALTS_FT.index(400), key='alt_wind_aloft',
+                                      format_func=_alt_fmt, label_visibility="collapsed",
+                                      disabled=not en_wind_aloft)
+    with r1c3:
         en_ceil = st.toggle("Min Ceiling", value=st.session_state.get('en_ceil', True), key='en_ceil')
         t_ceil = st.number_input("ft AGL", value=int(st.session_state.get('input_ceil', 500)),
                                   step=100, key='input_ceil', label_visibility="collapsed",
                                   disabled=not en_ceil)
-    with r1c3:
+    with r1c4:
         en_vis = st.toggle("Min Visibility", value=st.session_state.get('en_vis', True), key='en_vis')
         t_vis = st.number_input("SM", value=float(st.session_state.get('input_vis', 3.0)),
                                  step=0.5, key='input_vis', label_visibility="collapsed",
                                  disabled=not en_vis)
-    with r1c4:
+
+    # Row 2: turbulence and icing with altitude, temperature limits
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+
+    with r2c1:
         en_turb = st.toggle("Max Turbulence", value=st.session_state.get('en_turb', True), key='en_turb')
         turb_opts = ["NIL", "LGT", "MOD", "SEV"]
         _turb_default = st.session_state.get('input_turb', 'MOD')
         turb_idx = turb_opts.index(_turb_default) if _turb_default in turb_opts else 2
         t_turb = st.selectbox("Turb", turb_opts, index=turb_idx, key='input_turb',
                                label_visibility="collapsed", disabled=not en_turb)
-
-    # Row 2: existing icing + new temp/RH constraints
-    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-
-    with r2c1:
+        alt_turb = st.selectbox("Turbulence height", HAZARD_ALTS_FT,
+                                index=HAZARD_ALTS_FT.index(400), key='alt_turb',
+                                format_func=_alt_fmt, label_visibility="collapsed",
+                                disabled=not en_turb)
+    with r2c2:
         en_ice = st.toggle("Max Icing", value=st.session_state.get('en_ice', True), key='en_ice')
         ice_opts = ["NIL", "LGT", "MOD", "SEV"]
         _ice_default = st.session_state.get('input_ice', 'NIL')
         ice_idx = ice_opts.index(_ice_default) if _ice_default in ice_opts else 0
         t_ice = st.selectbox("Ice", ice_opts, index=ice_idx, key='input_ice',
                               label_visibility="collapsed", disabled=not en_ice)
-    with r2c2:
+        alt_ice = st.selectbox("Icing height", HAZARD_ALTS_FT,
+                               index=HAZARD_ALTS_FT.index(400), key='alt_ice',
+                               format_func=_alt_fmt, label_visibility="collapsed",
+                               disabled=not en_ice)
+    with r2c3:
         # Max temperature: triggers when surface temp exceeds this value.
         # Default disabled — opt-in for battery-sensitive ops or hot-weather limits.
         en_tmax = st.toggle("Max Temperature", value=st.session_state.get('en_tmax', False), key='en_tmax')
         t_tmax = st.number_input("\u00b0C", value=float(st.session_state.get('input_tmax', 40.0)),
                                    step=1.0, key='input_tmax', label_visibility="collapsed",
                                    disabled=not en_tmax)
-    with r2c3:
+    with r2c4:
         # Min temperature: triggers when surface temp drops below this value.
         # Default disabled — opt-in for cold-weather battery and structural limits.
         en_tmin = st.toggle("Min Temperature", value=st.session_state.get('en_tmin', False), key='en_tmin')
         t_tmin = st.number_input("\u00b0C", value=float(st.session_state.get('input_tmin', -20.0)),
                                    step=1.0, key='input_tmin', label_visibility="collapsed",
                                    disabled=not en_tmin)
-    with r2c4:
+
+    # Row 3: humidity
+    r3c1, _r3c2, _r3c3, _r3c4 = st.columns(4)
+    with r3c1:
         # Max relative humidity: triggers when RH exceeds this value.
         # Useful for condensation / optical sensor degradation in payload-heavy missions.
         en_rhmax = st.toggle("Max Relative Humidity", value=st.session_state.get('en_rhmax', False), key='en_rhmax')
@@ -2030,6 +2101,11 @@ x_labels, color_vals, hover_texts = compute_impact_matrix(
     t_tmin        = t_tmin,
     en_rhmax      = en_rhmax,
     t_rhmax       = t_rhmax,
+    en_wind_aloft  = en_wind_aloft,
+    t_wind_aloft   = t_wind_aloft,
+    alt_wind_aloft = alt_wind_aloft,
+    alt_turb       = alt_turb,
+    alt_ice        = alt_ice,
 )
 
 tick_vals  = x_labels[::4]
@@ -2376,20 +2452,10 @@ else:
         u_h   = _agl_m
         break
 
-# Real-level anchors for the no-80/120 m case (step B1): 10 m, whatever AGL
-# winds the model has, and pressure levels at least 50 m above ground.
-_stack_anchors = [(10.0, w_spd)]
-for _hm, _key in ((80.0, 'wind_speed_80m'), (120.0, 'wind_speed_120m'), (180.0, 'wind_speed_180m')):
-    _v = _h_at(_key)
-    if _v is not None:
-        _stack_anchors.append((_hm, float(_v) * k_conv))
-for _p in (1000, 975, 950, 925, 900, 850):
-    _uv = _h_at(f'wind_speed_{_p}hPa')
-    _gh = _h_at(f'geopotential_height_{_p}hPa')
-    if _uv is not None and _gh is not None:
-        _agl = float(_gh) - sfc_elevation / 3.28084
-        if _agl >= WIND_ANCHOR_MIN_AGL_M:
-            _stack_anchors.append((_agl, float(_uv) * k_conv))
+# Real-level wind anchors, the same builder the Impact Matrix uses (step C),
+# so the Tactical Hazard Stack and Extended Trajectory show the winds the
+# matrix tests.
+_stack_anchors = build_wind_anchors(_h_at, w_spd, sfc_elevation, k_conv)
 
 icing_cond       = calculate_icing_profile(h, forecast_idx, wx)
 dt_utc_exact_iso = h["time"][forecast_idx]
@@ -2436,18 +2502,15 @@ for alt in [400, 300, 200, 100]:
     if has_agl_data:
         if alt_m <= 80:
             frac  = (alt_m - 10) / (80 - 10) if alt_m > 10 else 0
-            s_c   = w_spd + frac * (w_80 - w_spd)
             d_c_raw = sfc_dir + frac * ((d_80 - sfc_dir + 180) % 360 - 180)
         elif alt_m <= 120:
             frac  = (alt_m - 80) / (120 - 80)
-            s_c   = w_80 + frac * (w_120 - w_80)
             d_c_raw = d_80 + frac * ((d_120 - d_80 + 180) % 360 - 180)
         else:
-            s_c   = w_120
             d_c_raw = d_120
     else:
-        s_c     = wind_at_agl(alt_m, _stack_anchors)
         d_c_raw = sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt_m, u_h) / max(0.1, u_h))
+    s_c = wind_at_agl(alt_m, _stack_anchors)
 
     g_c     = s_c + gust_delta
     d_c     = format_dir(d_c_raw % 360, s_c)
@@ -2516,7 +2579,7 @@ else:
 
         frac    = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
         frac    = max(0.0, min(1.0, frac))   # never extrapolate past the data
-        s_e     = blw['s'] + frac * (abv['s'] - blw['s'])
+        s_e     = wind_at_agl(alt * 0.3048, _stack_anchors)   # same source as the matrix (step C)
         d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         d_e     = format_dir(d_e_raw, s_e)
         g_e     = s_e + attenuate_gust_delta(gust_delta, alt)
