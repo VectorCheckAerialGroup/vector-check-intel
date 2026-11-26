@@ -225,7 +225,7 @@ def evaluate_blsn(
                 drsn_trigger = True
 
     adjusted_vis = vis_sm
-    if blsn_trigger and vis_sm > 4.0:
+    if blsn_trigger and vis_sm is not None and vis_sm > 4.0:   # None = model sent no visibility
         adjusted_vis = max(1.5, vis_sm * 0.5)
 
     return blsn_trigger, drsn_trigger, adjusted_vis
