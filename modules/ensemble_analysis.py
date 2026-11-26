@@ -102,8 +102,8 @@ def _build_model_routes() -> dict:
     # HRDPS — Open-Meteo only (Meteomatics doesn't carry Canadian regional)
     routes["HRDPS"] = ("open-meteo", _om_url("gem"))
 
-    # NAM CONUS — Open-Meteo only
-    routes["NAM"] = ("open-meteo", _om_url("gfs?models=ncep_nam_conus"))
+    # NAM removed 2026-11-25: NCEP retired it on 2026-11-03 and the
+    # Open-Meteo feed now returns null for every hour.
 
     # MOS (Meteomatics Model Output Statistics) — DISABLED. Diagnostic on
     # 2026-05-29 confirmed find_station?source=mm-mos returns zero stations
@@ -140,7 +140,6 @@ _LAST_ATTEMPTED_MODELS: list = []
 # below the true mesoscale models since its effective skill is mesoscale-class.
 MODEL_RESOLUTION_KM = {
     "HRRR":   3.0,    # NOAA HRRR CONUS 3 km
-    "NAM":    3.0,    # NAM CONUS nest 3 km
     "HRDPS":  2.5,    # ECCC HRDPS 2.5 km (finest)
     "HARMONIE": 2.0,
     "AROME":  1.3,
@@ -525,7 +524,7 @@ def fetch_all_models(lat: float, lon: float) -> list:
 
     # CONUS mesoscale models — only when in CONUS coverage
     if _is_conus_coverage(lat, lon):
-        for name in ("HRRR", "NAM"):
+        for name in ("HRRR",):
             if name in MODEL_ROUTES and name != regional_name:
                 active_routes[name] = MODEL_ROUTES[name]
 
