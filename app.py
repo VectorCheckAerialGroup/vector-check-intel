@@ -473,6 +473,41 @@ def resolve_gust(w_spd: float, raw_gust) -> float:
     return w_spd
 
 
+WIND_ANCHOR_MIN_AGL_M = 50.0
+
+
+def wind_at_agl(alt_agl_m: float, anchors: list) -> float:
+    """Wind speed at alt_agl_m from real model levels.
+
+    anchors: [(height_agl_m, speed_kt), ...] with the 10 m wind first, then any
+    of the model's 80/120/180 m winds and pressure-level winds. Pressure-level
+    heights must already be ABOVE GROUND (geopotential height minus site
+    elevation) and are only passed when at least 50 m AGL.
+
+    Log-height interpolation between the two anchors that bracket the target.
+    Above the highest anchor the highest anchor's value is used: never
+    extrapolated.
+
+    Replaces (2026-11-25, step B1) a formula that used the MSL geopotential
+    height of 1000 hPa as if it were AGL. With GH(1000 hPa) near or below zero
+    (any low, any elevated site) it produced 167 kt, or -91 kt when the upper
+    wind was lighter, and it ignored the model's own 80 m wind.
+    """
+    pts = sorted((float(hm), float(kt)) for hm, kt in anchors
+                 if hm is not None and kt is not None and hm >= 10.0)
+    if not pts:
+        return None
+    if alt_agl_m <= pts[0][0]:
+        return pts[0][1]
+    for (h0, v0), (h1, v1) in zip(pts, pts[1:]):
+        if h0 <= alt_agl_m <= h1:
+            if h1 == h0:
+                return v1
+            frac = math.log(alt_agl_m / h0) / math.log(h1 / h0)
+            return v0 + (v1 - v0) * frac
+    return pts[-1][1]
+
+
 def hazard_lvl(h_str: str) -> float:
     """FIX: Previous ordering checked 'SEV' before 'MOD-SEV', causing MOD-SEV
     to always return 3.0. Longest-match-first ordering is now correct."""
@@ -484,25 +519,24 @@ def hazard_lvl(h_str: str) -> float:
     return 0
 
 
-def calc_tactical_visibility(vis_raw_m, rh: int, w_spd: float, wx: int) -> float:
-    if vis_raw_m is not None:
-        vis_sm = float(vis_raw_m) / 1609.344
-    else:
-        if rh >= 95:   vis_sm = 1.5
-        elif rh >= 90: vis_sm = 3.0
-        elif rh >= 80: vis_sm = 5.0
-        else:          vis_sm = 10.0
+def calc_tactical_visibility(vis_raw_m, rh: int = None, w_spd: float = None, wx: int = None):
+    """Model visibility in statute miles, or None when the model has none.
 
-    if wx >= 50: return vis_sm
-
-    if wx in [45, 48] and rh < 85:
-        if rh >= 75: return max(vis_sm, 4.0)
-        else:        return max(vis_sm, 7.0)
-
-    if vis_sm < 3.0 and w_spd >= 10.0 and wx not in [45, 48]: return max(vis_sm, 6.0)
-    if vis_sm < 4.0 and rh < 85:                               return max(vis_sm, 7.0)
-    if vis_sm < 3.0 and wx <= 3 and rh < 95:                   return max(vis_sm, 4.0)
-    return vis_sm
+    Changed 2026-11-25 (step B6). The old version raised low model visibility
+    it judged unexplained by moisture (0.5 SM at RH 80% displayed 7.0 SM;
+    smoke, dust, advection fog and ice fog were all lifted to VFR) and, when
+    the model sent no visibility, invented one from RH and returned it as
+    data. HRDPS, ECMWF and ICON on Open-Meteo never send visibility, so every
+    hour of those models showed an invented value. ARMS now reports what the
+    model says, and says N/A when it says nothing. rh, w_spd and wx are kept
+    in the signature for existing callers and are not used.
+    """
+    if vis_raw_m is None:
+        return None
+    try:
+        return float(vis_raw_m) / 1609.344
+    except (TypeError, ValueError):
+        return None
 
 
 def _pct_rank(value: float, pcts: dict) -> int:
@@ -933,7 +967,10 @@ def compute_impact_matrix(
         c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
         # --- Thermal Phase Gate (Precipitation Veto) ---
-        if 50 <= wx <= 59 and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
+        # Freezing drizzle (56/57) is excluded (step B4, 2026-11-25): it forms by the
+        # supercooled warm-rain process and needs no warm nose, so the gate turned
+        # it into snow and icing dropped to NIL.
+        if 50 <= wx <= 59 and wx not in (56, 57) and (c_depth >= 2500 or precip_val_top >= 0.5 or is_convective):
             frz_raw_list_mat = h_data.get('freezing_level_height')
             frz_raw_mat      = float(frz_raw_list_mat[mat_i]) if frz_raw_list_mat and len(frz_raw_list_mat) > mat_i and frz_raw_list_mat[mat_i] is not None else 0.0
             frz_agl_mat      = max(0, (frz_raw_mat * 3.28084) - sfc_elevation)
@@ -966,11 +1003,14 @@ def compute_impact_matrix(
         for layer in search_profile:
             h_agl = max(0, layer['h'] - sfc_elevation)
             if layer['spread'] <= 3.0:
-                if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+                # Step B7 (2026-11-25): every saturated layer below 1,000 ft now counts
+                # as cloud. The removed rule skipped them whenever the surface was moist,
+                # vis >= 1.5 SM and no precip, which deleted real low stratus (a deck
+                # ~100 ft AGL returned GO against a 500 ft ceiling).
                 c_base_agl = int(round(h_agl, -2))
                 c_amt      = "OVC" if layer['spread'] <= 1.0 else "BKN"
                 if c_base_agl == 0:
-                    if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    if (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
                     else:                                      c_amt      = "VV"
                 break
 
@@ -978,20 +1018,18 @@ def compute_impact_matrix(
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 5.0:
-                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                     c_base_agl = int(round(h_agl, -2))
                     c_amt      = "SCT"
-                    if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    if c_base_agl == 0 and (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
                     break
 
         if c_amt == "CLR":
             for layer in search_profile:
                 h_agl = max(0, layer['h'] - sfc_elevation)
                 if layer['spread'] <= 7.0:
-                    if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
                     c_base_agl = int(round(h_agl, -2))
                     c_amt      = "FEW"
-                    if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+                    if c_base_agl == 0 and (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
                     break
 
         if is_convective and c_amt == "CLR":
@@ -1005,20 +1043,20 @@ def compute_impact_matrix(
         alt_t, alt_rh = get_interp_thermals(alt_msl, profile)
         icing_cond    = calculate_icing_profile(h_data, mat_i, wx)
 
-        w_120_list = h_data.get('wind_speed_120m')
-        w_120_val  = w_120_list[mat_i] if w_120_list and len(w_120_list) > mat_i else None
-
-        if w_120_val is not None:
-            s_c = float(w_120_val) * k_conv
-        else:
-            u_v_list = h_data.get('wind_speed_1000hPa')
-            if u_v_list and len(u_v_list) > mat_i and u_v_list[mat_i] is not None:
-                u_v_mat = float(u_v_list[mat_i]) * k_conv
-                u_h_list = h_data.get('geopotential_height_1000hPa')
-                u_h_mat  = float(u_h_list[mat_i]) if (u_h_list and len(u_h_list) > mat_i and u_h_list[mat_i] is not None) else 110.0
-            else:
-                u_v_mat, u_h_mat = w_spd, 10.0
-            s_c = w_spd + (u_v_mat - w_spd) * (math.log(max(1, 400 * 0.3048) / 10) / math.log(max(1.1, u_h_mat / 10)))
+        # 400 ft (122 m) wind from the model's real levels (step B1).
+        _anchors = [(10.0, w_spd)]
+        for _hm, _key in ((80.0, 'wind_speed_80m'), (120.0, 'wind_speed_120m'), (180.0, 'wind_speed_180m')):
+            _v = _hd_at(_key, mat_i)
+            if _v is not None:
+                _anchors.append((_hm, float(_v) * k_conv))
+        for _p in (1000, 975, 950, 925, 900, 850):
+            _uv = _hd_at(f'wind_speed_{_p}hPa', mat_i)
+            _gh = _hd_at(f'geopotential_height_{_p}hPa', mat_i)
+            if _uv is not None and _gh is not None:
+                _agl = float(_gh) - sfc_elevation / 3.28084
+                if _agl >= WIND_ANCHOR_MIN_AGL_M:
+                    _anchors.append((_agl, float(_uv) * k_conv))
+        s_c = wind_at_agl(400 * 0.3048, _anchors)
 
         g_c       = s_c + max(0, gst - w_spd)
         turb, ice = get_turb_ice(400, s_c, w_spd, g_c, wx, is_convective, icing_cond, alt_t, alt_rh, terrain_env, c_base_agl)
@@ -1026,17 +1064,39 @@ def compute_impact_matrix(
         # --- Go / No-Go decision ---
         # Each constraint is checked only if its enable flag is True.
         # Operators toggle constraints in/out of effect from the UI.
+        # Wind limit is the aircraft limit, so it is tested from the surface to
+        # 400 ft AGL, not at 10 m only (step B2, 2026-11-25). s_c / g_c are the
+        # 400 ft sustained and gust used for turbulence just above.
         max_wind_val = max(w_spd, gst)
+        _wind_where = "SFC"
+        if max(s_c, g_c) > max_wind_val:
+            max_wind_val = max(s_c, g_c)
+            _wind_where = "400FT"
         if en_wind and max_wind_val > t_wind:
-            failures.append(f"Wind ({int(max_wind_val)}KT)")
-        if en_vis and vis_sm < t_vis:
+            failures.append(f"Wind ({int(max_wind_val)}KT {_wind_where})")
+        # Visibility the model did not send is unverified, not assumed good
+        # (step B6). The hour is not greyed: HRDPS, ECMWF and ICON never send
+        # visibility, so the operator is told instead.
+        _vis_unverified = en_vis and vis_sm is None
+        if en_vis and vis_sm is not None and vis_sm < t_vis:
             failures.append(f"Vis ({vis_sm:.1f}SM)")
         if en_ceil and c_base_agl < t_ceil and c_amt in ["BKN", "OVC", "VV"]:
             failures.append(f"Ceil ({c_base_agl}ft)")
         if en_turb and hazard_lvl(turb) > hazard_lvl(t_turb):
             failures.append(f"Turb ({turb})")
-        if en_ice and hazard_lvl(ice) > hazard_lvl(t_ice):
-            failures.append(f"Ice ({ice})")
+        # Ice: worse of surface icing and 400 ft icing (step B3, 2026-11-25).
+        # calculate_icing_profile() was computed every hour but never reached
+        # the decision; get_turb_ice() accepts it and does not read it.
+        # Surface icing needs visible moisture (step B8, owner decision
+        # 2026-11-25): fog, precipitation, or cloud at or below 400 ft AGL.
+        # Clear-air RH alone (the LGT/MOD RIME RH bands) no longer fails.
+        _sfc_visible_moisture = (wx in (45, 48) or wx >= 50
+                                 or (c_amt != "CLR" and c_base_agl <= 400))
+        _ice_worst, _ice_where = ice, "400FT"
+        if _sfc_visible_moisture and hazard_lvl(icing_cond) > hazard_lvl(ice):
+            _ice_worst, _ice_where = icing_cond, "SFC"
+        if en_ice and hazard_lvl(_ice_worst) > hazard_lvl(t_ice):
+            failures.append(f"Ice ({_ice_worst} {_ice_where})")
         # New optional constraints (opt-in via toggle)
         if en_tmax and t_temp > t_tmax:
             failures.append(f"Temp ({t_temp:.0f}\u00b0C > {t_tmax:.0f})")
@@ -1052,10 +1112,12 @@ def compute_impact_matrix(
 
         if not failures:
             color_vals.append("#1E8449")
-            hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED")
+            hover_texts.append(f"{time_str} | FLIGHT AUTHORIZED"
+                               + (" | vis N/A, unverified" if _vis_unverified else ""))
         else:
             color_vals.append("#B82E2E")
-            hover_texts.append(f"{time_str} | " + ", ".join(failures))
+            hover_texts.append(f"{time_str} | " + ", ".join(failures)
+                               + (" | vis N/A, unverified" if _vis_unverified else ""))
 
     return x_labels, color_vals, hover_texts
 
@@ -2165,7 +2227,10 @@ for layer in thermal_profile:
         ct_v = layer['h']
 c_depth = (ct_v - cb_v) if cb_v and ct_v else 0
 
-if 50 <= wx <= 59 and (c_depth >= 2500 or precip >= 0.5 or is_convective):
+# Freezing drizzle (56/57) is excluded (step B4, 2026-11-25): it forms by the
+# supercooled warm-rain process and needs no warm nose, so the gate turned
+# it into snow and icing dropped to NIL.
+if 50 <= wx <= 59 and wx not in (56, 57) and (c_depth >= 2500 or precip >= 0.5 or is_convective):
     frz_raw_sh  = float(frz_raw_list[forecast_idx]) if frz_raw_list and len(frz_raw_list) > forecast_idx and frz_raw_list[forecast_idx] is not None else 0.0
     frz_agl_sh  = max(0, (frz_raw_sh * 3.28084) - sfc_elevation)
     warm_nose   = any(layer['t'] > 0 for layer in thermal_profile[1:])
@@ -2189,11 +2254,14 @@ search_profile = thermal_profile[1:] if len(thermal_profile) > 1 else thermal_pr
 for layer in search_profile:
     h_agl = max(0, layer['h'] - sfc_elevation)
     if layer['spread'] <= 3.0:
-        if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
+        # Step B7 (2026-11-25): every saturated layer below 1,000 ft now counts
+        # as cloud. The removed rule skipped them whenever the surface was moist,
+        # vis >= 1.5 SM and no precip, which deleted real low stratus (a deck
+        # ~100 ft AGL returned GO against a 500 ft ceiling).
         c_base_agl = int(round(h_agl, -2))
         c_amt      = "OVC" if layer['spread'] <= 1.0 else "BKN"
         if c_base_agl == 0:
-            if vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+            if (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
             else:                                      c_amt      = "VV"
         break
 
@@ -2201,20 +2269,18 @@ if c_amt == "CLR":
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 5.0:
-            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt      = "SCT"
-            if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+            if c_base_agl == 0 and (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
             break
 
 if c_amt == "CLR":
     for layer in search_profile:
         h_agl = max(0, layer['h'] - sfc_elevation)
         if layer['spread'] <= 7.0:
-            if h_agl < 1000 and sfc_spread <= 3.0 and vis_sm >= 1.5 and wx < 50: continue
             c_base_agl = int(round(h_agl, -2))
             c_amt      = "FEW"
-            if c_base_agl == 0 and vis_sm > 0.62 and wx not in [45, 48]: c_base_agl = 100
+            if c_base_agl == 0 and (vis_sm is None or vis_sm > 0.62) and wx not in [45, 48]: c_base_agl = 100
             break
 
 if is_convective and c_amt == "CLR":
@@ -2247,7 +2313,7 @@ if wx in [45, 48]:
         weather_str = "HAZE (HZ)" if rh >= 75 else "CLEAR"
     else:
         weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
-elif wx < 40 and vis_sm < 7.0:
+elif wx < 40 and vis_sm is not None and vis_sm < 7.0:
     if rh >= 85:
         if vis_sm <= 0.62: weather_str = "FREEZING FOG (FZFG)" if t_temp <= 0 else "FOG (FG)"
         else:              weather_str = "MIST (BR)"
@@ -2268,7 +2334,7 @@ if blsn_trigger:
 elif drsn_trigger:
     weather_str = "DRIFTING SNOW (DRSN)"
 
-vis_disp = "> 7 SM" if vis_sm > 7 else f"{vis_sm:.1f} SM"
+vis_disp = "N/A" if vis_sm is None else ("> 7 SM" if vis_sm > 7 else f"{vis_sm:.1f} SM")
 
 
 # --- 4. EXACT AGL INJECTION FOR TACTICAL STACK ---
@@ -2290,24 +2356,40 @@ if has_agl_data:
     # These scalars anchor the extended trajectory baseline
     u_v, u_h, u_dir = w_120, 120.0, d_120
 else:
-    # Fallback: derive upper reference from pressure-level data
-    u_v_list = h.get('wind_speed_1000hPa')
-    if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
-        u_v   = float(u_v_list[forecast_idx]) * k_conv
-        _ud_raw = _h_at('wind_direction_1000hPa')
+    # Fallback: derive upper reference from the lowest pressure level that is
+    # at least 50 m above ground. u_h is height ABOVE GROUND in metres
+    # (geopotential height minus site elevation; step B1, 2026-11-25). The
+    # old code used the MSL height as AGL and defaulted a missing height to
+    # 110 m, which produced 167 kt and negative speeds in low pressure.
+    u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
+    for _p in (1000, 925):
+        _uv_raw = _h_at(f'wind_speed_{_p}hPa')
+        _uh_raw = _h_at(f'geopotential_height_{_p}hPa')
+        if _uv_raw is None or _uh_raw is None:
+            continue
+        _agl_m = float(_uh_raw) - sfc_elevation / 3.28084
+        if _agl_m < WIND_ANCHOR_MIN_AGL_M:
+            continue
+        _ud_raw = _h_at(f'wind_direction_{_p}hPa')
+        u_v   = float(_uv_raw) * k_conv
         u_dir = int(_ud_raw) if _ud_raw is not None else int(sfc_dir)
-        _uh_raw = _h_at('geopotential_height_1000hPa')
-        u_h   = float(_uh_raw) if _uh_raw is not None else 110.0
-    else:
-        u_v_list = h.get('wind_speed_925hPa')
-        if u_v_list and len(u_v_list) > forecast_idx and u_v_list[forecast_idx] is not None:
-            u_v   = float(u_v_list[forecast_idx]) * k_conv
-            _ud_raw = _h_at('wind_direction_925hPa')
-            u_dir = int(_ud_raw) if _ud_raw is not None else int(sfc_dir)
-            _uh_raw = _h_at('geopotential_height_925hPa')
-            u_h   = float(_uh_raw) if _uh_raw is not None else 760.0
-        else:
-            u_v, u_dir, u_h = w_spd, sfc_dir, 10.0
+        u_h   = _agl_m
+        break
+
+# Real-level anchors for the no-80/120 m case (step B1): 10 m, whatever AGL
+# winds the model has, and pressure levels at least 50 m above ground.
+_stack_anchors = [(10.0, w_spd)]
+for _hm, _key in ((80.0, 'wind_speed_80m'), (120.0, 'wind_speed_120m'), (180.0, 'wind_speed_180m')):
+    _v = _h_at(_key)
+    if _v is not None:
+        _stack_anchors.append((_hm, float(_v) * k_conv))
+for _p in (1000, 975, 950, 925, 900, 850):
+    _uv = _h_at(f'wind_speed_{_p}hPa')
+    _gh = _h_at(f'geopotential_height_{_p}hPa')
+    if _uv is not None and _gh is not None:
+        _agl = float(_gh) - sfc_elevation / 3.28084
+        if _agl >= WIND_ANCHOR_MIN_AGL_M:
+            _stack_anchors.append((_agl, float(_uv) * k_conv))
 
 icing_cond       = calculate_icing_profile(h, forecast_idx, wx)
 dt_utc_exact_iso = h["time"][forecast_idx]
@@ -2364,7 +2446,7 @@ for alt in [400, 300, 200, 100]:
             s_c   = w_120
             d_c_raw = d_120
     else:
-        s_c     = w_spd + (u_v - w_spd) * (math.log(max(1, alt_m) / 10) / math.log(max(1.1, u_h / 10)))
+        s_c     = wind_at_agl(alt_m, _stack_anchors)
         d_c_raw = sfc_dir + ((u_dir - sfc_dir + 180) % 360 - 180) * (min(alt_m, u_h) / max(0.1, u_h))
 
     g_c     = s_c + gust_delta
@@ -2391,7 +2473,11 @@ df_tactical = pd.DataFrame(stack_tactical).set_index("Alt (AGL)")
 st.table(df_tactical)
 
 st.subheader("Extended Trajectory (1,000-5,000ft AGL)")
-p_levels_traj = [1000, 925, 850, 700]
+# Heights are converted to feet ABOVE GROUND and levels under 50 m AGL are
+# dropped (step B5, 2026-11-25). Before, MSL geopotential heights were matched
+# against AGL row labels, so at elevated sites every row was interpolated from
+# levels under the terrain (Banff: 7 kt shown at 5,000 ft AGL, 51 kt real).
+p_levels_traj = [1000, 975, 950, 925, 900, 850, 800, 700, 600]
 
 p_profile = []
 for p in p_levels_traj:
@@ -2401,7 +2487,9 @@ for p in p_levels_traj:
     if ws_list and wd_list and gh_list and len(ws_list) > forecast_idx:
         ws, wd, gh = ws_list[forecast_idx], wd_list[forecast_idx], gh_list[forecast_idx]
         if ws is not None and wd is not None and gh is not None:
-            p_profile.append({'h': float(gh) * 3.28, 's': float(ws) * k_conv, 'd': int(wd)})
+            _h_agl_ft = float(gh) * 3.28084 - sfc_elevation
+            if _h_agl_ft >= WIND_ANCHOR_MIN_AGL_M * 3.28084:
+                p_profile.append({'h': _h_agl_ft, 's': float(ws) * k_conv, 'd': int(wd)})
 
 p_profile  = sorted(p_profile, key=lambda x: x['h'])
 stack_ext  = []
@@ -2419,7 +2507,7 @@ if not p_profile:
         })
 else:
     for alt in [5000, 4000, 3000, 2000, 1000]:
-        pts = [{'h': u_h * 3.28, 's': u_v, 'd': u_dir}] + p_profile
+        pts = sorted([{'h': u_h * 3.28084, 's': u_v, 'd': u_dir}] + p_profile, key=lambda x: x['h'])
         blw, abv = pts[0], pts[-1]
         for p_i in range(len(pts) - 1):        # FIX: renamed loop var from i → p_i
             if pts[p_i]['h'] <= alt <= pts[p_i + 1]['h']:
@@ -2427,6 +2515,7 @@ else:
                 break
 
         frac    = (alt - blw['h']) / (abv['h'] - blw['h']) if abv['h'] != blw['h'] else 0
+        frac    = max(0.0, min(1.0, frac))   # never extrapolate past the data
         s_e     = blw['s'] + frac * (abv['s'] - blw['s'])
         d_e_raw = (blw['d'] + ((abv['d'] - blw['d'] + 180) % 360 - 180) * frac) % 360
         d_e     = format_dir(d_e_raw, s_e)
