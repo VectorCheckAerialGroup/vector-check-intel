@@ -1250,14 +1250,9 @@ _register_model(
     in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
 )
 
-# NAM CONUS — Open-Meteo only (Meteomatics doesn't carry it)
-_register_model(
-    "NAM (CONUS 3km)",
-    primary=("open-meteo", _om_url("gfs?models=ncep_nam_conus")),
-    fallback=None,
-    run_id="nam",
-    in_coverage=_in_bounds(_HRRR_NAM_BOUNDS),
-)
+# NAM removed 2026-11-25: NCEP retired NAM on 2026-11-03 (successor RRFS).
+# Open-Meteo's NAM feed stopped updating and now returns null for every hour,
+# which the Impact Matrix rendered as FLIGHT AUTHORIZED.
 
 # ICON Global — Open-Meteo only (DWD ICON not in current Meteomatics subscription)
 _register_model(
@@ -1288,7 +1283,6 @@ _priority = [
                                         # emergency substitution covers outages
     "HRDPS (Canada 2.5km)",             # Canada regional
     "HRRR (CONUS 3km)",                 # CONUS rapid update
-    "NAM (CONUS 3km)",                  # CONUS longer horizon
     "ICON-EU (Europe 7km)",             # Europe regional
     "ECMWF IFS (Global 9km)",           # global high-quality
     "ECMWF AIFS (AI model)",            # global AI
