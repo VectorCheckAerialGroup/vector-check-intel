@@ -172,8 +172,8 @@ def check_location_capabilities(lat: float, lon: float) -> list:
                      else "outside 40-75N / 145-50W"))
         rows.append(("CONUS mesoscale",
                      STATUS_OK if _is_conus_coverage(lat, lon) else STATUS_OFF,
-                     "HRRR + NAM available" if _is_conus_coverage(lat, lon)
-                     else "HRRR/NAM out of domain"))
+                     "HRRR available" if _is_conus_coverage(lat, lon)
+                     else "HRRR out of domain"))
     except Exception as e:
         rows.append(("Model coverage", STATUS_UNKNOWN, str(e)))
 
