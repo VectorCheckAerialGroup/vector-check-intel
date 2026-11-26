@@ -833,7 +833,8 @@ def compute_impact_matrix(
 
     Returns:
         x_labels    — bar chart x-axis labels (e.g. "T12", "T13" …)
-        color_vals  — "#1E8449" (Go) or "#B82E2E" (No-Go) per slot
+        color_vals  — "#1E8449" (Go), "#B82E2E" (No-Go) or "#4B5563"
+                      (No data: wind, temperature or RH missing) per slot
         hover_texts — human-readable status string per slot
     """
     local_tz_mat = pytz.timezone(tz_str) if tz_str else timezone.utc
@@ -871,6 +872,22 @@ def compute_impact_matrix(
         t_temp_raw = _hd_at('temperature_2m', mat_i)
         t_temp     = float(t_temp_raw) if t_temp_raw is not None else 0.0
         rh_raw_mat = _hd_at('relative_humidity_2m', mat_i)
+
+        # --- NO DATA gate (step 2, 2026-11-25) ---
+        # Missing core inputs used to default to 0 kt wind, 0 C and 0% RH,
+        # and the hour rendered green. Past a model's horizon (HRRR after
+        # hour 48) every field is null, so those hours read FLIGHT AUTHORIZED
+        # on no data at all. An hour without wind, temperature or humidity
+        # cannot be assessed: show it grey and say what is missing.
+        _missing = [name for name, val in (("wind", w_raw), ("temp", t_temp_raw),
+                                           ("RH", rh_raw_mat)) if val is None]
+        if _missing:
+            _dt_nd = datetime.fromisoformat(h_data["time"][mat_i]).replace(tzinfo=timezone.utc).astimezone(local_tz_mat)
+            x_labels.append(f"T{mat_i}")
+            color_vals.append("#4B5563")
+            hover_texts.append(f"{_dt_nd.strftime('%H:%M')} | NO DATA (missing: {', '.join(_missing)})")
+            continue
+
         rh_v       = int(rh_raw_mat) if rh_raw_mat is not None else 0
         td_mat     = calc_td(t_temp, rh_v)
         sfc_spread = t_temp - td_mat
