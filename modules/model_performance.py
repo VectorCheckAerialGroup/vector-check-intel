@@ -1800,7 +1800,6 @@ def compute_performance_scorecard(
         ("GFS",   MODEL_ENDPOINTS["GFS"],   True),
         ("ECMWF", MODEL_ENDPOINTS["ECMWF"], True),
         ("ICON",  MODEL_ENDPOINTS["ICON"],  True),
-        ("NAM",   MODEL_ENDPOINTS["NAM"],   in_conus),
         ("HRRR",  MODEL_ENDPOINTS["HRRR"],  in_conus),
     ]
     if _has_regional:
