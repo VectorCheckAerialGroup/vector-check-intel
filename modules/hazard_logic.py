@@ -14,16 +14,18 @@ def get_weather_element(wx_code: int, wind_spd: float) -> str:
     """
     wx_map = {
         0: "NIL", 1: "NIL", 2: "NIL", 3: "NIL",
+        31: "Sandstorm",
         45: "Fog", 48: "Freezing Fog",
         51: "Light Drizzle", 53: "Drizzle", 55: "Heavy Drizzle",
         56: "Freezing Drizzle", 57: "Heavy Freezing Drizzle",
-        61: "Light Rain", 63: "Rain", 65: "Heavy Rain",
+        61: "Light Rain", 62: "Rain and Snow", 63: "Rain", 65: "Heavy Rain",
         66: "Light Freezing Rain", 67: "Heavy Freezing Rain",
         # --- ARMS Synthetic Codes (Thermal Phase Gate) ---
         68: "Light Freezing Rain (Transition Zone)",
         69: "Heavy Freezing Rain (Transition Zone)",
         71: "Light Snow", 73: "Snow", 75: "Heavy Snow", 77: "Snow Grains",
         80: "Light Rain Showers", 81: "Rain Showers", 82: "Heavy Rain Showers",
+        83: "Rain and Snow Showers",
         85: "Light Snow Showers", 86: "Heavy Snow Showers",
         95: "Thunderstorms", 96: "Thunderstorms with Hail", 99: "Severe Thunderstorms",
     }
@@ -51,7 +53,7 @@ def calculate_icing_profile(h: dict, idx: int, wx_code: int) -> str:
 
     wx = int(wx_code) if wx_code is not None else 0
 
-    liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 68, 69, 77, 80, 81, 82]
+    liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 62, 63, 65, 66, 67, 68, 69, 77, 80, 81, 82, 83]
     snow_wx_codes = [71, 73, 75, 85, 86]
 
     if wx in [66, 67, 68, 69, 95, 96, 99]:
@@ -179,7 +181,7 @@ def get_turb_ice(
         else:
             in_cloud = alt >= cloud_base_agl
 
-            liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 68, 69, 77, 80, 81, 82]
+            liquid_wx_codes = [45, 48, 51, 53, 55, 56, 57, 61, 62, 63, 65, 66, 67, 68, 69, 77, 80, 81, 82, 83]
             snow_wx_codes = [71, 73, 75, 85, 86]
 
             has_liquid_precip = wx_val in liquid_wx_codes
