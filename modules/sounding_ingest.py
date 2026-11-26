@@ -51,7 +51,7 @@ logger = logging.getLogger("arms.sounding")
 
 # Models scored. Matches the surface scorecard model set so a sounding
 # verification slots cleanly into the existing Model Performance page.
-SOUNDING_MODELS = ["HRDPS", "GFS", "ECMWF", "ICON", "NAM", "HRRR", "MIX", "AIFS"]
+SOUNDING_MODELS = ["HRDPS", "GFS", "ECMWF", "ICON", "HRRR", "MIX", "AIFS"]   # NAM retired 2026-11-03
 
 # Default vertical bin size (feet AGL). 50 ft balances resolution against
 # having enough drone samples per bin to form a stable mean. A typical
@@ -637,7 +637,14 @@ def _build_open_meteo_column(model_slug: str, lat: float, lon: float,
     suffix = (f"latitude={lat:.4f}&longitude={lon:.4f}&hourly={hourly}"
               f"&wind_speed_unit=kn&start_date={date_str}&end_date={date_str}"
               f"&timezone=UTC")
-    url = build_url(model_slug, suffix)
+    # Callers pass the full endpoint URL from ensemble_analysis.MODEL_ROUTES
+    # (already carrying any apikey). build_url() expects a bare slug, so
+    # passing a URL produced ".../v1/https://.../v1/gfs" and every Open-Meteo
+    # column 404'd (fixed 2026-11-25). Accept both forms.
+    if model_slug.startswith(("http://", "https://")):
+        url = f"{model_slug}{'&' if '?' in model_slug else '?'}{suffix}"
+    else:
+        url = build_url(model_slug, suffix)
 
     try:
         payload = fetch_json(url, timeout=20, retries=2)
@@ -781,7 +788,7 @@ def fetch_all_model_columns(lat: float, lon: float, launch_time: datetime,
             continue
         source, target = route
         # CONUS-only models are skipped outside CONUS coverage
-        if name in ("HRRR", "NAM") and not in_conus:
+        if name == "HRRR" and not in_conus:
             continue
         if source == "meteomatics":
             plan.append((name, lambda t=target: _build_meteomatics_column(t, lat, lon, launch_time)))
